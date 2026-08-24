@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "DSH Desktop",
+  "productName": "DSH-Desktop",
   "mainBinaryName": "dsh-desktop",
   "version": "0.1.0",
   "identifier": "com.dshextra.dsh-desktop",
