@@ -1,0 +1,8 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "仅本地加载页获得事件权限；Harness 远程页面不授任何权限（IPC 零授权安全边界）",
+  "local": true,
+  "windows": ["main"],
+  "permissions": ["core:default"]
+}

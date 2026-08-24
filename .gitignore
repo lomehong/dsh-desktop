@@ -1,0 +1,4 @@
+/target
+node_modules/
+*.log
+src-tauri/gen/schemas/
