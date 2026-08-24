@@ -21,10 +21,44 @@ fn same_origin(u: &str, origin: &str) -> bool {
     rest.is_empty() || rest.starts_with('/') || rest.starts_with('?') || rest.starts_with('#')
 }
 
+/// 无边框窗口顶栏（decorum 悬浮按钮区）高度。Harness 页整体下移让出顶栏：
+/// 用 body transform 而非 html padding——transform 会把 fixed/absolute 定位的
+/// overlay（右侧插件按钮簇、机器人状态栏等）一并下移，padding 移不动它们；
+/// decorum 悬浮条自身反向平移回窗口顶部；body 背景镜像到 html 防止顶栏露白。
+/// transform 的溢出贡献会让视口出现滚动条，dsh 为全高布局，html overflow 收紧。
+const TITLEBAR_INSET_CSS: &str = r#"
+(function () {
+  if (location.protocol !== 'http:' || location.hostname !== '127.0.0.1' || location.port === '') return;
+  var INSET = 40;
+  var apply = function () {
+    var b = document.body;
+    if (!b) return;
+    var de = document.documentElement;
+    de.style.height = '100%';
+    de.style.overflow = 'hidden';
+    var bg = getComputedStyle(b).backgroundColor;
+    if (bg && bg !== 'rgba(0, 0, 0, 0)') de.style.backgroundColor = bg;
+    b.style.margin = '0';
+    b.style.height = 'calc(100% - ' + INSET + 'px)';
+    b.style.transform = 'translateY(' + INSET + 'px)';
+    var s = document.createElement('style');
+    s.textContent = '[data-tauri-decorum-tb]{transform:translateY(-' + INSET + 'px) !important}';
+    (document.head || de).appendChild(s);
+  };
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', apply);
+  } else {
+    apply();
+  }
+})();
+"#;
+
 /// 创建主窗口（程序化创建以挂导航守卫；配置文件中 windows 留空）。
+/// 无边框：decorum 覆盖式标题栏（Windows 悬浮原生风格按钮；macOS Overlay 红绿灯），
+/// Harness 页面经 TITLEBAR_INSET_CSS 下移，不被悬浮条遮挡。
 pub fn create_main_window(app: &tauri::AppHandle) -> tauri::Result<()> {
     let handle = app.clone();
-    tauri::WebviewWindowBuilder::new(
+    let mut builder = tauri::WebviewWindowBuilder::new(
         app,
         "main",
         tauri::WebviewUrl::App("index.html".into()),
@@ -32,30 +66,46 @@ pub fn create_main_window(app: &tauri::AppHandle) -> tauri::Result<()> {
     .title("DSH Desktop")
     .inner_size(1280.0, 800.0)
     .min_inner_size(980.0, 640.0)
-    .center()
-    .on_navigation(move |url| {
-        let u = url.as_str().to_string();
-        if is_local_url(&u) {
-            return true;
-        }
-        let allowed = handle
-            .state::<crate::AppState>()
-            .origin
-            .lock()
-            .unwrap()
-            .clone();
-        if let Some(origin) = allowed {
-            if same_origin(&u, &origin) {
+    .center();
+    // Windows/Linux：创建期即去掉原生边框（decorum 的运行时 set_decorations 在程序化
+    // 建窗场景下不生效，原生标题栏会与自定义按钮并存）；macOS 走 Overlay 红绿灯路线。
+    #[cfg(not(target_os = "macos"))]
+    {
+        builder = builder.decorations(false);
+    }
+    #[cfg(target_os = "macos")]
+    {
+        builder = builder
+            .title_bar_style(tauri::TitleBarStyle::Overlay)
+            .hidden_title(true);
+    }
+    let window = builder
+        .initialization_script(TITLEBAR_INSET_CSS)
+        .on_navigation(move |url| {
+            let u = url.as_str().to_string();
+            if is_local_url(&u) {
                 return true;
             }
-        }
-        // 外部链接（含旧端口的失效地址）交给系统浏览器，绝不留在壳内
-        if url.scheme() == "http" || url.scheme() == "https" {
-            open_external(&u);
-        }
-        false
-    })
-    .build()?;
+            let allowed = handle
+                .state::<crate::AppState>()
+                .origin
+                .lock()
+                .unwrap()
+                .clone();
+            if let Some(origin) = allowed {
+                if same_origin(&u, &origin) {
+                    return true;
+                }
+            }
+            // 外部链接（含旧端口的失效地址）交给系统浏览器，绝不留在壳内
+            if url.scheme() == "http" || url.scheme() == "https" {
+                open_external(&u);
+            }
+            false
+        })
+        .build()?;
+    use tauri_plugin_decorum::WebviewWindowExt;
+    window.create_overlay_titlebar()?;
     Ok(())
 }
 

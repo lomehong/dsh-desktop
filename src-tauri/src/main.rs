@@ -101,6 +101,7 @@ fn main() {
         ))
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_decorum::init())
         .manage(AppState {
             child: Mutex::new(None),
             restarts: Mutex::new(0),
