@@ -1,0 +1,84 @@
+name: Windows CI
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+
+jobs:
+  build-and-smoke:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Build (debug)
+        run: cargo build --manifest-path src-tauri/Cargo.toml
+
+      - name: Install dsh runtime for smoke test
+        shell: pwsh
+        run: |
+          npm install -g "@deepseek-ai/dsh@0.1.1-rc.2"
+          dsh --version
+
+      - name: Smoke test (boot → ready → graceful exit, no orphans)
+        shell: pwsh
+        env:
+          DSH_HOME: ${{ runner.temp }}\dsh-smoke-home
+        run: |
+          New-Item -ItemType Directory -Force -Path $env:DSH_HOME | Out-Null
+          $exe = "src-tauri\target\debug\dsh-desktop.exe"
+          $p = Start-Process -FilePath $exe -ArgumentList "--quit-after-secs","240" -PassThru -Wait
+          if ($p.ExitCode -ne 0) { throw "smoke: app exit code $($p.ExitCode)" }
+          $log = Join-Path $env:LOCALAPPDATA "dsh-desktop\dsh-desktop.log"
+          if (-not (Select-String -Path $log -Pattern "dsh web: http://127\.0\.0\.1:\d+" -Quiet)) {
+            throw "smoke: no URL line in log"
+          }
+          $orphan = Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue |
+            Where-Object { $_.LocalAddress -eq "127.0.0.1" }
+          Write-Host "smoke OK"
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build-and-smoke
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - msbuild_target: x86_64-pc-windows-msvc
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.msbuild_target }}
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Build NSIS installer + updater artifacts
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: "DSH Desktop ${{ github.ref_name }}"
+          releaseDraft: true
+          prerelease: false
+          args: --target ${{ matrix.msbuild_target }}

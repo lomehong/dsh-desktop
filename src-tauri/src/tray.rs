@@ -1,7 +1,36 @@
-//! 托盘：显示/隐藏、重启服务、打开日志与数据目录、开机自启、退出。
+//! 托盘：显示/隐藏、重启服务、升级 DSH、检查应用更新、打开日志与数据目录、开机自启、退出。
 use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::TrayIconBuilder;
 use tauri::Manager;
+
+/// 检查应用自更新（tauri-plugin-updater，签名公钥内置于 tauri.conf.json）。
+fn check_app_update(app: &tauri::AppHandle) {
+    use tauri_plugin_updater::UpdaterExt;
+    crate::status::set(app, "正在检查应用更新…");
+    tauri::async_runtime::block_on(async move {
+        let updater = match app.updater_builder().build() {
+            Ok(u) => u,
+            Err(e) => {
+                crate::status::set(&app, &format!("更新器初始化失败：{e}"));
+                return;
+            }
+        };
+        match updater.check().await {
+            Ok(Some(update)) => {
+                crate::status::set(&app, &format!("发现新版本 {}，正在下载…", update.version));
+                let on_done = || app.restart();
+                if let Err(e) = update
+                    .download_and_install(|_, _| {}, on_done)
+                    .await
+                {
+                    crate::status::set(&app, &format!("更新安装失败：{e}"));
+                }
+            }
+            Ok(None) => crate::status::set(&app, "已是最新版本"),
+            Err(e) => crate::status::set(&app, &format!("检查更新失败：{e}")),
+        }
+    });
+}
 
 pub fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
     use tauri_plugin_autostart::ManagerExt;
@@ -15,6 +44,7 @@ pub fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
         true,
         None::<&str>,
     )?;
+    let check_update = MenuItem::with_id(app, "check-update", "检查应用更新", true, None::<&str>)?;
     let open_log = MenuItem::with_id(app, "openlog", "打开日志", true, None::<&str>)?;
     let open_dir = MenuItem::with_id(app, "opendir", "打开数据目录", true, None::<&str>)?;
     let autostart = CheckMenuItem::with_id(
@@ -27,7 +57,7 @@ pub fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
     )?;
     let sep = PredefinedMenuItem::separator(app)?;
     let quit = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
-    let menu = Menu::with_items(app, &[&show, &restart, &upgrade, &open_log, &open_dir, &autostart, &sep, &quit])?;
+    let menu = Menu::with_items(app, &[&show, &restart, &upgrade, &check_update, &open_log, &open_dir, &autostart, &sep, &quit])?;
 
     #[allow(unused_mut)] // macOS 分支会整体重绑定
     let mut tray = TrayIconBuilder::with_id("dsh-tray")
@@ -60,6 +90,10 @@ pub fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
             "upgrade" => {
                 let handle = app.clone();
                 std::thread::spawn(move || crate::install::upgrade_runtime(&handle));
+            }
+            "check-update" => {
+                let handle = app.clone();
+                std::thread::spawn(move || check_app_update(&handle));
             }
             "openlog" => {
                 crate::webview::open_external(&crate::runtime::log_file().display().to_string());
