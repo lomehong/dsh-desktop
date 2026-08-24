@@ -199,6 +199,8 @@ pub fn start_service(app: &tauri::AppHandle) -> Result<(), String> {
                 runtime::log_file().display()
             ));
         }
+        // 就绪后订阅事件流：回合完成/审批请求 → 原生通知与任务栏闪烁
+        crate::events::spawn(app, &running.base_url);
         webview::navigate_to_harness(app, &running.base_url);
         Ok(())
     })();

@@ -27,6 +27,8 @@ struct AppState {
     origin: Mutex<Option<String>>,
     /// 启动/重启进行中标志：守护线程与手动重启互斥，防止并发双拉。
     restarting: Mutex<bool>,
+    /// 事件流订阅世代号：每次服务启动 +1，旧订阅线程自检出局。
+    events_gen: std::sync::atomic::AtomicU64,
     status: Mutex<StartupStatus>,
 }
 
@@ -91,12 +93,14 @@ fn main() {
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             None,
         ))
+        .plugin(tauri_plugin_notification::init())
         .manage(AppState {
             child: Mutex::new(None),
             restarts: Mutex::new(0),
             launch: Mutex::new(None),
             origin: Mutex::new(None),
             restarting: Mutex::new(false),
+            events_gen: std::sync::atomic::AtomicU64::new(0),
             status: Mutex::new(StartupStatus::default()),
         })
         .invoke_handler(tauri::generate_handler![
