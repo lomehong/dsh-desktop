@@ -4,6 +4,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod events;
+mod install;
 mod readiness;
 mod runtime;
 mod status;
@@ -68,6 +69,15 @@ fn open_runtime_dir(window: tauri::WebviewWindow, _app: tauri::AppHandle) {
     webview::open_external(&runtime::runtime_root().display().to_string());
 }
 
+/// 首启安装引导：下载便携 Node + 安装固定版本 dsh，完成后自动启动服务。
+#[tauri::command]
+fn install_runtime(window: tauri::WebviewWindow, app: tauri::AppHandle) {
+    if !caller_is_local(&window) {
+        return;
+    }
+    std::thread::spawn(move || install::install_and_start(&app));
+}
+
 fn main() {
     tauri::Builder::default()
         // 二次启动：聚焦已有窗口（须最先注册）
@@ -92,7 +102,8 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             get_status,
             open_log,
-            open_runtime_dir
+            open_runtime_dir,
+            install_runtime
         ])
         .setup(|app| {
             let handle = app.handle().clone();

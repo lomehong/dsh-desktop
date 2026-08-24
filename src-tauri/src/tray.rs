@@ -8,6 +8,13 @@ pub fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
 
     let show = MenuItem::with_id(app, "show", "显示 / 隐藏", true, None::<&str>)?;
     let restart = MenuItem::with_id(app, "restart", "重启服务", true, None::<&str>)?;
+    let upgrade = MenuItem::with_id(
+        app,
+        "upgrade",
+        &format!("升级 DSH（v{}）", crate::install::DSH_VERSION),
+        true,
+        None::<&str>,
+    )?;
     let open_log = MenuItem::with_id(app, "openlog", "打开日志", true, None::<&str>)?;
     let open_dir = MenuItem::with_id(app, "opendir", "打开数据目录", true, None::<&str>)?;
     let autostart = CheckMenuItem::with_id(
@@ -20,7 +27,7 @@ pub fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
     )?;
     let sep = PredefinedMenuItem::separator(app)?;
     let quit = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
-    let menu = Menu::with_items(app, &[&show, &restart, &open_log, &open_dir, &autostart, &sep, &quit])?;
+    let menu = Menu::with_items(app, &[&show, &restart, &upgrade, &open_log, &open_dir, &autostart, &sep, &quit])?;
 
     #[allow(unused_mut)] // macOS 分支会整体重绑定
     let mut tray = TrayIconBuilder::with_id("dsh-tray")
@@ -49,6 +56,10 @@ pub fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
             "restart" => {
                 let handle = app.clone();
                 std::thread::spawn(move || crate::supervisor::restart_service(&handle));
+            }
+            "upgrade" => {
+                let handle = app.clone();
+                std::thread::spawn(move || crate::install::upgrade_runtime(&handle));
             }
             "openlog" => {
                 crate::webview::open_external(&crate::runtime::log_file().display().to_string());

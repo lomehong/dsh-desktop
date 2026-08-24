@@ -44,6 +44,7 @@
   <div class="spinner" id="spinner"></div>
   <div id="status">正在启动运行时…</div>
   <div class="actions" id="actions">
+    <button id="btn-install">安装运行环境</button>
     <button id="btn-log">打开日志</button>
     <button id="btn-dir">打开数据目录</button>
   </div>
@@ -56,14 +57,20 @@
     const listen = window.__TAURI__ && window.__TAURI__.event && window.__TAURI__.event.listen;
     let stopped = false;
     function render(s) {
-      if (!s || stopped || !s.text) return;
+      if (!s || !s.text) return;
       el.textContent = s.text || '';
       if (s.error) {
         el.classList.add('error'); spinner.style.display = 'none';
-        actions.style.display = 'flex'; stopped = true;
+        actions.style.display = 'flex';
+        stopped = true;
+      } else if (stopped && !s.ready) {
+        // 安装重试：回到进行中状态
+        el.classList.remove('error'); spinner.style.display = '';
+        actions.style.display = 'none'; stopped = false;
       }
       if (s.ready) { stopped = true; }
     }
+    document.getElementById('btn-install').onclick = () => { try { invoke('install_runtime'); } catch (e) {} };
     document.getElementById('btn-log').onclick = () => { try { invoke('open_log'); } catch (e) {} };
     document.getElementById('btn-dir').onclick = () => { try { invoke('open_runtime_dir'); } catch (e) {} };
     // 主通道：轮询（不受事件早于监听器挂载的竞态影响）
