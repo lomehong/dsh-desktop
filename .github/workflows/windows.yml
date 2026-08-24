@@ -81,4 +81,4 @@ jobs:
           releaseName: "DSH Desktop ${{ github.ref_name }}"
           releaseDraft: true
           prerelease: false
-          args: --target ${{ matrix.msbuild_target }}
+          args: --target ${{ matrix.msbuild_target }} --bundles nsis
