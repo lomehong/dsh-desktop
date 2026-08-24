@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use crate::runtime::{self, Launch};
 use crate::{status, webview, AppState};
+use tauri::Manager;
 
 /// 等待 stdout 出现 URL 行的时限（全新 DSH_HOME 首启要装 profile 依赖，给足时间）。
 const URL_WAIT_SECS: u64 = 180;

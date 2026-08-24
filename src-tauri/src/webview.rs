@@ -51,7 +51,7 @@ pub fn create_main_window(app: &tauri::AppHandle) -> tauri::Result<()> {
         }
         // 外部链接（含旧端口的失效地址）交给系统浏览器，绝不留在壳内
         if url.scheme() == "http" || url.scheme() == "https" {
-            open_external(&handle, &u);
+            open_external(&u);
         }
         false
     })
@@ -83,7 +83,7 @@ pub fn navigate_to_loader(app: &tauri::AppHandle) {
 }
 
 /// 用系统默认程序打开 URL / 路径。
-pub fn open_external(app: &tauri::AppHandle, target: &str) {
+pub fn open_external(target: &str) {
     #[cfg(windows)]
     let mut cmd = {
         let mut c = std::process::Command::new("cmd.exe");

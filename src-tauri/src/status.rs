@@ -1,5 +1,5 @@
 //! 启动状态：供加载页轮询（轮询为主通道，事件推送为辅，规避事件早于监听器挂载的竞态）。
-use tauri::Emitter;
+use tauri::{Emitter, Manager};
 
 #[derive(Default, Clone, serde::Serialize)]
 pub struct StartupStatus {

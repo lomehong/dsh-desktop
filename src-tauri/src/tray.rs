@@ -22,6 +22,7 @@ pub fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
     let quit = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
     let menu = Menu::with_items(app, &[&show, &restart, &open_log, &open_dir, &autostart, &sep, &quit])?;
 
+    #[allow(unused_mut)] // macOS 分支会整体重绑定
     let mut tray = TrayIconBuilder::with_id("dsh-tray")
         .icon(app.default_window_icon().expect("缺少应用图标").clone())
         .tooltip("DSH Desktop — 双击打开；右键菜单退出")
@@ -50,18 +51,17 @@ pub fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
                 std::thread::spawn(move || crate::supervisor::restart_service(&handle));
             }
             "openlog" => {
-                crate::webview::open_external(app, &crate::runtime::log_file().display().to_string());
+                crate::webview::open_external(&crate::runtime::log_file().display().to_string());
             }
             "opendir" => {
                 crate::webview::open_external(
-                    app,
                     &crate::runtime::runtime_root().display().to_string(),
                 );
             }
             "autostart" => {
                 use tauri_plugin_autostart::ManagerExt;
                 let autolaunch = app.autolaunch();
-                let enabled = autolaunch().is_enabled().unwrap_or(false);
+                let enabled = autolaunch.is_enabled().unwrap_or(false);
                 let result = if enabled { autolaunch.disable() } else { autolaunch.enable() };
                 if let Err(e) = result {
                     eprintln!("切换开机自启失败: {e}");

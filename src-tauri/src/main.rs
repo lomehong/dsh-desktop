@@ -16,6 +16,7 @@ use std::sync::Mutex;
 
 use runtime::Launch;
 use status::StartupStatus;
+use tauri::Manager;
 
 struct AppState {
     child: Mutex<Option<Child>>,
@@ -36,6 +37,13 @@ fn caller_is_local(window: &tauri::WebviewWindow) -> bool {
         .unwrap_or(false)
 }
 
+/// 解析 `--quit-after-secs N`（CI 冒烟/自动验收用）。
+fn quit_after_secs() -> Option<u64> {
+    let args: Vec<String> = std::env::args().collect();
+    let idx = args.iter().position(|a| a == "--quit-after-secs")?;
+    args.get(idx + 1)?.parse().ok()
+}
+
 #[tauri::command]
 fn get_status(window: tauri::WebviewWindow, state: tauri::State<AppState>) -> StartupStatus {
     if !caller_is_local(&window) {
@@ -45,19 +53,19 @@ fn get_status(window: tauri::WebviewWindow, state: tauri::State<AppState>) -> St
 }
 
 #[tauri::command]
-fn open_log(window: tauri::WebviewWindow, app: tauri::AppHandle) {
+fn open_log(window: tauri::WebviewWindow, _app: tauri::AppHandle) {
     if !caller_is_local(&window) {
         return;
     }
-    webview::open_external(&app, &runtime::log_file().display().to_string());
+    webview::open_external(&runtime::log_file().display().to_string());
 }
 
 #[tauri::command]
-fn open_runtime_dir(window: tauri::WebviewWindow, app: tauri::AppHandle) {
+fn open_runtime_dir(window: tauri::WebviewWindow, _app: tauri::AppHandle) {
     if !caller_is_local(&window) {
         return;
     }
-    webview::open_external(&app, &runtime::runtime_root().display().to_string());
+    webview::open_external(&runtime::runtime_root().display().to_string());
 }
 
 fn main() {
@@ -99,6 +107,14 @@ fn main() {
             // 服务守护：异常退出时自动重启
             let watcher = app.handle().clone();
             std::thread::spawn(move || supervisor::watch_child(&watcher));
+            // CI/自动验收用：--quit-after-secs N 到时走真实退出路径（RunEvent::Exit，含整树清理）
+            if let Some(secs) = quit_after_secs() {
+                let handle = app.handle().clone();
+                std::thread::spawn(move || {
+                    std::thread::sleep(std::time::Duration::from_secs(secs));
+                    handle.exit(0);
+                });
+            }
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -116,7 +132,8 @@ fn main() {
             if let tauri::RunEvent::Exit = event {
                 // 真正退出：杀掉整个 dsh 进程树，不留孤儿 node
                 let state: tauri::State<AppState> = app.state();
-                if let Some(mut child) = state.child.lock().unwrap().take() {
+                let child = state.child.lock().unwrap().take();
+                if let Some(mut child) = child {
                     supervisor::kill_tree(child.id() as u32);
                     let _ = child.wait();
                 }
