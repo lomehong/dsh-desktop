@@ -33,6 +33,50 @@ pub fn log_file() -> PathBuf {
     runtime_root().join("dsh-desktop.log")
 }
 
+/// 进程登记文件：记录本壳进程与 dsh 子进程的 pid（含端口），
+/// 供下次启动时识别「壳被强杀后残留的孤儿 dsh 进程树」。
+pub fn pid_file() -> PathBuf {
+    runtime_root().join("runtime.pid")
+}
+
+/// Windows：tasklist 查询指定 pid 的进程名（不存在返回 None）。
+#[cfg(windows)]
+pub fn process_name(pid: u32) -> Option<String> {
+    let mut c = Command::new("tasklist.exe");
+    c.args(["/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"]);
+    let out = no_window(&mut c).output().ok()?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    for line in text.lines() {
+        let mut fields = line.split(',').map(|f| f.trim_matches('"'));
+        let name = fields.next()?.to_string();
+        let pid: u32 = fields.next()?.parse().ok()?;
+        if pid == pid {
+            return Some(name);
+        }
+    }
+    None
+}
+
+/// Unix：kill -0 探活 + /proc 读名（macOS 无 /proc 时仅探活返回空名）。
+#[cfg(unix)]
+pub fn process_name(pid: u32) -> Option<String> {
+    let alive = Command::new("kill")
+        .args(["-0", &pid.to_string()])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if !alive {
+        return None;
+    }
+    std::fs::read_to_string(format!("/proc/{pid}/comm"))
+        .ok()
+        .map(|s| s.trim().to_string())
+}
+
+pub fn process_alive(pid: u32) -> bool {
+    process_name(pid).is_some()
+}
+
 /// dsh 的启动方式：便携版运行时（node + bin.js）或系统 node + 全局 dsh 命令。
 #[derive(Clone, Copy, PartialEq)]
 pub enum Launch {

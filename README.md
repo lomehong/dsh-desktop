@@ -23,7 +23,9 @@ cargo build --release
 
 调试期冒烟：`cargo run -- --quit-after-secs 60`（到时走真实退出路径，含整树清理）。
 
-环境变量（可选）：`DSH_DESKTOP_NODE_MIRROR`（自定义 Node 镜像前缀）、`DSH_DESKTOP_NPM_REGISTRY`（npm 源）、`DSH_HOME`（传给子进程）。
+环境变量（可选）：`DSH_DESKTOP_NODE_MIRROR`（自定义 Node 镜像前缀）、`DSH_DESKTOP_NPM_REGISTRY`（npm 源）、`DSH_DESKTOP_DSH_VERSION`（固定升级目标版本）、`DSH_HOME`（传给子进程）。
+
+命令行参数：`--quit-after-secs N`（到时走真实退出路径，CI 冒烟用）、`--upgrade-dsh`（检查并升级 DSH 后退出）。
 
 ## 里程碑状态
 
@@ -31,6 +33,12 @@ cargo build --release
 - ✅ M2 运行时管理：一键安装引导 + 托盘升级（全新环境实测：下载 Node → 装 dsh → 启动进 UI）
 - ✅ M3 原生集成：WS 订阅事件流 → 通知/闪栏（真实回合实测触发）
 - ✅ M4 分发就绪：NSIS（`bundle.targets`）、tauri-plugin-updater（签名公钥已内置，托盘「检查应用更新」）、GitHub Actions Windows CI（构建 + 冒烟 + tag 发布）
+
+## 二期（已完成）
+
+- ✅ **孤儿进程清理**：服务拉起后登记 `runtime.pid`（壳 pid + 子进程 pid + 端口）；下次启动发现「壳已死、子进程仍活且进程名符合 dsh 启动链」则整树击杀（已实测：强杀壳 → 孤儿残留 → 重启自动清理）。正常退出同步删除登记。
+- ✅ **升级接远程清单**：托盘「升级 DSH」= 查询 npm `dist-tags.latest`（npmmirror 优先、官方源兜底）与已装版本比较，一致则跳过、不同才安装；`DSH_DESKTOP_DSH_VERSION` 可固定目标版本。`--upgrade-dsh` 命令行参数供 CI/脚本使用（升级后退出，不启动服务）。全新环境首装仍用编译期基线版本（`install.rs` 的 `DSH_VERSION`）保证可复现。
+- ✅ **跨平台安装通用化**：Node 发行版按平台选择（win-x64.zip / darwin-{arm64,x64}.tar.gz / linux-{x64,arm64}.tar.xz），curl → PowerShell/wget 下载兜底，bsdtar/gnu tar 解压；npm 命令对 Unix 注入便携 node 的 PATH。macOS CI（构建 + 冒烟 + dmg/updater 发布，Apple Silicon）就绪——**实机行为待首次 CI 验证**。
 
 ## 发布流程
 
@@ -41,9 +49,9 @@ cargo build --release
 
 ## 已知限制
 
-- 强杀 exe（非托盘退出）不会执行整树清理，会留下孤儿 node；正常退出/托盘退出无此问题。后续可在启动时检测上次崩溃残留并清理。
-- `升级 DSH` 固定安装编译期版本（`install.rs` 的 `DSH_VERSION`）；应用自身的更新走 updater 通道。
-- macOS/Linux 路径代码已就绪但未实测（二期）。
+- macOS：代码与 CI 就绪，但无实机验收记录；首次 macOS CI 运行后可能需要微调（GUI 冒烟对 runner 会话有依赖）。Linux 有路径代码与发行版矩阵，未出 CI 产物。
+- 同一会话不要在网页版与桌面版并发发消息（回合会交错写入同一会话流）。
+- `升级 DSH` 作用于便携运行时；使用系统 `dsh` 回退启动时不升级系统安装。
 
 ## 安全边界
 

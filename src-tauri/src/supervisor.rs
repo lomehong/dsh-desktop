@@ -33,6 +33,66 @@ fn parse_web_url(line: &str) -> Option<String> {
     Some(format!("http://127.0.0.1:{digits}"))
 }
 
+/// 进程登记（JSON）：壳 pid + dsh 子进程 pid + 实际端口。
+#[derive(serde::Serialize, serde::Deserialize)]
+struct PidRecord {
+    shell_pid: u32,
+    child_pid: u32,
+    port: u16,
+}
+
+/// 服务拉起成功后登记，供下次启动识别孤儿。
+fn write_pidrecord(app: &tauri::AppHandle, running: &Running) {
+    let shell_pid = std::process::id();
+    let port = running
+        .base_url
+        .rsplit(':')
+        .next()
+        .and_then(|p| p.parse().ok())
+        .unwrap_or(0);
+    let rec = PidRecord {
+        shell_pid,
+        child_pid: running.child.id() as u32,
+        port,
+    };
+    if let Ok(json) = serde_json::to_string_pretty(&rec) {
+        let path = runtime::pid_file();
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let _ = std::fs::write(path, json);
+    }
+    let _ = app; // 预留：如需向壳上报登记结果
+}
+
+/// 启动时清理「壳被强杀后残留的孤儿 dsh 进程树」：
+/// 登记存在、壳 pid 已死、子 pid 仍活且进程名符合 dsh 启动链（node/cmd）→ 整树击杀。
+/// 壳 pid 仍存活说明是并行实例（单实例插件之外的兜底），不动。
+pub fn cleanup_stale_orphan() {
+    let Ok(text) = std::fs::read_to_string(runtime::pid_file()) else {
+        return;
+    };
+    let _ = std::fs::remove_file(runtime::pid_file());
+    let Ok(rec) = serde_json::from_str::<PidRecord>(&text) else {
+        return;
+    };
+    if runtime::process_alive(rec.shell_pid) {
+        // 另一个壳实例仍在运行（其子进程归它管）
+        return;
+    }
+    let Some(name) = runtime::process_name(rec.child_pid) else {
+        return; // 子进程已不在
+    };
+    let launcher_chain = ["node.exe", "cmd.exe", "node", "sh"];
+    if !launcher_chain.contains(&name.as_str()) {
+        return; // pid 被复用成了无关进程，不动
+    }
+    if let Some(mut log) = runtime::open_log_append() {
+        let _ = writeln!(log, "[清理] 击杀上次强杀残留的孤儿进程树 pid={} name={}", rec.child_pid, name);
+    }
+    kill_tree(rec.child_pid);
+}
+
 /// 杀掉整个进程树（dsh 会派生工作线程/子进程，必须整树清理）。
 pub fn kill_tree(pid: u32) {
     #[cfg(windows)]
@@ -191,6 +251,7 @@ pub fn start_service(app: &tauri::AppHandle) -> Result<(), String> {
         status::set(app, "正在启动 DSH 服务…");
         let running = spawn_dsh(launch)?;
         *state.origin.lock().unwrap() = Some(running.base_url.clone());
+        write_pidrecord(app, &running);
         *state.child.lock().unwrap() = Some(running.child);
         status::set(app, "等待服务就绪（首次启动约需 10~60 秒）…");
         if !crate::readiness::wait_http_ok(&running.base_url, Duration::from_secs(HEALTH_WAIT_SECS)) {

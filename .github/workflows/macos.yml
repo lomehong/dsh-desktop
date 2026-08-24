@@ -1,0 +1,82 @@
+name: macOS CI
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+
+jobs:
+  build-and-smoke:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Build (debug)
+        run: cargo build --manifest-path src-tauri/Cargo.toml
+
+      - name: Install Node 24 + dsh for smoke test
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Install dsh
+        run: |
+          npm install -g "@deepseek-ai/dsh@0.1.1-rc.2"
+          dsh --version
+
+      - name: Smoke test (boot → ready → graceful exit, no orphans)
+        env:
+          DSH_HOME: ${{ runner.temp }}/dsh-smoke-home
+        run: |
+          mkdir -p "$DSH_HOME"
+          src-tauri/target/debug/dsh-desktop --quit-after-secs 240 &
+          APP_PID=$!
+          wait $APP_PID
+          EXIT=$?
+          if [ "$EXIT" -ne 0 ]; then echo "smoke: app exit code $EXIT"; exit 1; fi
+          LOG="$HOME/Library/Application Support/dsh-desktop/dsh-desktop.log"
+          if ! grep -qE 'dsh web: http://127\.0\.0\.1:[0-9]+' "$LOG"; then
+            echo "smoke: no URL line in log"; exit 1
+          fi
+          echo "smoke OK"
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build-and-smoke
+    runs-on: macos-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Build dmg + updater artifacts (Apple Silicon)
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: "DSH Desktop ${{ github.ref_name }}"
+          releaseDraft: true
+          prerelease: false
+          args: --target aarch64-apple-darwin

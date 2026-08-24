@@ -48,6 +48,11 @@ fn quit_after_secs() -> Option<u64> {
     args.get(idx + 1)?.parse().ok()
 }
 
+/// 解析 `--upgrade-dsh`（CI/脚本用：检查并升级 DSH 后退出，不启动服务）。
+fn upgrade_dsh_flag() -> bool {
+    std::env::args().any(|a| a == "--upgrade-dsh")
+}
+
 #[tauri::command]
 fn get_status(window: tauri::WebviewWindow, state: tauri::State<AppState>) -> StartupStatus {
     if !caller_is_local(&window) {
@@ -115,8 +120,22 @@ fn main() {
             let handle = app.handle().clone();
             webview::create_main_window(&handle)?;
             tray::build_tray(&handle)?;
-            // 启动序列在后台线程执行，窗口先显示加载页
+            // CI/脚本用：--upgrade-dsh 检查并升级 DSH 后直接退出（不启动服务）
+            if upgrade_dsh_flag() {
+                let handle = app.handle().clone();
+                std::thread::spawn(move || {
+                    let msg = install::upgrade_dsh(&handle).unwrap_or_else(|e| format!("升级失败：{e}"));
+                    if let Some(mut log) = runtime::open_log_append() {
+                        use std::io::Write;
+                        let _ = writeln!(log, "[upgrade-dsh] {msg}");
+                    }
+                    handle.exit(0);
+                });
+                return Ok(());
+            }
+            // 启动序列在后台线程执行，窗口先显示加载页；先清理上次强杀残留的孤儿进程树
             std::thread::spawn(move || {
+                supervisor::cleanup_stale_orphan();
                 if let Err(err) = supervisor::start_service(&handle) {
                     status::fail(&handle, &err);
                 }
@@ -147,9 +166,10 @@ fn main() {
         .expect("初始化 DSH Desktop 失败")
         .run(|app, event| {
             if let tauri::RunEvent::Exit = event {
-                // 真正退出：杀掉整个 dsh 进程树，不留孤儿 node
+                // 真正退出：杀掉整个 dsh 进程树，不留孤儿 node；同时清掉进程登记
                 let state: tauri::State<AppState> = app.state();
                 let child = state.child.lock().unwrap().take();
+                let _ = std::fs::remove_file(runtime::pid_file());
                 if let Some(mut child) = child {
                     supervisor::kill_tree(child.id() as u32);
                     let _ = child.wait();
