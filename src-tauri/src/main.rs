@@ -1,7 +1,8 @@
 // DSH Desktop：DeepSeek Harness 桌面应用。
 // 壳进程监督 `dsh web --no-open --port 0`（随机 loopback 端口，从 stdout 解析实际地址），
 // 加固 WebView 只放行当前 Harness origin；关闭=最小化到托盘，退出才整树结束服务。
-#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+// 无条件 GUI 子系统（debug 也不弹控制台）；诊断输出全部走日志文件。
+#![windows_subsystem = "windows"]
 
 mod events;
 mod install;
