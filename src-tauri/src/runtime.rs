@@ -34,17 +34,48 @@ pub fn runtime_root() -> PathBuf {
     ROOT.get_or_init(runtime_root_locked).clone()
 }
 
-pub fn node_exe() -> PathBuf {
-    runtime_root().join("node").join(if cfg!(windows) { "node.exe" } else { "bin/node" })
+fn node_exe_in(root: &PathBuf) -> PathBuf {
+    root.join("node").join(if cfg!(windows) { "node.exe" } else { "bin/node" })
 }
 
-pub fn dsh_bin_js() -> PathBuf {
+fn dsh_bin_js_in(root: &PathBuf) -> PathBuf {
     // Windows 便携版 npm -g 装到 node\node_modules；macOS 装到 node/lib/node_modules
-    let mut p = runtime_root().join("node");
+    let mut p = root.join("node");
     if !cfg!(windows) {
         p = p.join("lib");
     }
     p.join("node_modules").join("@deepseek-ai").join("dsh").join("lib").join("bin.js")
+}
+
+/// 便携运行时候选根：自有目录优先，其次复用 dsh-persona（数字分身）安装的便携运行时，
+/// 避免在 persona 机器上重复下载安装（persona 的 node/dsh 不在系统 PATH，System 回退探不到）。
+fn portable_roots() -> Vec<PathBuf> {
+    let mut roots = vec![runtime_root()];
+    #[cfg(windows)]
+    if let Ok(local) = std::env::var("LOCALAPPDATA") {
+        roots.push(PathBuf::from(local).join("dsh-persona"));
+    }
+    #[cfg(not(windows))]
+    if let Ok(home) = std::env::var("HOME") {
+        roots.push(PathBuf::from(&home).join("Library/Application Support/dsh-persona"));
+        roots.push(PathBuf::from(
+            std::env::var("XDG_DATA_HOME").unwrap_or_else(|_| format!("{home}/.local/share")),
+        ).join("dsh-persona"));
+    }
+    roots
+}
+
+/// node 与 dsh 都就绪的便携根目录；都没有时返回 None（bootstrap 走 System 回退或引导安装）。
+fn portable_root() -> Option<PathBuf> {
+    portable_roots().into_iter().find(|r| node_exe_in(r).exists() && dsh_bin_js_in(r).exists())
+}
+
+pub fn node_exe() -> PathBuf {
+    portable_root().map(|r| node_exe_in(&r)).unwrap_or_else(|| node_exe_in(&runtime_root()))
+}
+
+pub fn dsh_bin_js() -> PathBuf {
+    portable_root().map(|r| dsh_bin_js_in(&r)).unwrap_or_else(|| dsh_bin_js_in(&runtime_root()))
 }
 
 pub fn log_file() -> PathBuf {
