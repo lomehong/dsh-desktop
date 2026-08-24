@@ -43,7 +43,7 @@ jobs:
           wait $APP_PID
           EXIT=$?
           if [ "$EXIT" -ne 0 ]; then echo "smoke: app exit code $EXIT"; exit 1; fi
-          LOG="$HOME/Library/Application Support/dsh-desktop/dsh-desktop.log"
+          LOG="$HOME/Library/Application Support/dsh-desktop-app-data/dsh-desktop.log"
           if ! grep -qE 'dsh web: http://127\.0\.0\.1:[0-9]+' "$LOG"; then
             echo "smoke: no URL line in log"; exit 1
           fi

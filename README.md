@@ -9,7 +9,7 @@ DeepSeek Harness（dsh）的桌面应用：Tauri 2 原生窗口 + 受监督的 H
 - **进程模型**：壳进程拉起 `dsh web --no-open --port 0`（OS 分配随机回环端口），从子进程 stdout 的 `dsh web: http://127.0.0.1:<port>` 行解析实际地址，再做真实 HTTP GET 健康检查后才把窗口导航过去。异常退出自动重启（上限 3 次），退出应用时整树击杀（`taskkill /T` / 进程组信号），不留孤儿 node。
 - **WebView 加固**：程序化建窗挂导航守卫——只放行本地加载页与**当前** Harness origin（随机端口，重启后自动更新放行目标；前缀匹配校验边界字符防端口伪装）；其余 http(s) 交给系统浏览器。Harness 页面**零 Tauri IPC 授权**（capabilities 仅 `local: true` 给加载页；自定义命令在命令层校验调用方 URL）。
 - **原生集成（服务端→壳单向）**：壳以非浏览器客户端身份订阅 `<base>/api/events.mux` WebSocket 下行流（世代号防止重启后重复通知），`turn/end` / `approval/requested` / `question/requested` → OS 原生通知 + 任务栏闪烁（窗口未聚焦时弹通知）。
-- **运行时管理**：优先使用 `%LOCALAPPDATA%\dsh-desktop\node` 便携运行时（Node 24 + 固定版本 dsh），否则回退系统 `node`/`dsh`；全新机器在加载页一键「安装运行环境」（npmmirror 镜像下载 Node → npm 装固定版 dsh → 自动启动）。托盘可「升级 DSH」。
+- **运行时管理**：优先使用 `%LOCALAPPDATA%\dsh-desktop-app-data\node` 便携运行时（Node 24 + 固定版本 dsh；旧 `dsh-desktop` 目录自动迁移，避免与 NSIS 卸载目录冲突），否则回退系统 `node`/`dsh`；全新机器在加载页一键「安装运行环境」（npmmirror 镜像下载 Node → npm 装固定版 dsh → 自动启动）。托盘可「升级 DSH」。
 - **桌面语义**：关闭=最小化到托盘（IM 渠道/长任务不中断）、托盘菜单（显示/重启/升级 DSH/检查应用更新/日志/数据目录/开机自启/退出）、单实例二次启动聚焦。
 - **无边框窗口**：decorum 悬浮标题栏（Windows 去原生边框 + 扁平自绘最小化/最大化/关闭按钮，保留 Snap Layout；macOS Overlay 红绿灯）。Harness 页面经初始化脚本整体下移 40px 让出顶栏——用 `body transform` 而非 `html padding`，使 fixed/absolute 定位的插件 overlay（右侧按钮簇、机器人状态栏）一并下移；decorum 悬浮条反向平移回顶部。远程页面经 `http://127.0.0.1:*` 端口通配 capability 仅授予窗口控制最小权限集（已单测验证匹配范围，无文件/系统访问）。关闭按钮走 `CloseRequested` → 语义仍为最小化到托盘。
 - **DSH_HOME**：沿用应用进程环境（默认共享 `~/.dsh`，保留 im-bot 绑定/共享记忆等用户数据）。

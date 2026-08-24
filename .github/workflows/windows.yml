@@ -38,7 +38,7 @@ jobs:
           $exe = "src-tauri\target\debug\dsh-desktop.exe"
           $p = Start-Process -FilePath $exe -ArgumentList "--quit-after-secs","240" -PassThru -Wait
           if ($p.ExitCode -ne 0) { throw "smoke: app exit code $($p.ExitCode)" }
-          $log = Join-Path $env:LOCALAPPDATA "dsh-desktop\dsh-desktop.log"
+          $log = Join-Path $env:LOCALAPPDATA "dsh-desktop-app-data\dsh-desktop.log"
           if (-not (Select-String -Path $log -Pattern "dsh web: http://127\.0\.0\.1:\d+" -Quiet)) {
             throw "smoke: no URL line in log"
           }

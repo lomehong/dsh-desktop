@@ -1,19 +1,37 @@
 //! 运行时路径发现与自举（只检测、不安装；安装由 scripts/pin-runtime.mjs 与首启引导负责）。
 use std::path::PathBuf;
 use std::process::Command;
+use std::sync::OnceLock;
 
-/// 便携版运行时根目录（与 scripts/pin-runtime.mjs 一致）：
-/// Windows: %LOCALAPPDATA%\dsh-desktop；macOS: ~/Library/Application Support/dsh-desktop
-#[cfg(windows)]
-pub fn runtime_root() -> PathBuf {
-    let local = std::env::var("LOCALAPPDATA").unwrap_or_default();
-    PathBuf::from(local).join("dsh-desktop")
+/// 便携版运行时根目录：
+/// Windows: %LOCALAPPDATA%\dsh-desktop-app-data；macOS: ~/Library/Application Support/dsh-desktop-app-data
+/// 不用 `dsh-desktop`：NSIS 卸载器会整目录删除 InstallLocation，若应用恰好装在同名目录
+/// （历史上以 mainBinaryName 作为默认安装名出现过），卸载会把便携运行时一并删掉。
+/// 旧目录（…\dsh-desktop）存在时一次性整体迁移到新目录；迁移失败（如文件被占用）回退旧目录。
+fn runtime_root_locked() -> PathBuf {
+    #[cfg(windows)]
+    let (old, new) = {
+        let local = PathBuf::from(std::env::var("LOCALAPPDATA").unwrap_or_default());
+        (local.join("dsh-desktop"), local.join("dsh-desktop-app-data"))
+    };
+    #[cfg(not(windows))]
+    let (old, new) = {
+        let home = std::env::var("HOME").unwrap_or_default();
+        let p = PathBuf::from(home).join("Library/Application Support");
+        (p.join("dsh-desktop"), p.join("dsh-desktop-app-data"))
+    };
+    if old.exists() && !new.exists() {
+        if std::fs::rename(&old, &new).is_ok() {
+            return new;
+        }
+        return old; // 迁移失败：沿用旧目录，功能不受影响
+    }
+    new
 }
 
-#[cfg(not(windows))]
 pub fn runtime_root() -> PathBuf {
-    let home = std::env::var("HOME").unwrap_or_default();
-    PathBuf::from(home).join("Library/Application Support/dsh-desktop")
+    static ROOT: OnceLock<PathBuf> = OnceLock::new();
+    ROOT.get_or_init(runtime_root_locked).clone()
 }
 
 pub fn node_exe() -> PathBuf {
