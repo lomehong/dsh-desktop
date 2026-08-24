@@ -34,9 +34,8 @@ cargo build --release
 
 ## 发布流程
 
-1. 建仓后把 `tauri.conf.json` 中 updater `endpoints` 的 `dsh-extra/dsh-desktop` 改为实际 `owner/repo`。
-2. 仓库 Secrets 配置 `TAURI_SIGNING_PRIVATE_KEY`（本机生成的私钥内容，见下）与 `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`（空密码则留空）。
-3. 打 tag `v*` 触发 release 工作流（draft），产物含 NSIS 安装器与更新器签名清单。
+1. 仓库 Secrets 配置 `TAURI_SIGNING_PRIVATE_KEY`（本机生成的私钥内容，见下）与 `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`（空密码则留空）。
+2. 打 tag `v*` 触发 release 工作流（draft），产物含 NSIS 安装器与更新器签名清单。
 
 > 更新器签名密钥对生成于本机 `F:\tmp\tauri-keys\dsh-desktop.key(.pub)`——**私钥务必备份到安全位置并从临时目录删除**；公钥已写入 `tauri.conf.json`。私钥丢失将无法再签发更新。
 

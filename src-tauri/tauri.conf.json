@@ -29,7 +29,7 @@
       "dialog": false,
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEEyODAzMEI4RUNERTRDRDYKUldUV1RON3N1RENBb2xrMWpEWDZlU0JDYXlMWTdFa2lDaCtKTTlQWllpc2tySUt3TnVnTi9QSW0K",
       "endpoints": [
-        "https://github.com/dsh-extra/dsh-desktop/releases/latest/download/latest.json"
+        "https://github.com/lomehong/dsh-desktop/releases/latest/download/latest.json"
       ]
     }
   }
