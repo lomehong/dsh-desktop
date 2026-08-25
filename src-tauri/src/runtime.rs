@@ -66,7 +66,7 @@ fn portable_roots() -> Vec<PathBuf> {
 }
 
 /// node 与 dsh 都就绪的便携根目录；都没有时返回 None（bootstrap 走 System 回退或引导安装）。
-fn portable_root() -> Option<PathBuf> {
+pub fn portable_root() -> Option<PathBuf> {
     portable_roots().into_iter().find(|r| node_exe_in(r).exists() && dsh_bin_js_in(r).exists())
 }
 

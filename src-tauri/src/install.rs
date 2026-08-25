@@ -74,9 +74,15 @@ fn npm_registry() -> Vec<String> {
     }
 }
 
+/// 升级/查询所用的运行时根：优先解析到的便携根（含 dsh-persona 复用），
+/// 没有便携运行时时回退自有目录（此时 install_runtime 会先装基线）。
+fn active_root() -> PathBuf {
+    runtime::portable_root().unwrap_or_else(|| runtime::runtime_root())
+}
+
 /// 便携运行时中的 npm 可执行入口（Windows 为 npm.cmd，Unix 为 bin/npm）。
 fn npm_tool() -> Option<PathBuf> {
-    let npm = runtime::runtime_root().join("node").join(if cfg!(windows) {
+    let npm = active_root().join("node").join(if cfg!(windows) {
         "npm.cmd"
     } else {
         "bin/npm"
@@ -86,7 +92,7 @@ fn npm_tool() -> Option<PathBuf> {
 
 /// 读取便携运行时中已安装的 dsh 版本（package.json 的 version 字段）。
 pub fn installed_dsh_version() -> Option<String> {
-    let pj = runtime::runtime_root()
+    let pj = active_root()
         .join("node")
         .join(if cfg!(windows) { "node_modules" } else { "lib/node_modules" })
         .join("@deepseek-ai")
@@ -139,9 +145,9 @@ fn target_version() -> Result<String, String> {
     latest_dsh_version()
 }
 
-/// 安装指定版本的 dsh 到便携运行时（输出落日志）。
+/// 安装指定版本的 dsh 到活动便携运行时（输出落日志）。
 fn npm_install_dsh(version: &str) -> Result<(), String> {
-    let node_dir = runtime::runtime_root().join("node");
+    let node_dir = active_root().join("node");
     let npm_cmd = npm_tool().ok_or("便携 Node 缺少 npm")?;
     let mut last_err = String::new();
     for registry in npm_registry() {
@@ -277,24 +283,28 @@ fn install_runtime_inner(app: &tauri::AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-/// 升级检查与安装（不含服务重启）：确保基线运行时在位 → 查目标版本 → 一致则跳过。
+/// 升级检查与安装（不含服务重启）：在**活动**便携运行时上就地升级
+/// （含 dsh-persona 复用的运行时）；完全没有便携运行时时先装基线到自有目录。
 /// 返回给用户的状态文案。
 pub fn upgrade_dsh(app: &tauri::AppHandle) -> Result<String, String> {
-    install_runtime(app)?;
+    if npm_tool().is_none() {
+        // 无便携运行时（System 回退或全新）：先装基线，之后活动根即自有目录
+        install_runtime(app)?;
+    }
     let target = target_version()?;
     let installed = installed_dsh_version();
     if installed.as_deref() == Some(target.as_str()) {
-        return Ok(format!("DSH 已是最新 v{target}"));
+        return Ok(format!("DSH 运行时已是最新 v{target}"));
     }
-    status::set(app, &format!("正在安装 DSH v{target}…"));
+    status::set(app, &format!("正在安装 DSH 运行时 v{target}…"));
     npm_install_dsh(&target)?;
     let from = installed.unwrap_or_else(|| "无".into());
-    Ok(format!("DSH 已升级到 v{target}（原 {from}）"))
+    Ok(format!("DSH 运行时已升级到 v{target}（原 {from}）"))
 }
 
-/// 托盘「升级 DSH」：停服务 → 检查并安装 → 重新启动。
+/// 托盘「升级 DSH 运行时」：停服务 → 检查并安装 → 重新启动。
 pub fn upgrade_runtime(app: &tauri::AppHandle) {
-    status::set(app, "正在检查 DSH 最新版本…");
+    status::set(app, "正在查询 npm 上 DSH 运行时的最新版本…");
     // 先停服务，避免替换运行中的文件
     let state: tauri::State<crate::AppState> = app.state();
     if let Some(mut child) = state.child.lock().unwrap().take() {

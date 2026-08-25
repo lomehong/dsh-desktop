@@ -37,8 +37,8 @@ pub fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
 
     let show = MenuItem::with_id(app, "show", "显示 / 隐藏", true, None::<&str>)?;
     let restart = MenuItem::with_id(app, "restart", "重启服务", true, None::<&str>)?;
-    let upgrade = MenuItem::with_id(app, "upgrade", "升级 DSH（检查最新版）", true, None::<&str>)?;
-    let check_update = MenuItem::with_id(app, "check-update", "检查应用更新", true, None::<&str>)?;
+    let upgrade = MenuItem::with_id(app, "upgrade", "升级 DSH 运行时（npm 最新版）", true, None::<&str>)?;
+    let check_update = MenuItem::with_id(app, "check-update", "检查 DSH Desktop 应用更新", true, None::<&str>)?;
     let open_log = MenuItem::with_id(app, "openlog", "打开日志", true, None::<&str>)?;
     let open_dir = MenuItem::with_id(app, "opendir", "打开数据目录", true, None::<&str>)?;
     let autostart = CheckMenuItem::with_id(
