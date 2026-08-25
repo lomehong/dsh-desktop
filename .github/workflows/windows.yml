@@ -93,6 +93,15 @@ jobs:
         with:
           workspaces: src-tauri
 
+      - name: 同步前端资源到 src-tauri/dist（frontendDist: dist 路径基准）
+        shell: pwsh
+        run: |
+          # frontendDist 改为 src-tauri/dist 后必须显式同步 UI 资源；
+          # 在仓库根维护 ui/ 单一来源，NSIS 打包前拷入
+          New-Item -ItemType Directory -Force -Path "src-tauri\dist" | Out-Null
+          Copy-Item "ui\*" "src-tauri\dist\" -Recurse -Force
+          Get-ChildItem "src-tauri\dist"
+
       - name: Build NSIS installer + updater artifacts
         uses: tauri-apps/tauri-action@v0
         env:
