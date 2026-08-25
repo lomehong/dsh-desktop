@@ -26,7 +26,10 @@ fn same_origin(u: &str, origin: &str) -> bool {
 /// overlay（右侧插件按钮簇、机器人状态栏等）一并下移，padding 移不动它们；
 /// decorum 悬浮条自身反向平移回窗口顶部；body 背景镜像到 html 防止顶栏露白。
 /// transform 的溢出贡献会让视口出现滚动条，dsh 为全高布局，html overflow 收紧。
-const TITLEBAR_INSET_CSS: &str = r#"
+/// 仅在 harness origin 注入，**不作用于本地加载页**——loader 是裸 logo/状态，居中
+/// 显示即可；强加 transform 会把 body 折成 calc(100% - 40px)，再被 html overflow:hidden
+/// 裁掉大半，最终只剩中间压扁的一坨。
+pub const TITLEBAR_INSET_CSS: &str = r#"
 (function () {
   if (location.protocol !== 'http:' || location.hostname !== '127.0.0.1' || location.port === '') return;
   var INSET = 40;
@@ -53,9 +56,19 @@ const TITLEBAR_INSET_CSS: &str = r#"
 })();
 "#;
 
+/// 把 harness 内容下移，让出 decorum 顶栏（harness origin 专用）。
+/// 留给外部手工 eval 注入（navigate_to_harness 默认已调；外部可视需要再触发）。
+#[allow(dead_code)]
+pub fn apply_titlebar_inset(app: &tauri::AppHandle) {
+    if let Some(w) = app.get_webview_window("main") {
+        let _ = w.eval(TITLEBAR_INSET_CSS);
+    }
+}
+
 /// 创建主窗口（程序化创建以挂导航守卫；配置文件中 windows 留空）。
-/// 无边框：decorum 覆盖式标题栏（Windows 悬浮原生风格按钮；macOS Overlay 红绿灯），
-/// Harness 页面经 TITLEBAR_INSET_CSS 下移，不被悬浮条遮挡。
+/// 无边框：decorum 覆盖式标题栏（Windows 悬浮原生风格按钮；macOS Overlay 红绿灯）。
+/// 加载页与 harness 均不加 TITLEBAR_INSET_CSS——由 navigate_to_harness 在切到 harness
+/// origin 时再单独 eval 注入，避免加载页被 transform 折坏布局。
 pub fn create_main_window(app: &tauri::AppHandle) -> tauri::Result<()> {
     let handle = app.clone();
     let mut builder = tauri::WebviewWindowBuilder::new(
@@ -80,7 +93,6 @@ pub fn create_main_window(app: &tauri::AppHandle) -> tauri::Result<()> {
             .hidden_title(true);
     }
     let window = builder
-        .initialization_script(TITLEBAR_INSET_CSS)
         .on_navigation(move |url| {
             let u = url.as_str().to_string();
             if is_local_url(&u) {
@@ -109,11 +121,19 @@ pub fn create_main_window(app: &tauri::AppHandle) -> tauri::Result<()> {
     Ok(())
 }
 
-/// 把主窗口导航到就绪的 Harness 服务。
+/// 把主窗口导航到就绪的 Harness 服务。navigation 完成后注入标题栏下移 CSS（harness origin 专用）。
 pub fn navigate_to_harness(app: &tauri::AppHandle, base_url: &str) {
     crate::status::update(app, "服务已就绪", false, true);
     if let Some(w) = app.get_webview_window("main") {
         let _ = w.eval(&format!("location.replace('{base_url}')"));
+        // 等 harness 文档 ready 后注入 CSS（initialization_script 对所有页注入会折坏加载页）
+        let app_clone = app.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(250));
+            if let Some(w2) = app_clone.get_webview_window("main") {
+                let _ = w2.eval(TITLEBAR_INSET_CSS);
+            }
+        });
         let _ = w.show();
         let _ = w.set_focus();
     }
