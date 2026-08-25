@@ -120,21 +120,30 @@
       ownerScope: '人力资源、审计、信息安全、总裁办等管理领域',
       ownerStyle: '直接、务实、结构化。先说结论/建议，再展开依据。善用分点、表格、对比等结构化呈现方式。不用长篇大论，不啰嗦。',
       ownerAddress: '主人',
+      twinName: '主人的数字分身',
       twinAliases: '分身'
     };
+    // prefill 仅在「从非向导态首次进入向导」时跑一次；轮询回包（status.wizard=true）反复触发
+    // showWizard(true) 会再跑 prefill 导致用户输入被反复覆盖 + 焦点反复被拉回 owner 输入框。
+    let prefillDone = false;
     function prefill() {
-      DEFAULTS.twinName = DEFAULTS.twinName || (DEFAULTS.owner + '的数字分身');
+      if (prefillDone) return;
       for (const [k, v] of Object.entries(DEFAULTS)) {
         const input = wizard.elements[k];
         if (input && !input.value) input.value = v;
       }
+      prefillDone = true;
     }
 
     function showWizard(on) {
       wizardMode = on;
       boot.style.display = on ? 'none' : 'flex';
       wizard.classList.toggle('open', on);
-      if (on) { prefill(); wizard.elements.owner.focus(); }
+      // 仅首次进入向导时聚焦 owner；轮询回包只切显示，避免反复抢焦点/重置输入
+      if (on && !prefillDone) {
+        prefill();
+        wizard.elements.owner.focus();
+      }
     }
 
     function render(s) {
