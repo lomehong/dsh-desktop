@@ -130,6 +130,12 @@ pub fn spawn_dsh(launch: Launch) -> Result<Running, String> {
                 .args(["web", "--no-open", "--port", "0"])
                 .env("PATH", format!("{}{}{}", node_dir.display(), sep, sys))
                 .current_dir(node_dir);
+            // 便携模式（U盘包）：DSH home 重定向到包内 Data/home，分身状态随U盘走，
+            // 宿主机 ~/.dsh 零读写；npm 缓存同样留在包内，不在宿主留痕
+            if let Some(home) = runtime::portable_home() {
+                c.env("DSH_HOME", &home);
+                c.env("npm_config_cache", home.join(".npm-cache"));
+            }
             // macOS .app bundle 环境缺少 HOME / NODE_PATH，Node.js ESM 模块解析依赖它们
             #[cfg(not(windows))]
             {

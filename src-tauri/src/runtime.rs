@@ -3,12 +3,41 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::sync::OnceLock;
 
-/// 便携版运行时根目录：
-/// Windows: %LOCALAPPDATA%\dsh-desktop-app-data；macOS: ~/Library/Application Support/dsh-desktop-app-data
+/// 便携模式标记：exe 同级的 `Data` 目录（U盘分发包自带）。
+/// 存在即把全部运行时数据与 DSH home 收进该目录，绝不读写宿主机用户目录；
+/// 所有路径相对 exe 现场解析，U盘换盘符/换目录均有效。
+fn portable_root_locked() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let dir = exe.parent()?;
+    let data = dir.join("Data");
+    // 用运行时目录里的 node 判定「这是一个真的便携包」而不是碰巧叫 Data 的空目录：
+    // 便携包制作器总是预装 runtime；空 Data 目录只可能是用户手工误建，按安装版处理
+    // 会把宿主数据写进U盘，宁可忽略。
+    if data.is_dir() && node_exe_in(&data).exists() {
+        return Some(data);
+    }
+    None
+}
+
+pub fn portable_root() -> Option<PathBuf> {
+    static PORTABLE: OnceLock<Option<PathBuf>> = OnceLock::new();
+    PORTABLE.get_or_init(portable_root_locked).clone()
+}
+
+/// 便携模式的 DSH home（`Data/home`）：分身全部状态（profile/预设/凭证/会话）随包携带。
+pub fn portable_home() -> Option<PathBuf> {
+    portable_root().map(|r| r.join("home"))
+}
+
+/// 运行时根目录（便携模式 = `Data`）：
+/// 安装版 Windows: %LOCALAPPDATA%\dsh-desktop-app-data；macOS: ~/Library/Application Support/dsh-desktop-app-data
 /// 不用 `dsh-desktop`：NSIS 卸载器会整目录删除 InstallLocation，若应用恰好装在同名目录
 /// （历史上以 mainBinaryName 作为默认安装名出现过），卸载会把便携运行时一并删掉。
 /// 旧目录（…\dsh-desktop）存在时一次性整体迁移到新目录；迁移失败（如文件被占用）回退旧目录。
 fn runtime_root_locked() -> PathBuf {
+    if let Some(portable) = portable_root() {
+        return portable;
+    }
     #[cfg(windows)]
     let (old, new) = {
         let local = PathBuf::from(std::env::var("LOCALAPPDATA").unwrap_or_default());
@@ -49,8 +78,12 @@ fn dsh_bin_js_in(root: &PathBuf) -> PathBuf {
 
 /// 便携运行时候选根：自有目录优先，其次复用 dsh-persona（数字分身）安装的便携运行时，
 /// 避免在 persona 机器上重复下载安装（persona 的 node/dsh 不在系统 PATH，System 回退探不到）。
+/// 便携模式（U盘包）下只认包内 Data 根，绝不复用宿主机上的任何运行时。
 fn portable_roots() -> Vec<PathBuf> {
     let mut roots = vec![runtime_root()];
+    if portable_root().is_some() {
+        return roots;
+    }
     #[cfg(windows)]
     if let Ok(local) = std::env::var("LOCALAPPDATA") {
         roots.push(PathBuf::from(local).join("dsh-persona"));
@@ -66,16 +99,17 @@ fn portable_roots() -> Vec<PathBuf> {
 }
 
 /// node 与 dsh 都就绪的便携根目录；都没有时返回 None（bootstrap 走 System 回退或引导安装）。
-pub fn portable_root() -> Option<PathBuf> {
+/// （与 USB 便携包的 `portable_root` 不同：这里指“装好的运行时根”，可能是自有目录或 persona 复用。）
+pub fn ready_root() -> Option<PathBuf> {
     portable_roots().into_iter().find(|r| node_exe_in(r).exists() && dsh_bin_js_in(r).exists())
 }
 
 pub fn node_exe() -> PathBuf {
-    portable_root().map(|r| node_exe_in(&r)).unwrap_or_else(|| node_exe_in(&runtime_root()))
+    ready_root().map(|r| node_exe_in(&r)).unwrap_or_else(|| node_exe_in(&runtime_root()))
 }
 
 pub fn dsh_bin_js() -> PathBuf {
-    portable_root().map(|r| dsh_bin_js_in(&r)).unwrap_or_else(|| dsh_bin_js_in(&runtime_root()))
+    ready_root().map(|r| dsh_bin_js_in(&r)).unwrap_or_else(|| dsh_bin_js_in(&runtime_root()))
 }
 
 pub fn log_file() -> PathBuf {

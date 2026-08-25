@@ -6,6 +6,7 @@
 
 mod events;
 mod install;
+mod persona;
 mod readiness;
 mod runtime;
 mod status;
@@ -86,6 +87,24 @@ fn install_runtime(window: tauri::WebviewWindow, app: tauri::AppHandle) {
     std::thread::spawn(move || install::install_and_start(&app));
 }
 
+/// 便携版分身向导：保存字段 → 写预设/patch/凭证 → 自动（重）启动服务。
+#[tauri::command]
+fn persona_wizard_save(
+    window: tauri::WebviewWindow,
+    app: tauri::AppHandle,
+    fields: persona::WizardFields,
+) -> Result<(), String> {
+    if !caller_is_local(&window) {
+        return Err("无权限".into());
+    }
+    persona::save(&fields)?;
+    std::thread::spawn(move || {
+        status::set(&app, "分身配置完成，正在启动服务…");
+        supervisor::restart_service(&app);
+    });
+    Ok(())
+}
+
 fn main() {
     tauri::Builder::default()
         // 二次启动：聚焦已有窗口（须最先注册）
@@ -115,7 +134,8 @@ fn main() {
             get_status,
             open_log,
             open_runtime_dir,
-            install_runtime
+            install_runtime,
+            persona_wizard_save
         ])
         .setup(|app| {
             let handle = app.handle().clone();
@@ -137,6 +157,11 @@ fn main() {
             // 启动序列在后台线程执行，窗口先显示加载页；先清理上次强杀残留的孤儿进程树
             std::thread::spawn(move || {
                 supervisor::cleanup_stale_orphan();
+                // 便携版首启（或重置后）：先走分身信息向导，保存后再启动服务
+                if persona::needed() {
+                    status::wizard(&handle, "首次使用：请配置分身信息");
+                    return;
+                }
                 if let Err(err) = supervisor::start_service(&handle) {
                     status::fail(&handle, &err);
                 }

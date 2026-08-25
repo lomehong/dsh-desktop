@@ -77,7 +77,7 @@ fn npm_registry() -> Vec<String> {
 /// 升级/查询所用的运行时根：优先解析到的便携根（含 dsh-persona 复用），
 /// 没有便携运行时时回退自有目录（此时 install_runtime 会先装基线）。
 fn active_root() -> PathBuf {
-    runtime::portable_root().unwrap_or_else(|| runtime::runtime_root())
+    runtime::ready_root().unwrap_or_else(|| runtime::runtime_root())
 }
 
 /// 便携运行时中的 npm 可执行入口（Windows 为 npm.cmd，Unix 为 bin/npm）。
