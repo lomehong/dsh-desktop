@@ -56,19 +56,12 @@ pub const TITLEBAR_INSET_CSS: &str = r#"
 })();
 "#;
 
-/// 把 harness 内容下移，让出 decorum 顶栏（harness origin 专用）。
-/// 留给外部手工 eval 注入（navigate_to_harness 默认已调；外部可视需要再触发）。
-#[allow(dead_code)]
-pub fn apply_titlebar_inset(app: &tauri::AppHandle) {
-    if let Some(w) = app.get_webview_window("main") {
-        let _ = w.eval(TITLEBAR_INSET_CSS);
-    }
-}
-
 /// 创建主窗口（程序化创建以挂导航守卫；配置文件中 windows 留空）。
-/// 无边框：decorum 覆盖式标题栏（Windows 悬浮原生风格按钮；macOS Overlay 红绿灯）。
-/// 加载页与 harness 均不加 TITLEBAR_INSET_CSS——由 navigate_to_harness 在切到 harness
-/// origin 时再单独 eval 注入，避免加载页被 transform 折坏布局。
+/// 无边框：decorum 覆盖式标题栏（Windows 悬浮原生风格按钮；macOS Overlay 红绿灯），
+/// Harness 页面经 TITLEBAR_INSET_CSS 下移，不被悬浮条遮挡。
+/// 脚本自带 hostname 守卫（仅 127.0.0.1 的 harness origin 生效），对 tauri.localhost
+/// 加载页是空操作——v0.1.5 曾误判它会折坏加载页改为导航后 250ms eval 注入，
+/// 那条路径有竞态（eval 可能落在导航完成前的旧页面上），此处恢复为一贯做法。
 pub fn create_main_window(app: &tauri::AppHandle) -> tauri::Result<()> {
     let handle = app.clone();
     let mut builder = tauri::WebviewWindowBuilder::new(
@@ -93,6 +86,7 @@ pub fn create_main_window(app: &tauri::AppHandle) -> tauri::Result<()> {
             .hidden_title(true);
     }
     let window = builder
+        .initialization_script(TITLEBAR_INSET_CSS)
         .on_navigation(move |url| {
             let u = url.as_str().to_string();
             if is_local_url(&u) {
@@ -121,19 +115,11 @@ pub fn create_main_window(app: &tauri::AppHandle) -> tauri::Result<()> {
     Ok(())
 }
 
-/// 把主窗口导航到就绪的 Harness 服务。navigation 完成后注入标题栏下移 CSS（harness origin 专用）。
+/// 把主窗口导航到就绪的 Harness 服务。
 pub fn navigate_to_harness(app: &tauri::AppHandle, base_url: &str) {
     crate::status::update(app, "服务已就绪", false, true);
     if let Some(w) = app.get_webview_window("main") {
         let _ = w.eval(&format!("location.replace('{base_url}')"));
-        // 等 harness 文档 ready 后注入 CSS（initialization_script 对所有页注入会折坏加载页）
-        let app_clone = app.clone();
-        std::thread::spawn(move || {
-            std::thread::sleep(std::time::Duration::from_millis(250));
-            if let Some(w2) = app_clone.get_webview_window("main") {
-                let _ = w2.eval(TITLEBAR_INSET_CSS);
-            }
-        });
         let _ = w.show();
         let _ = w.set_focus();
     }

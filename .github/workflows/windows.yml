@@ -93,14 +93,6 @@ jobs:
         with:
           workspaces: src-tauri
 
-      - name: Sync UI assets to src-tauri/dist
-        shell: pwsh
-        run: |
-          # frontendDist is src-tauri/dist; keep ui/ as the source of truth, sync before NSIS
-          New-Item -ItemType Directory -Force -Path 'src-tauri/dist' | Out-Null
-          Copy-Item 'ui/*' 'src-tauri/dist/' -Recurse -Force
-          Get-ChildItem 'src-tauri/dist'
-
       - name: Build NSIS installer + updater artifacts
         uses: tauri-apps/tauri-action@v0
         env:

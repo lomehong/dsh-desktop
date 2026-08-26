@@ -5,15 +5,20 @@
 <title>DSH Desktop</title>
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
-  html, body { height: 100%; min-height: 100vh; }
+  html, body { height: 100%; }
   body {
     font-family: "Microsoft YaHei", "PingFang SC", system-ui, sans-serif;
     background: linear-gradient(135deg, #1c2431 0%, #2b3a55 60%, #33475f 100%);
     color: #e8ecf1;
     display: flex; flex-direction: column; align-items: center; justify-content: center;
-    width: 100%; min-width: 100vw;
     gap: 22px; user-select: none;
-    overflow: hidden;
+  }
+  /* v0.1.4 引入向导时把启动页元素包进 #boot 但漏了样式迁移：
+     居中/垂直分布/gap 原先定义在 body 上（元素是 body 直接子级），
+     包裹层一加布局全部失效——内容堆成一坨。样式必须跟到 #boot 上。 */
+  #boot {
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    gap: 22px; width: 100%; height: 100%;
   }
   .logo {
     width: 84px; height: 84px; border-radius: 22px;
