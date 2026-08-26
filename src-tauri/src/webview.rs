@@ -26,9 +26,8 @@ fn same_origin(u: &str, origin: &str) -> bool {
 /// overlay（右侧插件按钮簇、机器人状态栏等）一并下移，padding 移不动它们；
 /// decorum 悬浮条自身反向平移回窗口顶部；body 背景镜像到 html 防止顶栏露白。
 /// transform 的溢出贡献会让视口出现滚动条，dsh 为全高布局，html overflow 收紧。
-/// 仅在 harness origin 注入，**不作用于本地加载页**——loader 是裸 logo/状态，居中
-/// 显示即可；强加 transform 会把 body 折成 calc(100% - 40px)，再被 html overflow:hidden
-/// 裁掉大半，最终只剩中间压扁的一坨。
+/// 脚本自带 hostname 守卫，仅对 harness origin（127.0.0.1 随机端口）生效，
+/// tauri.localhost 加载页是空操作。
 pub const TITLEBAR_INSET_CSS: &str = r#"
 (function () {
   if (location.protocol !== 'http:' || location.hostname !== '127.0.0.1' || location.port === '') return;
@@ -55,6 +54,35 @@ pub const TITLEBAR_INSET_CSS: &str = r#"
   }
 })();
 "#;
+
+/// decorum 顶栏按钮用 Segoe Fluent Icons 的 PUA 字符渲染，字体缺失/未命中的机器上
+/// 显示为豆腐块（实测注册表有字体项但 WebView2 不命中）。以 font-size:0 隐藏字符，
+/// 用 SVG data URI 画标准的最小化/最大化/关闭图标——不依赖任何系统字体。
+/// 与 TITLEBAR_INSET_CSS 并列注册为 initialization_script，加载页与 harness 页都生效。
+pub const DECORUM_ICON_CSS: &str = r##"
+(function () {
+  var apply = function () {
+    var svg = function (body) {
+      return "url(\"data:image/svg+xml;charset=utf-8," + encodeURIComponent(
+        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" stroke="#9aa3af" stroke-width="1.2" fill="none" stroke-linecap="round">' + body + '</svg>'
+      ) + "\")";
+    };
+    var s = document.createElement('style');
+    s.textContent =
+      '.decorum-tb-btn{font-size:0 !important;position:relative}' +
+      '.decorum-tb-btn::before{content:"";position:absolute;inset:0;background-repeat:no-repeat;background-position:center}' +
+      '#decorum-tb-minimize::before{background-image:' + svg('<path d="M4 10h12"/>') + '}' +
+      '#decorum-tb-maximize::before{background-image:' + svg('<rect x="4.5" y="4.5" width="11" height="11"/>') + '}' +
+      '#decorum-tb-close::before{background-image:' + svg('<path d="M5 5l10 10M15 5L5 15"/>') + '}';
+    (document.head || document.documentElement).appendChild(s);
+  };
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', apply);
+  } else {
+    apply();
+  }
+})();
+"##;
 
 /// 创建主窗口（程序化创建以挂导航守卫；配置文件中 windows 留空）。
 /// 无边框：decorum 覆盖式标题栏（Windows 悬浮原生风格按钮；macOS Overlay 红绿灯），
@@ -87,6 +115,7 @@ pub fn create_main_window(app: &tauri::AppHandle) -> tauri::Result<()> {
     }
     let window = builder
         .initialization_script(TITLEBAR_INSET_CSS)
+        .initialization_script(DECORUM_ICON_CSS)
         .on_navigation(move |url| {
             let u = url.as_str().to_string();
             if is_local_url(&u) {
