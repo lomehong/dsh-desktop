@@ -21,27 +21,20 @@ fn same_origin(u: &str, origin: &str) -> bool {
     rest.is_empty() || rest.starts_with('/') || rest.starts_with('?') || rest.starts_with('#')
 }
 
-/// 无边框窗口的 decorum 顶栏（系统级悬浮按钮 ~40px 高）必须为 harness 内容让位。
-/// 用 padding-top 而非 body transform 让位：transform 会把 fixed/absolute 定位的
-/// 右侧插件按钮簇等 overlay 一起下移，padding 只让出顶部 40px 高度、harness 内容
-/// 仍然铺满窗口左边和中间、仅顶部被装饰按钮区遮挡，保留按钮独立悬浮在装饰区内。
-/// 脚本自带 hostname 守卫，仅对 harness origin（127.0.0.1 随机端口）生效，
-/// tauri.localhost 加载页是空操作。
-pub const TITLEBAR_INSET_CSS: &str = r#"
+/// 无边框窗口：decorum 顶栏三个按钮（最小化/最大化/关闭）作为 floating 覆盖
+/// 层悬浮在窗口最顶端——不挤压、不偏移 harness 内容。
+/// harness 主界面（左侧栏、中间工作区、右侧插件按钮簇）从窗口 y=0 开始铺满，
+/// 装饰按钮区域与 dsh 内容完全独立（z-index 上按钮在最上）。
+/// 脚本自带 hostname 守卫，仅对 harness origin 生效；tauri.localhost 加载页空操作。
+pub const TITLEBAR_INSET_CSS: &str = r##"
 (function () {
   if (location.protocol !== 'http:' || location.hostname !== '127.0.0.1' || location.port === '') return;
-  var TOP = 40;
   var apply = function () {
-    var b = document.body;
-    if (!b) return;
-    // 用 padding-top 给 decorum 顶栏让位；不偏移、不挤压 fixed overlay，
-    // 让 harness 主界面（左侧/中间/右侧栏）从 y=40 开始铺满
-    b.style.margin = '0';
-    b.style.paddingTop = TOP + 'px';
-    b.style.boxSizing = 'border-box';
-    // decorum 顶栏元素反向拉到 y=0 让按钮浮在窗口最顶端（padding 占用处）
+    // harness 不让位、不偏移：铺满整个窗口，让 decorum 浮动按钮独占顶部 ~40px 区域
+    document.body.style.margin = '0';
+    // decorum 顶栏元素 pinned 到窗口最顶端右侧
     var s = document.createElement('style');
-    s.textContent = '[data-tauri-decorum-tb]{transform:translateY(-' + TOP + 'px) !important;top:0;position:fixed;right:0}';
+    s.textContent = '[data-tauri-decorum-tb]{position:fixed;top:0;right:0;z-index:2147483647}';
     (document.head || document.documentElement).appendChild(s);
   };
   if (document.readyState === 'loading') {
@@ -50,7 +43,7 @@ pub const TITLEBAR_INSET_CSS: &str = r#"
     apply();
   }
 })();
-"#;
+"##;
 
 /// decorum 顶栏按钮用 Segoe Fluent Icons 的 PUA 字符渲染，字体缺失/未命中的机器上
 /// 显示为豆腐块（实测注册表有字体项但 WebView2 不命中）。以 font-size:0 隐藏字符，
