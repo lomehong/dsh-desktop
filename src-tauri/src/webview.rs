@@ -45,25 +45,24 @@ pub const TITLEBAR_INSET_CSS: &str = r##"
 })();
 "##;
 
-/// decorum 顶栏按钮用 Segoe Fluent Icons 的 PUA 字符渲染，字体缺失/未命中的机器上
-/// 显示为豆腐块（实测注册表有字体项但 WebView2 不命中）。以 font-size:0 隐藏字符，
-/// 用 SVG data URI 画标准的最小化/最大化/关闭图标——不依赖任何系统字体。
-/// 与 TITLEBAR_INSET_CSS 并列注册为 initialization_script，加载页与 harness 页都生效。
+/// decorum 顶栏按钮原本用 Segoe Fluent Icons 的 PUA 字符（\uE921 最小化、
+/// \uE922/\uE923 最大化、\uE8BB 关闭），该字体在很多机器上不命中而显示豆腐块。
+/// 替换策略：保持 decorum 自己注入 PUA 字符不变（最大化按钮在窗口最大化时
+/// decorum 已经会自动切换 \uE922 ↔ \uE923），只通过 CSS 把字符缩小成更接近
+/// 原生 Windows 标题栏按钮的视觉密度——避免占满 58x32 按钮中心。
 pub const DECORUM_ICON_CSS: &str = r##"
 (function () {
   var apply = function () {
-    var svg = function (body) {
-      return "url(\"data:image/svg+xml;charset=utf-8," + encodeURIComponent(
-        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" stroke="#9aa3af" stroke-width="1.2" fill="none" stroke-linecap="round">' + body + '</svg>'
-      ) + "\")";
-    };
     var s = document.createElement('style');
     s.textContent =
-      '.decorum-tb-btn{font-size:0 !important;position:relative}' +
-      '.decorum-tb-btn::before{content:"";position:absolute;inset:0;background-repeat:no-repeat;background-position:center}' +
-      '#decorum-tb-minimize::before{background-image:' + svg('<path d="M4 10h12"/>') + '}' +
-      '#decorum-tb-maximize::before{background-image:' + svg('<rect x="4.5" y="4.5" width="11" height="11"/>') + '}' +
-      '#decorum-tb-close::before{background-image:' + svg('<path d="M5 5l10 10M15 5L5 15"/>') + '}';
+      '.decorum-tb-btn{font-size:10px !important;line-height:1;display:flex !important;' +
+      'align-items:center !important;justify-content:center !important;' +
+      'color:#9aa3af !important;' +
+      // decorum 默认 font-family: 'Segoe Fluent Icons', 'Segoe MDL2 Assets'
+      // 缺一即豆腐块；改为多级回退链确保任意 Windows 都命中（Segoe MDL2 Assets 至少 Win7+ 必有）
+      'font-family:"Segoe Fluent Icons","Segoe MDL2 Assets","SegoeIcons","Segoe Symbol","Segoe UI Symbol",sans-serif !important}' +
+      '.decorum-tb-btn:hover{color:#e8ecf1 !important}' +
+      '#decorum-tb-close:hover{background-color:rgba(232,17,35,0.85) !important;color:#fff !important}';
     (document.head || document.documentElement).appendChild(s);
   };
   if (document.readyState === 'loading') {
