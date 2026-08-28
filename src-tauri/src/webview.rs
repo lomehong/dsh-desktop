@@ -133,11 +133,26 @@ pub fn create_main_window(app: &tauri::AppHandle) -> tauri::Result<()> {
     Ok(())
 }
 
-/// 把主窗口导航到就绪的 Harness 服务。
-pub fn navigate_to_harness(app: &tauri::AppHandle, base_url: &str) {
+/// 把主窗口导航到就绪的 Harness 服务。v0.1.2+ 的 launch_url 带一次性 token：
+/// webview 跟随 303 → 服务端种下 HttpOnly cookie（默认 30 天，密钥存 DSH_HOME，
+/// 跨重启有效）→ 落到干净的主界面；导航守卫按 origin 放行，`?token=` 属于
+/// 同 origin 的路径/查询，不受影响。旧版无 token，等价于直接导航 origin。
+/// 必须用原生 `navigate` 而非页面内 location.replace：后者是从 tauri.localhost
+/// 发起的跨站导航，浏览器对跨站发起的请求不携带 SameSite=Strict 的 cookie，
+/// 303 跟随会 401；原生导航等价于地址栏打开（无发起方），Strict 放行。
+pub fn navigate_to_harness(app: &tauri::AppHandle, launch_url: &str) {
     crate::status::update(app, "服务已就绪", false, true);
     if let Some(w) = app.get_webview_window("main") {
-        let _ = w.eval(&format!("location.replace('{base_url}')"));
+        match launch_url.parse() {
+            Ok(url) => {
+                if w.navigate(url).is_err() {
+                    let _ = w.eval(&format!("location.replace('{launch_url}')"));
+                }
+            }
+            Err(_) => {
+                let _ = w.eval(&format!("location.replace('{launch_url}')"));
+            }
+        }
         let _ = w.show();
         let _ = w.set_focus();
     }

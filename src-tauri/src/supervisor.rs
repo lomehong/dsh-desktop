@@ -18,19 +18,28 @@ pub const MAX_AUTO_RESTARTS: u32 = 3;
 /// 一个已拉起的 dsh web 服务：子进程句柄 + 实际监听地址（随机端口）。
 pub struct Running {
     pub child: Child,
+    /// 服务 origin（http://127.0.0.1:<port>）：导航放行、事件流订阅、pid 登记用。
     pub base_url: String,
+    /// dsh 报告的启动 URL。v0.1.2 起带一次性 token（`/?token=…`），旧版与
+    /// base_url 等价——就绪探测与 webview 首航必须走它：无 token 的 GET /
+    /// 在 v0.1.2+ 是 401，token 交换（303 + Set-Cookie）才是进入主界面的正门。
+    pub launch_url: String,
 }
 
-/// 从一行 stdout 中解析 `dsh web: http://127.0.0.1:<port>`。
-fn parse_web_url(line: &str) -> Option<String> {
-    let marker = "dsh web: http://127.0.0.1:";
+/// 从一行 stdout 解析 `dsh web: <url>[ (LAN: <url>)]`，返回 (origin, 启动 URL)。
+/// v0.1.2 起 URL 携带一次性 token，必须原样保留；只认 loopback 地址，
+/// LAN 候选（括号内）一律忽略。解析不出 loopback 地址的行直接跳过，
+/// 继续等下一行（如 `--no-open` 提示行）。
+fn parse_web_url(line: &str) -> Option<(String, String)> {
+    let marker = "dsh web: ";
     let idx = line.find(marker)?;
-    let rest = &line[idx + marker.len()..];
+    let url = line[idx + marker.len()..].split_whitespace().next()?;
+    let rest = url.strip_prefix("http://127.0.0.1:")?;
     let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
     if digits.is_empty() {
         return None;
     }
-    Some(format!("http://127.0.0.1:{digits}"))
+    Some((format!("http://127.0.0.1:{digits}"), url.to_string()))
 }
 
 /// 进程登记（JSON）：壳 pid + dsh 子进程 pid + 实际端口。
@@ -178,7 +187,7 @@ pub fn spawn_dsh(launch: Launch) -> Result<Running, String> {
     let stdout = child.stdout.take().ok_or("无法捕获 dsh 输出")?;
     let stderr = child.stderr.take().ok_or("无法捕获 dsh 错误输出")?;
 
-    let (tx, rx) = std::sync::mpsc::channel::<String>();
+    let (tx, rx) = std::sync::mpsc::channel::<(String, String)>();
     let log_out = Arc::clone(&log);
     let tx_out = tx.clone();
     std::thread::spawn(move || {
@@ -205,7 +214,7 @@ pub fn spawn_dsh(launch: Launch) -> Result<Running, String> {
     });
 
     let deadline = std::time::Instant::now() + Duration::from_secs(URL_WAIT_SECS);
-    let base_url = loop {
+    let (base_url, launch_url) = loop {
         if std::time::Instant::now() > deadline {
             kill_tree(child.id() as u32);
             let _ = child.wait();
@@ -227,7 +236,7 @@ pub fn spawn_dsh(launch: Launch) -> Result<Running, String> {
             }
         }
     };
-    Ok(Running { child, base_url })
+    Ok(Running { child, base_url, launch_url })
 }
 
 /// 读取已记录的启动方式；无记录时重新探测。
@@ -260,7 +269,7 @@ pub fn start_service(app: &tauri::AppHandle) -> Result<(), String> {
         write_pidrecord(app, &running);
         *state.child.lock().unwrap() = Some(running.child);
         status::set(app, "等待服务就绪（首次启动约需 10~60 秒）…");
-        if !crate::readiness::wait_http_ok(&running.base_url, Duration::from_secs(HEALTH_WAIT_SECS)) {
+        if !crate::readiness::wait_http_ok(&running.launch_url, Duration::from_secs(HEALTH_WAIT_SECS)) {
             return Err(format!(
                 "服务未就绪。请查看日志: {}",
                 runtime::log_file().display()
@@ -268,7 +277,7 @@ pub fn start_service(app: &tauri::AppHandle) -> Result<(), String> {
         }
         // 就绪后订阅事件流：回合完成/审批请求 → 原生通知与任务栏闪烁
         crate::events::spawn(app, &running.base_url);
-        webview::navigate_to_harness(app, &running.base_url);
+        webview::navigate_to_harness(app, &running.launch_url);
         Ok(())
     })();
     *state.restarting.lock().unwrap() = false;
@@ -325,5 +334,32 @@ pub fn watch_child(app: &tauri::AppHandle) {
             status::fail(app, &e);
             return;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_v0_1_2_token_url_keeping_token_and_origin() {
+        let line = "dsh web: http://127.0.0.1:44182/?token=AbC-123_xYz0 (LAN: http://192.168.1.5:44182/?token=AbC-123_xYz0)";
+        let (base, launch) = parse_web_url(line).unwrap();
+        assert_eq!(base, "http://127.0.0.1:44182");
+        assert_eq!(launch, "http://127.0.0.1:44182/?token=AbC-123_xYz0");
+    }
+
+    #[test]
+    fn parses_plain_url_without_token() {
+        let (base, launch) = parse_web_url("dsh web: http://127.0.0.1:8080/").unwrap();
+        assert_eq!(base, "http://127.0.0.1:8080");
+        assert_eq!(launch, "http://127.0.0.1:8080/");
+    }
+
+    #[test]
+    fn skips_non_loopback_and_hint_lines() {
+        assert!(parse_web_url("dsh web: http://192.168.1.5:8080/").is_none());
+        assert!(parse_web_url("dsh web: opening the default browser; pass --no-open to disable").is_none());
+        assert!(parse_web_url("listening on port 8080").is_none());
     }
 }

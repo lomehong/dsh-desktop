@@ -13,6 +13,22 @@ use tauri::Manager;
 pub const DSH_VERSION: &str = "0.1.1-rc.2";
 /// 便携 Node 版本（dsh rc.x 的 zstd 要求需要 Node 24）。
 const NODE_VERSION: &str = "24.19.0";
+/// 壳已适配的 dsh 最高版本（语义化三元组）。v0.1.2 起 Web 界面启用一次性 token
+/// 认证且事件流端点更换为 /api/remote.mux：壳侧 token 贯穿（v0.1.14）已覆盖
+/// 启动与首航，但桌面通知订阅仍未适配新协议——升上去会导致通知静默失效。
+/// npm latest 超出此版本时拒绝升级并引导先升级应用本体；事件流适配落地后
+/// 应同步上调此值。DSH_DESKTOP_DSH_VERSION 显式指定视为知情强制，不受限。
+const DSH_MAX_ADAPTED: (u64, u64, u64) = (0, 1, 1);
+
+/// 解析语义化版本三元组（忽略 `-rc.x`/`-alpha.x`/`+build` 等后缀；解析失败返回 None）。
+fn version_triple(v: &str) -> Option<(u64, u64, u64)> {
+    let mut it = v.split(['-', '+']).next()?.split('.');
+    Some((
+        it.next()?.parse().ok()?,
+        it.next()?.parse().ok()?,
+        it.next()?.parse().ok()?,
+    ))
+}
 
 /// 给命令前置便携 node 目录到 PATH（Unix 的 npm 脚本用 `#!/usr/bin/env node` 找解释器）。
 fn prepend_node_path(c: &mut Command) {
@@ -292,6 +308,18 @@ pub fn upgrade_dsh(app: &tauri::AppHandle) -> Result<String, String> {
         install_runtime(app)?;
     }
     let target = target_version()?;
+    // 升级护栏：npm latest 超出壳已适配的版本线时拒绝，防止“升级按钮变砖”。
+    // DSH_DESKTOP_DSH_VERSION 显式指定视为知情强制，绕过护栏（逃生门）。
+    if std::env::var("DSH_DESKTOP_DSH_VERSION").map_or(true, |v| v.is_empty()) {
+        if let Some(t) = version_triple(&target) {
+            if t > DSH_MAX_ADAPTED {
+                return Err(format!(
+                    "DSH v{target} 超出当前应用已适配的运行时版本（≤0.{}.{}.x）：该版本线启用了 Web 一次性 token 认证并更换了事件流端点。请先把 dsh-desktop 应用本体升级到配套版本；如确需强制，可设环境变量 DSH_DESKTOP_DSH_VERSION 指定目标版本。",
+                    DSH_MAX_ADAPTED.0, DSH_MAX_ADAPTED.1
+                ));
+            }
+        }
+    }
     let installed = installed_dsh_version();
     if installed.as_deref() == Some(target.as_str()) {
         return Ok(format!("DSH 运行时已是最新 v{target}"));
@@ -336,5 +364,30 @@ pub fn install_and_start(app: &tauri::AppHandle) {
     status::set(app, "运行环境就绪，正在启动服务…");
     if let Err(e) = supervisor::start_service(app) {
         status::fail(app, &e);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn version_triple_strips_prerelease_and_build_suffixes() {
+        assert_eq!(version_triple("0.1.1-rc.2"), Some((0, 1, 1)));
+        assert_eq!(version_triple("0.1.2-alpha.1"), Some((0, 1, 2)));
+        assert_eq!(version_triple("0.1.2"), Some((0, 1, 2)));
+        assert_eq!(version_triple("1.2.3+build.5"), Some((1, 2, 3)));
+        assert_eq!(version_triple("junk"), None);
+    }
+
+    #[test]
+    fn guard_blocks_next_patch_line_allows_current() {
+        // 预发布段按其所属三元组参与比较：0.1.2-alpha.1 已含破坏性变更，必须拦
+        assert!(version_triple("0.1.2-alpha.1").unwrap() > DSH_MAX_ADAPTED);
+        assert!(version_triple("0.1.2").unwrap() > DSH_MAX_ADAPTED);
+        assert!(version_triple("0.2.0").unwrap() > DSH_MAX_ADAPTED);
+        // 同版本线内的 patch/rc 更新放行
+        assert!(version_triple("0.1.1-rc.3").unwrap() <= DSH_MAX_ADAPTED);
+        assert!(version_triple("0.1.1").unwrap() <= DSH_MAX_ADAPTED);
     }
 }
