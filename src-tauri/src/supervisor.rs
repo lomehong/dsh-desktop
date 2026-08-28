@@ -276,7 +276,8 @@ pub fn start_service(app: &tauri::AppHandle) -> Result<(), String> {
             ));
         }
         // 就绪后订阅事件流：回合完成/审批请求 → 原生通知与任务栏闪烁
-        crate::events::spawn(app, &running.base_url);
+        // （launch_url 供 ≥0.1.2 的 token→cookie 交换；≤0.1.1 用不到也无害）
+        crate::events::spawn(app, &running.base_url, &running.launch_url);
         webview::navigate_to_harness(app, &running.launch_url);
         Ok(())
     })();
