@@ -25,10 +25,15 @@ fn same_origin(u: &str, origin: &str) -> bool {
 /// 层悬浮在窗口最顶端——不挤压、不偏移 harness 内容。
 /// harness 主界面（左侧栏、中间工作区、右侧插件按钮簇）从窗口 y=0 开始铺满，
 /// 装饰按钮区域与 dsh 内容完全独立（z-index 上按钮在最上）。
-/// 脚本自带 hostname 守卫，仅对 harness origin 生效；tauri.localhost 加载页空操作。
+/// 脚本自带端口守卫（协议 http 且带端口即生效，本地回环与远程网关一视同仁）：
+/// 能加载进壳的页面只有导航守卫放行的已配对 origin，因此无需再校验具体 hostname；
+/// tauri.localhost 加载页（非 http 协议）仍是空操作。
 pub const TITLEBAR_INSET_CSS: &str = r##"
 (function () {
-  if (location.protocol !== 'http:' || location.hostname !== '127.0.0.1' || location.port === '') return;
+  // 端口守卫：任意带端口的 http 页面即视为守卫放行的 harness origin（本地回环或远程网关）。
+  // 页面边界在导航守卫（只放行已配对 origin），此处无需也无法枚举具体 hostname；
+  // 加载页 tauri.localhost 非 http 协议，天然空操作。
+  if (location.protocol !== 'http:' || location.port === '') return;
   var apply = function () {
     // harness 不让位、不偏移：铺满整个窗口，让 decorum 浮动按钮独占顶部 ~40px 区域
     document.body.style.margin = '0';
@@ -76,7 +81,8 @@ pub const DECORUM_ICON_CSS: &str = r##"
 /// 创建主窗口（程序化创建以挂导航守卫；配置文件中 windows 留空）。
 /// 无边框：decorum 覆盖式标题栏（Windows 悬浮原生风格按钮；macOS Overlay 红绿灯），
 /// Harness 页面经 TITLEBAR_INSET_CSS 下移，不被悬浮条遮挡。
-/// 脚本自带 hostname 守卫（仅 127.0.0.1 的 harness origin 生效），对 tauri.localhost
+/// 脚本自带端口守卫（任意带端口的 http 页面生效——能加载进壳的只有导航守卫放行的
+/// 已配对 origin，本地回环或远程网关皆适用），对 tauri.localhost
 /// 加载页是空操作——v0.1.5 曾误判它会折坏加载页改为导航后 250ms eval 注入，
 /// 那条路径有竞态（eval 可能落在导航完成前的旧页面上），此处恢复为一贯做法。
 pub fn create_main_window(app: &tauri::AppHandle) -> tauri::Result<()> {
