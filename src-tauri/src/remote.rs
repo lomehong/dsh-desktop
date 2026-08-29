@@ -1,0 +1,220 @@
+//! 远程实例凭据与配对（对接 dsh-remote 网关，契约见其 README）：
+//! - POST /__remote/pair {code} → {ok,token,…}；403 码无效；429 限速
+//! - GET  /__remote/pair?token=<token> → 303 + Set-Cookie（给 webview 种凭证）
+//! 凭据明文落盘 remote.json（与 dsh 宿主会话密钥同威胁模型，README 声明）。
+// 调用方在模式状态机（main.rs/supervisor.rs）接线；bin crate 下 pub 不豁免 dead_code，先压掉
+#![allow(dead_code)]
+use std::io::{Read, Write};
+use std::net::TcpStream;
+use std::time::Duration;
+
+use serde::{Deserialize, Serialize};
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct RemoteConfig {
+    pub address: String, // 裸 host:port
+    pub origin: String,  // http://host:port
+    pub token: String,
+    pub paired_at: u64,
+}
+
+pub fn config_path() -> std::path::PathBuf {
+    crate::runtime::runtime_root().join("remote.json")
+}
+
+/// 上次模式（"local"/"remote"）：与凭据独立，断开远程不清凭据。
+pub fn last_mode() -> &'static str {
+    "mode.txt"
+}
+
+pub fn load_mode() -> &'static str {
+    match std::fs::read_to_string(crate::runtime::runtime_root().join(last_mode())) {
+        Ok(s) if s.trim() == "remote" => "remote",
+        _ => "local",
+    }
+}
+
+pub fn save_mode(mode: &str) {
+    let _ = std::fs::write(crate::runtime::runtime_root().join(last_mode()), mode);
+}
+
+pub fn load() -> Option<RemoteConfig> {
+    load_config_from(&config_path())
+}
+
+pub fn save(cfg: &RemoteConfig) -> Result<(), String> {
+    save_config_to(&config_path(), cfg)
+}
+
+fn load_config_from(path: &std::path::Path) -> Option<RemoteConfig> {
+    // 损坏/缺失一律 None（配对即覆盖，无需恢复语义）
+    serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()
+}
+
+fn save_config_to(path: &std::path::Path, cfg: &RemoteConfig) -> Result<(), String> {
+    // tmp + rename：写一半崩溃不会留下半个 remote.json
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, serde_json::to_string(cfg).map_err(|e| e.to_string())?)
+        .map_err(|e| e.to_string())?;
+    std::fs::rename(&tmp, path).map_err(|e| e.to_string())
+}
+
+/// 解析地址输入：裸 `host:port` 或 `http://host:port`；只支持 http、端口必填。
+/// 返回 (address, origin)。
+pub fn parse_address(input: &str) -> Result<(String, String), String> {
+    let s = input.trim();
+    if s.starts_with("https://") {
+        return Err("只支持 http:// 地址（网关不带 TLS）".into());
+    }
+    // 裸地址与带 http:// 前缀都接受，内部统一按裸 host:port 处理
+    let s = s.strip_prefix("http://").unwrap_or(s);
+    if s.contains('/') || s.contains('?') || s.contains('#') {
+        return Err("地址只能是 host:port，不含路径".into());
+    }
+    let (host, port) = s
+        .rsplit_once(':')
+        .ok_or("地址缺少端口（如 192.168.1.146:3090）")?;
+    let port: u16 = port.parse().map_err(|_| "端口必须是数字".to_string())?;
+    if port == 0 || host.is_empty() || host.contains(':') {
+        return Err("地址无效".into());
+    }
+    Ok((s.to_string(), format!("http://{s}")))
+}
+
+/// 从粘贴文本中提取配对链接的 (address, code)。
+pub fn parse_pairing_link(text: &str) -> Result<(String, String), String> {
+    let marker = "/__remote/pair?code=";
+    let start = text
+        .find("http://")
+        .ok_or("未找到配对链接（应以 http:// 开头或包含）")?;
+    let rest = &text[start..];
+    let end = rest.find(|c: char| c.is_whitespace()).unwrap_or(rest.len());
+    let url = &rest[..end];
+    let idx = url.find(marker).ok_or("链接缺少配对码参数")?;
+    let addr_part = &url[..idx];
+    let code = url[idx + marker.len()..].trim_end_matches('/');
+    if code.is_empty() {
+        return Err("链接中配对码为空".into());
+    }
+    let (addr, _) = parse_address(addr_part)?;
+    Ok((addr, code.to_string()))
+}
+
+/// POST /__remote/pair 换 token（裸 TcpStream，风格同 events.rs，零新依赖）。
+/// 状态映射：2xx→token；403→码无效；429→限速；其余/超时→连接失败。
+pub fn pair(address: &str, code: &str) -> Result<String, String> {
+    let origin = parse_address(address)?.1;
+    let body = serde_json::json!({ "code": code }).to_string();
+    let raw = http_post_json(&origin, "/__remote/pair", &body).ok_or("无法连接远程实例（超时或拒绝）")?;
+    let head = String::from_utf8_lossy(&raw);
+    let status_line = head.lines().next().unwrap_or("");
+    if status_line.contains(" 403") {
+        return Err("配对码无效或已过期：请在远端 dsh 设置页重新生成配对链接".into());
+    }
+    if status_line.contains(" 429") {
+        return Err("配对尝试过于频繁，请稍后再试".into());
+    }
+    if !status_line.contains(" 2") && !status_line.contains(" 200") {
+        return Err(format!("配对失败：{}", status_line));
+    }
+    // body 从首个 \r\n\r\n 后取（小 JSON，一次读入足够）
+    let json_start = raw
+        .windows(4)
+        .position(|w| w == b"\r\n\r\n")
+        .map(|i| i + 4)
+        .unwrap_or(0);
+    let value: serde_json::Value =
+        serde_json::from_slice(&raw[json_start..]).map_err(|_| "网关应答不是合法 JSON")?;
+    let token = value.get("token").and_then(|t| t.as_str()).unwrap_or("");
+    if token.is_empty() {
+        return Err("网关应答缺少 token".into());
+    }
+    Ok(token.to_string())
+}
+
+/// 极简 HTTP/1.1 POST JSON（Connection: close，读满或超时为止）。
+fn http_post_json(origin: &str, path: &str, body: &str) -> Option<Vec<u8>> {
+    let authority = origin.strip_prefix("http://")?;
+    let (host, port) = authority.rsplit_once(':')?;
+    let port: u16 = port.parse().ok()?;
+    let mut stream = TcpStream::connect((host, port)).ok()?;
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(8)));
+    let _ = stream.set_write_timeout(Some(Duration::from_secs(8)));
+    let req = format!(
+        "POST {path} HTTP/1.1\r\nHost: {authority}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    );
+    stream.write_all(req.as_bytes()).ok()?;
+    let mut buf = Vec::new();
+    let mut chunk = [0u8; 1024];
+    loop {
+        match stream.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(n) => buf.extend_from_slice(&chunk[..n]),
+            Err(_) => break,
+        }
+    }
+    Some(buf)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_bare_address_and_url_form() {
+        let (addr, origin) = parse_address("192.168.1.146:3090").unwrap();
+        assert_eq!(addr, "192.168.1.146:3090");
+        assert_eq!(origin, "http://192.168.1.146:3090");
+        // 带 scheme 也接受；https / 带路径 / 缺端口 拒绝
+        assert_eq!(parse_address("http://10.0.0.2:8080").unwrap().0, "10.0.0.2:8080");
+        assert!(parse_address("https://10.0.0.2:8080").is_err());
+        assert!(parse_address("http://10.0.0.2:8080/foo").is_err());
+        assert!(parse_address("10.0.0.2").is_err()); // 缺端口
+        assert!(parse_address("host:abcd").is_err()); // 端口非数字
+        assert!(parse_address("").is_err());
+        assert!(parse_address("127.0.0.1:0").is_err()); // 端口 0 无意义
+    }
+
+    #[test]
+    fn parses_pairing_link_into_address_and_code() {
+        let (addr, code) = parse_pairing_link(
+            "http://192.168.1.146:3090/__remote/pair?code=V0P7coA9FA5jgD86wdaIDg",
+        )
+        .unwrap();
+        assert_eq!(addr, "192.168.1.146:3090");
+        assert_eq!(code, "V0P7coA9FA5jgD86wdaIDg");
+        // 前后带空白/整段文本中含链接也接受
+        let (a2, c2) =
+            parse_pairing_link("  请打开 http://10.1.2.3:3090/__remote/pair?code=xY-z_9 注册  ").unwrap();
+        assert_eq!(a2, "10.1.2.3:3090");
+        assert_eq!(c2, "xY-z_9");
+        assert!(parse_pairing_link("http://10.1.2.3:3090/other?code=x").is_err());
+        assert!(parse_pairing_link("随便一段话").is_err());
+    }
+
+    #[test]
+    fn config_roundtrip_and_corrupt_tolerated() {
+        let dir = std::env::temp_dir().join(format!(
+            "dsh-remote-test-{}-{}",
+            std::process::id(),
+            crate::runtime::unix_now()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("remote.json");
+        // 用可注入路径的内部函数测；损坏文件 → None
+        std::fs::write(&path, "{broken").unwrap();
+        assert!(load_config_from(&path).is_none());
+        let cfg = RemoteConfig {
+            address: "192.168.1.146:3090".into(),
+            origin: "http://192.168.1.146:3090".into(),
+            token: "tok-1".into(),
+            paired_at: 12345,
+        };
+        save_config_to(&path, &cfg).unwrap();
+        let loaded = load_config_from(&path).unwrap();
+        assert_eq!(loaded.token, "tok-1");
+        assert_eq!(loaded.origin, cfg.origin);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}

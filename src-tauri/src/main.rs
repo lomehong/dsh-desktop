@@ -8,6 +8,7 @@ mod events;
 mod install;
 mod persona;
 mod readiness;
+mod remote;
 mod runtime;
 mod status;
 mod supervisor;
