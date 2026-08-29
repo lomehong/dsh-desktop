@@ -100,3 +100,27 @@ Rust 单测：address/配对链接解析（含非法输入拒绝）、remote.jso
 M1 remote.rs（凭据/解析/配对调用）→ M2 模式状态机 + 远程启动序列 + 命令层 →
 M3 导航/capability/顶栏样式 → M4 事件流带凭据 + 探测头 → M5 加载页连接屏 + 托盘 →
 M6 README + CI + 真机验收。
+
+---
+
+## 附注（2026-08-29 真机验收后）：数据路径切换路线 A → 路线 B
+
+真机验收发现上游设计性阻断：dsh 前端 connection.isLoopback（页面 hostname 是否
+回环）决定 settingsScope 走 host 还是 memory——非回环浏览器的 settings RPC **永不
+发起**（上游刻意保护提供方 API Key），模型/设置页必然不可用。浏览器侧开关
+（origin-as-secure）解决 crypto 但解决不了这一层。
+
+**决策（用户批准）**：数据路径切换路线 B——壳内起本地回环反代：
+
+- `remote_proxy.rs`：TcpListener 绑 `127.0.0.1:0`（tokio，显式依赖启用 net/io-util/
+  rt/time），每连接：读请求头 → 改写 Host 为网关 authority + 注入 `x-remote-token`
+  → 按帧转发（content-length/chunked/无长度关闭三种响应框架识别后原样转发字节，
+  客户端自解 chunked）→ keep-alive 循环处理同连接后续请求；WebSocket upgrade 走
+  透传支路（转发改写后的握手头后双向裸拷贝直到任一侧关闭）。
+- webview 导航 `http://127.0.0.1:<port>/__remote/pair?token=` → 页面 hostname 回环
+  → dsh 视为本机浏览器：模型/设置完整可用；回环天然安全上下文（crypto 原生可用，
+  Chromium 开关与 polyfill 退役为保险丝）；capability `http://*:*`（已实证匹配）与
+  导航守卫（放行代理 origin）原样复用。
+- 事件订阅（壳的通知）继续**直连网关**带 x-remote-token，不经代理。
+- 安全性：代理仅绑回环；token 只注入到已配对网关的流量；配对设备=完全主人的
+  威胁模型不变（本就是阶段 1 决策）。
