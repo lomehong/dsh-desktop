@@ -13,9 +13,13 @@ pub fn http_ok(url: &str) -> bool {
 }
 
 /// 同 http_ok，但可附加额外请求头（远程模式：x-remote-token 网关凭证）。
-/// （接线在模式状态机任务；bin crate 下 pub 不豁免 dead_code，先压掉）
+/// 头值含控制字符直接拒绝（CRLF 注入会拆出伪造请求行）——与 events.rs 的
+/// HeaderValue 校验同一道防线。（接线在模式状态机任务；bin crate 下 pub 不豁免 dead_code，先压掉）
 #[allow(dead_code)]
 pub fn http_ok_hdr(url: &str, extra_header: Option<(&str, &str)>) -> bool {
+    if extra_header.is_some_and(|(_, v)| v.chars().any(|c| c.is_control())) {
+        return false;
+    }
     http_ok_inner(url, extra_header)
 }
 
@@ -140,8 +144,8 @@ mod tests {
     fn status_ok_recognizes_status_lines_only() {
         assert!(status_ok("HTTP/1.1 200 OK"));
         assert!(status_ok("HTTP/1.0 303 See Other"));
-        assert!(status_ok("HTTP/1.1 401 Unauthorized") == false);
-        assert!(status_ok("garbage") == false);
+        assert!(!status_ok("HTTP/1.1 401 Unauthorized"));
+        assert!(!status_ok("garbage"));
     }
 
     #[test]
@@ -186,6 +190,16 @@ mod tests {
             "http://127.0.0.1:1/",
             Some("t"),
             Duration::from_millis(200)
+        ));
+    }
+
+    #[test]
+    fn http_ok_hdr_rejects_control_chars_in_header_value() {
+        // CRLF 注入防护：头值含控制字符直接拒绝（服务端即便会回 200 也不放行）
+        let p = serve_once("HTTP/1.1 200 OK\r\ncontent-length: 0\r\n\r\n");
+        assert!(!http_ok_hdr(
+            &format!("http://127.0.0.1:{p}/"),
+            Some(("x-remote-token", "tok\r\nX-Evil: 1"))
         ));
     }
 }

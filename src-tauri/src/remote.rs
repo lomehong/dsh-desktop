@@ -1,6 +1,7 @@
 //! 远程实例凭据与配对（对接 dsh-remote 网关，契约见其 README）：
 //! - POST /__remote/pair {code} → {ok,token,…}；403 码无效；429 限速
 //! - GET  /__remote/pair?token=<token> → 303 + Set-Cookie（给 webview 种凭证）
+//!
 //! 凭据明文落盘 remote.json（与 dsh 宿主会话密钥同威胁模型，README 声明）。
 // 调用方在模式状态机（main.rs/supervisor.rs）接线；bin crate 下 pub 不豁免 dead_code，先压掉
 #![allow(dead_code)]
@@ -22,20 +23,20 @@ pub fn config_path() -> std::path::PathBuf {
     crate::runtime::runtime_root().join("remote.json")
 }
 
-/// 上次模式（"local"/"remote"）：与凭据独立，断开远程不清凭据。
-pub fn last_mode() -> &'static str {
+/// 模式记忆文件（"mode.txt"）：上次模式（"local"/"remote"）与凭据独立，断开远程不清凭据。
+pub fn mode_file() -> &'static str {
     "mode.txt"
 }
 
 pub fn load_mode() -> &'static str {
-    match std::fs::read_to_string(crate::runtime::runtime_root().join(last_mode())) {
+    match std::fs::read_to_string(crate::runtime::runtime_root().join(mode_file())) {
         Ok(s) if s.trim() == "remote" => "remote",
         _ => "local",
     }
 }
 
 pub fn save_mode(mode: &str) {
-    let _ = std::fs::write(crate::runtime::runtime_root().join(last_mode()), mode);
+    let _ = std::fs::write(crate::runtime::runtime_root().join(mode_file()), mode);
 }
 
 pub fn load() -> Option<RemoteConfig> {
@@ -108,16 +109,20 @@ pub fn pair(address: &str, code: &str) -> Result<String, String> {
     let raw = http_post_json(&origin, "/__remote/pair", &body).ok_or("无法连接远程实例（超时或拒绝）")?;
     let head = String::from_utf8_lossy(&raw);
     let status_line = head.lines().next().unwrap_or("");
-    if status_line.contains(" 403") {
+    let Some(resp_code) = status_code(status_line) else {
+        // 空应答/非 HTTP 应答（端口上跑的不是网关）：不把空串拼进「配对失败：」文案
+        return Err("无法连接远程实例（无有效应答）".into());
+    };
+    if resp_code.starts_with("403") {
         return Err("配对码无效或已过期：请在远端 dsh 设置页重新生成配对链接".into());
     }
-    if status_line.contains(" 429") {
+    if resp_code.starts_with("429") {
         return Err("配对尝试过于频繁，请稍后再试".into());
     }
-    if !status_line.contains(" 2") && !status_line.contains(" 200") {
+    if !resp_code.starts_with('2') {
         return Err(format!("配对失败：{}", status_line));
     }
-    // body 从首个 \r\n\r\n 后取（小 JSON，一次读入足够）
+    // 2xx：body 从首个 \r\n\r\n 后取（小 JSON，一次读入足够）
     let json_start = raw
         .windows(4)
         .position(|w| w == b"\r\n\r\n")
@@ -130,6 +135,15 @@ pub fn pair(address: &str, code: &str) -> Result<String, String> {
         return Err("网关应答缺少 token".into());
     }
     Ok(token.to_string())
+}
+
+/// 状态行形如 `HTTP/1.1 200 OK` → 响应码（如 "200"）；空应答/形状不符返回 None。
+/// （形状解析与 readiness.rs 的 status_ok 一致。）
+fn status_code(status_line: &str) -> Option<&str> {
+    let rest = status_line
+        .strip_prefix("HTTP/1.0 ")
+        .or_else(|| status_line.strip_prefix("HTTP/1.1 "))?;
+    rest.split_whitespace().next()
 }
 
 /// 极简 HTTP/1.1 POST JSON（Connection: close，读满或超时为止）。
@@ -160,7 +174,9 @@ fn http_post_json(origin: &str, path: &str, body: &str) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::net::TcpListener;
 
+    /* ── 解析与凭据存取 ── */
     #[test]
     fn parses_bare_address_and_url_form() {
         let (addr, origin) = parse_address("192.168.1.146:3090").unwrap();
@@ -216,5 +232,44 @@ mod tests {
         assert_eq!(loaded.token, "tok-1");
         assert_eq!(loaded.origin, cfg.origin);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /* ── pair()：对假网关的 canned 应答做状态解析 ── */
+    /// 起一个一次性 HTTP 服务，读入请求后回一段固定字节即关闭（风格同 readiness.rs）。
+    fn serve_once(response: &'static str) -> u16 {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut buf = [0u8; 1024];
+                let _ = stream.read(&mut buf);
+                let _ = stream.write_all(response.as_bytes());
+            }
+        });
+        port
+    }
+
+    #[test]
+    fn pair_extracts_token_from_ok_response() {
+        let p = serve_once(
+            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 30\r\nconnection: close\r\n\r\n{\"ok\":true,\"token\":\"tok-pair\"}",
+        );
+        let token = pair(&format!("127.0.0.1:{p}"), "any-code").unwrap();
+        assert_eq!(token, "tok-pair");
+    }
+
+    #[test]
+    fn pair_maps_403_to_invalid_code_error() {
+        let p = serve_once("HTTP/1.1 403 Forbidden\r\ncontent-length: 0\r\nconnection: close\r\n\r\n");
+        let err = pair(&format!("127.0.0.1:{p}"), "bad-code").unwrap_err();
+        assert!(err.contains("配对码无效"));
+    }
+
+    #[test]
+    fn pair_empty_response_maps_to_no_valid_answer() {
+        // 端口上跑的不是网关：accept 后立即关闭，零字节应答 → 明确的「无有效应答」
+        let p = serve_once("");
+        let err = pair(&format!("127.0.0.1:{p}"), "any-code").unwrap_err();
+        assert!(err.contains("无有效应答"));
     }
 }
