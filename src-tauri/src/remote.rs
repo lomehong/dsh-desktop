@@ -3,8 +3,6 @@
 //! - GET  /__remote/pair?token=<token> → 303 + Set-Cookie（给 webview 种凭证）
 //!
 //! 凭据明文落盘 remote.json（与 dsh 宿主会话密钥同威胁模型，README 声明）。
-// 调用方在模式状态机（main.rs/supervisor.rs）接线；bin crate 下 pub 不豁免 dead_code，先压掉
-#![allow(dead_code)]
 use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::time::Duration;

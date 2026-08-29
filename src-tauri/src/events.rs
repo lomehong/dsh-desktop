@@ -87,8 +87,7 @@ fn run(app: tauri::AppHandle, base_url: String, launch_url: String, gen: u64) {
 /* ════════════════════════ 远程模式（dsh-remote 网关） ════════════════════════ */
 
 /// 远程模式订阅线程：带网关凭证连远程实例的事件流（无本地一次性 token 可换 cookie）。
-/// （接线在模式状态机任务；bin crate 下 pub 不豁免 dead_code，先压掉）
-#[allow(dead_code)]
+/// 失败只记日志不重试——断流不影响已加载页面，模式切换时世代号自然接管重连。
 pub fn spawn_remote(app: &tauri::AppHandle, base_url: &str, token: &str) {
     let gen = {
         let state: tauri::State<AppState> = app.state();

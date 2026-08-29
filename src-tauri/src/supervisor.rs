@@ -301,6 +301,66 @@ pub fn restart_service(app: &tauri::AppHandle) {
     }
 }
 
+/// 远程连接序列：凭据探活 → origin 入放行表 → 事件流(带凭证) → 导航（经 pair?token= 种 cookie）。
+/// 与 start_service 共用同一把 `restarting` 互斥锁，防本地/远程并发双拉；远程模式不落
+/// child 句柄（子进程归远端管），守护线程因 child=None 自然失活，不会误拉本地服务。
+pub fn connect_remote_flow(app: &tauri::AppHandle) -> Result<(), String> {
+    let state: tauri::State<AppState> = app.state();
+    {
+        let mut r = state.restarting.lock().unwrap();
+        if *r {
+            return Ok(());
+        }
+        *r = true;
+    }
+    let result = (|| -> Result<(), String> {
+        let cfg = crate::remote::load().ok_or("尚未配对远程实例，请先输入地址与配对码")?;
+        status::set(app, &format!("连接远程实例 {}…", cfg.address));
+        // 探活带网关凭证头：过不了网关 401 这关就不算就绪（凭证失效早暴露）
+        if !crate::readiness::wait_http_ok_hdr(
+            &format!("{}/", cfg.origin),
+            Some(&cfg.token),
+            Duration::from_secs(HEALTH_WAIT_SECS),
+        ) {
+            return Err(format!("无法连接远程实例 {}（超时或凭证失效）", cfg.address));
+        }
+        // 凭证有效才放行导航与事件流：origin 换成远程网关，导航守卫同步收紧
+        *state.origin.lock().unwrap() = Some(cfg.origin.clone());
+        crate::events::spawn_remote(app, &cfg.origin, &cfg.token);
+        // 经 pair?token= 导航：网关 303 + Set-Cookie 种下 webview 凭证后落到 /
+        // （同 dsh 一次性 token 心智；必须原生导航——跨站发起的页面导航不带
+        // SameSite=Strict 的 cookie，理由同 navigate_to_harness 注释）
+        webview::navigate_to_harness(
+            app,
+            &format!("{}/__remote/pair?token={}", cfg.origin, cfg.token),
+        );
+        Ok(())
+    })();
+    *state.restarting.lock().unwrap() = false;
+    result
+}
+
+/// 托盘「重启服务」/ 重启命令的统一入口：按当前模式分派。
+/// 本地走 restart_service（杀树重启，行为不变）；远程先收掉残留 child（如升级运行时
+/// 等路径在远程模式下拉起过的本地服务）、撤 origin 回加载页，再走 connect_remote_flow。
+pub fn restart_by_mode(app: &tauri::AppHandle) {
+    let state: tauri::State<AppState> = app.state();
+    if *state.mode.lock().unwrap() != "remote" {
+        restart_service(app);
+        return;
+    }
+    if let Some(mut child) = state.child.lock().unwrap().take() {
+        kill_tree(child.id() as u32);
+        let _ = child.wait();
+    }
+    *state.origin.lock().unwrap() = None;
+    webview::navigate_to_loader(app);
+    status::set(app, "正在重连远程实例…");
+    if let Err(e) = connect_remote_flow(app) {
+        status::fail(app, &e);
+    }
+}
+
 /// 服务守护：意外退出时按次数上限自动重启。
 pub fn watch_child(app: &tauri::AppHandle) {
     loop {

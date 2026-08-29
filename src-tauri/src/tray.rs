@@ -99,7 +99,8 @@ pub fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
             }
             "restart" => {
                 let handle = app.clone();
-                std::thread::spawn(move || crate::supervisor::restart_service(&handle));
+                // 按模式分派（本地 restart_service / 远程 connect_remote_flow）；菜单文案动态化在 Task 7
+                std::thread::spawn(move || crate::supervisor::restart_by_mode(&handle));
             }
             "upgrade" => {
                 let handle = app.clone();

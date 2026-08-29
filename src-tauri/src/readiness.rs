@@ -14,8 +14,7 @@ pub fn http_ok(url: &str) -> bool {
 
 /// 同 http_ok，但可附加额外请求头（远程模式：x-remote-token 网关凭证）。
 /// 头值含控制字符直接拒绝（CRLF 注入会拆出伪造请求行）——与 events.rs 的
-/// HeaderValue 校验同一道防线。（接线在模式状态机任务；bin crate 下 pub 不豁免 dead_code，先压掉）
-#[allow(dead_code)]
+/// HeaderValue 校验同一道防线。
 pub fn http_ok_hdr(url: &str, extra_header: Option<(&str, &str)>) -> bool {
     if extra_header.is_some_and(|(_, v)| v.chars().any(|c| c.is_control())) {
         return false;
@@ -77,7 +76,6 @@ pub fn wait_http_ok(base: &str, timeout: Duration) -> bool {
 }
 
 /// 轮询直到就绪或超时，带网关凭证头（远程模式探活必须过网关的 401 这关）。
-#[allow(dead_code)]
 pub fn wait_http_ok_hdr(base: &str, token: Option<&str>, timeout: Duration) -> bool {
     let start = std::time::Instant::now();
     while start.elapsed() < timeout {

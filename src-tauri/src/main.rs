@@ -33,6 +33,9 @@ struct AppState {
     /// 事件流订阅世代号：每次服务启动 +1，旧订阅线程自检出局。
     events_gen: std::sync::atomic::AtomicU64,
     status: Mutex<StartupStatus>,
+    /// 当前模式（"local"/"remote"）：manage 时从 mode.txt 读入初值，连接/切回命令
+    /// 改写内存值并落盘；status::update 把它投影进 StartupStatus.remote 供加载页区分语境。
+    mode: Mutex<&'static str>,
 }
 
 /// 自定义命令只服务本地加载页；Harness 远程页面调用一律拒绝（IPC 零授权边界在命令层再拦一道）。
@@ -106,6 +109,127 @@ fn persona_wizard_save(
     Ok(())
 }
 
+/// 连接远程实例：解析输入 → 配对换 token → 凭据/模式落盘 → 后台走远程连接序列。
+/// 地址填裸 `host:port`（配对码单独填），或把整条配对链接粘进配对码栏（address 忽略）。
+#[tauri::command]
+fn connect_remote(
+    window: tauri::WebviewWindow,
+    app: tauri::AppHandle,
+    address: String,
+    code: String,
+) -> Result<(), String> {
+    if !caller_is_local(&window) {
+        return Err("无权限".into());
+    }
+    let (addr, code) = if code.contains("http://") {
+        // 粘的是整条配对链接：地址以链接为准，address 参数忽略
+        remote::parse_pairing_link(&code)?
+    } else {
+        let (addr, _) = remote::parse_address(&address)?;
+        (addr, code)
+    };
+    // 配对请求（网络往返最长 ~16s）先在轮询通道可见，避免连接屏停在旧状态
+    status::connect_screen(&app, "正在配对远程实例…");
+    let token = remote::pair(&addr, &code)?;
+    let origin = format!("http://{addr}");
+    remote::save(&remote::RemoteConfig {
+        address: addr,
+        origin,
+        token,
+        paired_at: crate::runtime::unix_now() * 1000,
+    })?;
+    remote::save_mode("remote");
+    let state: tauri::State<AppState> = app.state();
+    *state.mode.lock().unwrap() = "remote";
+    // 本地服务若有在跑先整树收掉：远程模式下 child 恒为 None，守护线程自然失活，
+    // 不会出现「本地子进程退出 → 守护误拉本地服务把远程页面顶掉」的串台
+    if let Some(mut child) = state.child.lock().unwrap().take() {
+        supervisor::kill_tree(child.id() as u32);
+        let _ = child.wait();
+    }
+    *state.origin.lock().unwrap() = None;
+    let handle = app.clone();
+    std::thread::spawn(move || {
+        if let Err(err) = supervisor::connect_remote_flow(&handle) {
+            status::fail(&handle, &err);
+        }
+    });
+    Ok(())
+}
+
+/// 加载页「重试」：按当前模式重新走对应连接序列（后台线程，错误落状态）。
+#[tauri::command]
+fn retry_connect(window: tauri::WebviewWindow, app: tauri::AppHandle) {
+    if !caller_is_local(&window) {
+        return;
+    }
+    let handle = app.clone();
+    std::thread::spawn(move || {
+        let state: tauri::State<AppState> = handle.state();
+        let result = if *state.mode.lock().unwrap() == "remote" {
+            supervisor::connect_remote_flow(&handle)
+        } else {
+            supervisor::start_service(&handle)
+        };
+        if let Err(err) = result {
+            status::fail(&handle, &err);
+        }
+    });
+}
+
+/// 加载页切到「连接远程实例」连接屏（地址/配对码表单）。
+#[tauri::command]
+fn show_connect(window: tauri::WebviewWindow, app: tauri::AppHandle) {
+    if !caller_is_local(&window) {
+        return;
+    }
+    status::connect_screen(&app, "连接远程实例");
+}
+
+/// 已配对远程实例的地址（连接屏预填用；未配对返回空串）。
+#[tauri::command]
+fn get_remote_address(window: tauri::WebviewWindow, _app: tauri::AppHandle) -> String {
+    if !caller_is_local(&window) {
+        return String::new();
+    }
+    remote::load().map(|c| c.address).unwrap_or_default()
+}
+
+/// 切回本地模式：改模式并落盘 → 撤 origin 回加载页 → 重新走本地启动序列。
+#[tauri::command]
+fn switch_to_local(window: tauri::WebviewWindow, app: tauri::AppHandle) {
+    if !caller_is_local(&window) {
+        return;
+    }
+    let state: tauri::State<AppState> = app.state();
+    // 防御性收尾：正常远程模式 child 恒为 None，但升级运行时等路径可能在远程模式下
+    // 留下本地 child——不清掉会让 start_service 双拉本地实例
+    if let Some(mut child) = state.child.lock().unwrap().take() {
+        supervisor::kill_tree(child.id() as u32);
+        let _ = child.wait();
+    }
+    *state.origin.lock().unwrap() = None;
+    *state.mode.lock().unwrap() = "local";
+    remote::save_mode("local");
+    webview::navigate_to_loader(&app);
+    let handle = app.clone();
+    std::thread::spawn(move || {
+        if let Err(err) = supervisor::start_service(&handle) {
+            status::fail(&handle, &err);
+        }
+    });
+}
+
+/// 重启服务（加载页按钮用，语义同托盘「重启服务」）：按模式分派。
+#[tauri::command]
+fn restart_service_cmd(window: tauri::WebviewWindow, app: tauri::AppHandle) {
+    if !caller_is_local(&window) {
+        return;
+    }
+    let handle = app.clone();
+    std::thread::spawn(move || supervisor::restart_by_mode(&handle));
+}
+
 fn main() {
     tauri::Builder::default()
         // 二次启动：聚焦已有窗口（须最先注册）
@@ -130,13 +254,21 @@ fn main() {
             restarting: Mutex::new(false),
             events_gen: std::sync::atomic::AtomicU64::new(0),
             status: Mutex::new(StartupStatus::default()),
+            // manage 在 setup 前：load_mode 是纯文件读（无 Tauri 依赖），此处初始化安全
+            mode: Mutex::new(remote::load_mode()),
         })
         .invoke_handler(tauri::generate_handler![
             get_status,
             open_log,
             open_runtime_dir,
             install_runtime,
-            persona_wizard_save
+            persona_wizard_save,
+            connect_remote,
+            retry_connect,
+            show_connect,
+            get_remote_address,
+            switch_to_local,
+            restart_service_cmd
         ])
         .setup(|app| {
             let handle = app.handle().clone();
@@ -163,7 +295,12 @@ fn main() {
                     status::wizard(&handle, "首次使用：请配置分身信息");
                     return;
                 }
-                if let Err(err) = supervisor::start_service(&handle) {
+                // 模式分叉：上次为远程模式则直接重连远程实例，否则走本地启动序列
+                if remote::load_mode() == "remote" {
+                    if let Err(err) = supervisor::connect_remote_flow(&handle) {
+                        status::fail(&handle, &err);
+                    }
+                } else if let Err(err) = supervisor::start_service(&handle) {
                     status::fail(&handle, &err);
                 }
             });
