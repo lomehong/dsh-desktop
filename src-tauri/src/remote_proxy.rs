@@ -51,6 +51,9 @@ pub async fn start(config: ProxyConfig) -> Result<ProxyHandle, String> {
     let stop = Arc::new(tokio::sync::Notify::new());
     let stop_flag = Arc::clone(&stop);
     let token = config.token;
+    // 本代理 origin：页面经此 origin 加载，请求的 Origin/Referer 会带它——
+    // 双层代理下必须改写为网关 origin，否则 dsh 的同源围栏（Origin vs Host）403
+    let proxy_origin = format!("http://127.0.0.1:{port}");
     tokio::spawn(async move {
         loop {
             // notify_one 带许可记忆：stop() 在两轮 select 之间触发也不会丢
@@ -60,8 +63,9 @@ pub async fn start(config: ProxyConfig) -> Result<ProxyHandle, String> {
                     Ok((client, _)) => {
                         let authority = gateway_authority.clone();
                         let token = token.clone();
+                        let proxy_origin = proxy_origin.clone();
                         // 每条客户端连接一个任务；连接内自行维护 keep-alive 循环
-                        tokio::spawn(handle_client(client, authority, token));
+                        tokio::spawn(handle_client(client, authority, token, proxy_origin));
                     }
                     Err(err) => {
                         // 瞬时错误必须继续：Windows 上对端连接后未发数据即 RST
@@ -99,14 +103,19 @@ fn log_terminal(msg: &str) {
 /// keep-alive 循环：读请求头 → 改写 → 上游转发 → 响应按框架回传 → 下一请求。
 /// 一条客户端连接复用一条上游连接（keep-alive ↔ keep-alive）。任何一步出错直接
 /// 断开客户端，不合成应答（浏览器会重试）。
-async fn handle_client(mut client: TcpStream, gateway_authority: String, token: String) {
+async fn handle_client(
+    mut client: TcpStream,
+    gateway_authority: String,
+    token: String,
+    proxy_origin: String,
+) {
     // 上游连接随客户端连接复用；None = 尚未建立 / 已被透传分支消耗
     let mut upstream_slot: Option<TcpStream> = None;
     loop {
         let Some((head, excess)) = read_head(&mut client).await else {
             return; // 对端先关 / 头超 64KB / 读错误
         };
-        let rewritten = rewrite_request_head(&head, &gateway_authority, &token);
+        let rewritten = rewrite_request_head(&head, &gateway_authority, &token, &proxy_origin);
         let mut upstream = match upstream_slot.take() {
             Some(u) => u,
             None => match TcpStream::connect(&gateway_authority).await {
@@ -183,10 +192,18 @@ async fn handle_client(mut client: TcpStream, gateway_authority: String, token: 
 
 /* ── 纯函数：头解析与改写 ── */
 
-/// 改写请求头：Host 换网关 authority、注入 x-remote-token；其余原样。
+/// 改写请求头：Host 换网关 authority、注入 x-remote-token；origin/referer 值中的
+/// 本代理 origin 全部替换为网关 origin（对齐 Node 网关 rewriteForwardHeaders 的
+/// replaceAll 语义，不含则原样——第三方 origin 不越权改写）；其余原样。
 /// 输入为完整请求头字节（含结尾空行），输出同形。方法行原样保留。
 /// 头名字匹配大小写不敏感；Host 缺失时补一条（HTTP/1.1 上游必需）。
-fn rewrite_request_head(head: &[u8], gateway_authority: &str, token: &str) -> Vec<u8> {
+fn rewrite_request_head(
+    head: &[u8],
+    gateway_authority: &str,
+    token: &str,
+    proxy_origin: &str,
+) -> Vec<u8> {
+    let gateway_origin = format!("http://{gateway_authority}");
     let mut lines = head_lines(head);
     while lines.last().is_some_and(|l| l.is_empty()) {
         lines.pop(); // 结尾空行由重组时统一补回
@@ -206,6 +223,21 @@ fn rewrite_request_head(head: &[u8], gateway_authority: &str, token: &str) -> Ve
         } else if name.is_some_and(|n| n.eq_ignore_ascii_case(b"x-remote-token")) {
             saw_token = true;
             rebuilt.push(format!("x-remote-token: {token}").into_bytes()); // 已有则替换（旧值丢弃）
+        } else if name
+            .is_some_and(|n| n.eq_ignore_ascii_case(b"origin") || n.eq_ignore_ascii_case(b"referer"))
+        {
+            // 双层代理同源围栏：值里的代理 origin 换成网关 origin（replaceAll），
+            // 不含则原样；头名与冒号后空白原样保留
+            let name = name.unwrap(); // 分支条件已保证 Some
+            let (prefix, value) = line.split_at(name.len() + 1); // prefix 含冒号
+            let value = String::from_utf8_lossy(value);
+            if value.contains(proxy_origin) {
+                let mut rewritten = prefix.to_vec();
+                rewritten.extend_from_slice(value.replace(proxy_origin, &gateway_origin).as_bytes());
+                rebuilt.push(rewritten);
+            } else {
+                rebuilt.push(line.to_vec());
+            }
         } else {
             rebuilt.push(line.to_vec()); // 其余（cookie/upgrade/content-*…）原样
         }
@@ -580,6 +612,7 @@ mod tests {
             b"GET /a?b=c HTTP/1.1\r\nhost: 127.0.0.1:4418\r\nCookie: sid=abc\r\nAccept: */*\r\n\r\n",
             "192.168.1.146:3090",
             "tok-1",
+            "http://127.0.0.1:1164",
         );
         let s = String::from_utf8(out).unwrap();
         assert!(s.starts_with("GET /a?b=c HTTP/1.1\r\n"), "请求行被改动：{s}");
@@ -597,6 +630,7 @@ mod tests {
             b"POST /api HTTP/1.1\r\nHost: page.host\r\nX-Remote-Token: stale\r\nUpgrade: WebSocket\r\nContent-Type: application/json\r\n\r\n",
             "10.0.0.9:8080",
             "fresh",
+            "http://127.0.0.1:1164",
         );
         let s = String::from_utf8(out).unwrap();
         // 已有 token 被替换（不是叠加）
@@ -616,9 +650,48 @@ mod tests {
 
     #[test]
     fn rewrite_injects_host_when_missing() {
-        let out = rewrite_request_head(b"GET / HTTP/1.1\r\nUser-Agent: t\r\n\r\n", "10.0.0.9:8080", "tok");
+        let out = rewrite_request_head(
+            b"GET / HTTP/1.1\r\nUser-Agent: t\r\n\r\n",
+            "10.0.0.9:8080",
+            "tok",
+            "http://127.0.0.1:1164",
+        );
         let s = String::from_utf8(out).unwrap();
         assert!(s.contains("Host: 10.0.0.9:8080\r\n"), "缺 Host 未补：{s}");
+    }
+
+    #[test]
+    fn rewrite_maps_proxy_origin_to_gateway_in_origin_and_referer() {
+        // 真机验收缺陷：页面以代理 origin 加载，Origin/Referer 原样透传会在第二跳
+        // 与 Host 失配，撞上 dsh 同源围栏（POST/WS 握手 403）
+        let out = rewrite_request_head(
+            b"POST /api/host.describe HTTP/1.1\r\nHost: 127.0.0.1:1164\r\nOrigin: http://127.0.0.1:1164\r\nReferer: http://127.0.0.1:1164/settings\r\nContent-Length: 2\r\n\r\n{}",
+            "192.168.1.146:3080",
+            "tok",
+            "http://127.0.0.1:1164",
+        );
+        let s = String::from_utf8(out).unwrap();
+        assert!(
+            s.contains("Origin: http://192.168.1.146:3080\r\n"),
+            "Origin 未改写为网关 origin：{s}"
+        );
+        assert!(
+            s.contains("Referer: http://192.168.1.146:3080/settings\r\n"),
+            "Referer 未改写为网关 origin：{s}"
+        );
+        assert!(!s.contains("127.0.0.1:1164"), "proxy origin 残留：{s}");
+        // 第三方 origin（非本代理发出）原样保留——不越权改写
+        let out = rewrite_request_head(
+            b"POST /x HTTP/1.1\r\nOrigin: http://evil.example\r\n\r\n",
+            "192.168.1.146:3080",
+            "tok",
+            "http://127.0.0.1:1164",
+        );
+        let s = String::from_utf8(out).unwrap();
+        assert!(
+            s.contains("Origin: http://evil.example\r\n"),
+            "第三方 Origin 被改动：{s}"
+        );
     }
 
     /* ── 纯函数：响应框架分类 ── */
@@ -702,16 +775,31 @@ mod tests {
         })
         .await;
         let proxy = spawn_proxy(upstream_port, "tok-post").await;
-        let raw = roundtrip(
-            proxy.port,
-            b"POST /api HTTP/1.1\r\nHost: page.host\r\nContent-Type: application/json\r\nContent-Length: 5\r\n\r\nhello",
-        )
-        .await;
+        // 真机验收缺陷复现：页面以代理 origin 加载，POST 自带 Origin/Referer
+        let request = format!(
+            "POST /api HTTP/1.1\r\nHost: page.host\r\nOrigin: http://127.0.0.1:{0}\r\nReferer: http://127.0.0.1:{0}/settings\r\nContent-Type: application/json\r\nContent-Length: 5\r\n\r\nhello",
+            proxy.port
+        );
+        let raw = roundtrip(proxy.port, request.as_bytes()).await;
         assert!(String::from_utf8_lossy(&raw).ends_with("world"), "响应未回传");
         let got = String::from_utf8_lossy(&seen.lock().unwrap()).to_string();
         let (head, body) = got.split_once("|BODY|").expect("上游未记录到请求体");
         assert_eq!(body, "hello", "请求体不完整或不一致：{body}");
         assert!(head.to_ascii_lowercase().contains("content-length: 5"));
+        // Origin/Referer 必须以网关 origin 到达上游（否则 dsh 同源围栏 403）
+        let head_lower = head.to_ascii_lowercase();
+        assert!(
+            head_lower.contains(&format!("origin: http://127.0.0.1:{upstream_port}")),
+            "Origin 未改写为网关 origin：{head}"
+        );
+        assert!(
+            head_lower.contains(&format!("referer: http://127.0.0.1:{upstream_port}/settings")),
+            "Referer 未改写为网关 origin：{head}"
+        );
+        assert!(
+            !head_lower.contains(&format!("http://127.0.0.1:{}", proxy.port)),
+            "proxy origin 残留：{head}"
+        );
     }
 
     #[tokio::test]
