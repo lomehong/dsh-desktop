@@ -11,7 +11,7 @@ DeepSeek Harness（dsh）的桌面应用：Tauri 2 原生窗口 + 受监督的 H
 - **原生集成（服务端→壳单向）**：壳以非浏览器客户端身份订阅 `<base>/api/events.mux` WebSocket 下行流（世代号防止重启后重复通知），`turn/end` / `approval/requested` / `question/requested` → OS 原生通知 + 任务栏闪烁（窗口未聚焦时弹通知）。
 - **运行时管理**：优先使用 `%LOCALAPPDATA%\dsh-desktop-app-data\node` 便携运行时（Node 24 + 固定版本 dsh；旧 `dsh-desktop` 目录自动迁移，避免与 NSIS 卸载目录冲突），否则回退系统 `node`/`dsh`；全新机器在加载页一键「安装运行环境」（npmmirror 镜像下载 Node → npm 装固定版 dsh → 自动启动）。托盘可「升级 DSH」。
 - **桌面语义**：关闭=最小化到托盘（IM 渠道/长任务不中断）、托盘菜单（显示/重启/升级 DSH/检查应用更新/日志/数据目录/开机自启/退出）、单实例二次启动聚焦。
-- **无边框窗口**：decorum 悬浮标题栏（Windows 去原生边框 + 扁平自绘最小化/最大化/关闭按钮，保留 Snap Layout；macOS Overlay 红绿灯）。Harness 页面经初始化脚本整体下移 40px 让出顶栏——用 `body transform` 而非 `html padding`，使 fixed/absolute 定位的插件 overlay（右侧按钮簇、机器人状态栏）一并下移；decorum 悬浮条反向平移回顶部。远程页面经 `http://127.0.0.1:*` 端口通配 capability 仅授予窗口控制最小权限集（已单测验证匹配范围，无文件/系统访问）。关闭按钮走 `CloseRequested` → 语义仍为最小化到托盘。
+- **无边框窗口**：decorum 悬浮标题栏（Windows 去原生边框 + 扁平自绘最小化/最大化/关闭按钮，保留 Snap Layout；macOS Overlay 红绿灯）。Harness 页面经初始化脚本整体下移 40px 让出顶栏——用 `body transform` 而非 `html padding`，使 fixed/absolute 定位的插件 overlay（右侧按钮簇、机器人状态栏）一并下移；decorum 悬浮条反向平移回顶部。Harness 页面（本地回环或已配对远程 origin）经 `http://*:* ` 通配 capability 仅授予窗口控制最小权限集（无文件/系统访问；能加载的页面由导航守卫约束）。关闭按钮走 `CloseRequested` → 语义仍为最小化到托盘。
 - **DSH_HOME**：沿用应用进程环境（默认共享 `~/.dsh`，保留 im-bot 绑定/共享记忆等用户数据）。
 
 ## 远程连接
@@ -87,6 +87,6 @@ cargo build --release
 
 ## 安全边界
 
-- Harness 页面仅获窗口控制最小权限（最小化/最大化/关闭/拖拽，`http://127.0.0.1:*` 端口通配精确匹配回环），无文件/Shell/系统访问；其余原生集成只通过壳自身订阅本地事件流实现。
+- Harness 页面仅获窗口控制最小权限（最小化/最大化/关闭/拖拽，`http://*:* ` 通配；能加载的页面由导航守卫约束为已配对 origin），无文件/Shell/系统访问；原生集成通过壳自身订阅事件流实现（本地或经远程网关带凭证）。
 - 导航白名单外的地址一律外抛系统浏览器；`file://` 等协议导航直接拒绝。
 - 已知取舍：无边框模式下 tooltip 会随 body 下移约 40px（fixed 定位副作用），属可接受的显示偏差。
