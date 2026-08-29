@@ -63,7 +63,14 @@ pub async fn start(config: ProxyConfig) -> Result<ProxyHandle, String> {
                         // 每条客户端连接一个任务；连接内自行维护 keep-alive 循环
                         tokio::spawn(handle_client(client, authority, token));
                     }
-                    Err(_) => break, // 监听已关/异常 → 接受循环退出
+                    Err(err) => {
+                        // 瞬时错误必须继续：Windows 上对端连接后未发数据即 RST
+                        //（WebView2/Chromium 投机预连接家常便饭）会让 accept 以
+                        // WSAECONNRESET 浮出——若因此退出，端口仍在但永远不再接受，
+                        // 远程模式整个会话静默变砖。只有 stop 通知才收摊。
+                        log_terminal(&format!("accept 出错（继续监听）：{err}"));
+                        continue;
+                    }
                 },
             }
         }
@@ -75,6 +82,15 @@ impl ProxyHandle {
     /// 关闭代理：停止接受新连接；活动连接按各自框架自然收尾（尽力而为，见模块注释）。
     pub fn stop(&self) {
         self.stop.notify_one();
+    }
+}
+
+/// 终态错误路径记一行日志（远程模式失联/异常断开的现场诊断用；正常流量零输出）。
+/// 风格同 supervisor.rs：open_log_append 追加一行，日志不可写时静默。
+fn log_terminal(msg: &str) {
+    use std::io::Write;
+    if let Some(mut log) = crate::runtime::open_log_append() {
+        let _ = writeln!(log, "[代理] {msg}");
     }
 }
 
@@ -95,10 +111,15 @@ async fn handle_client(mut client: TcpStream, gateway_authority: String, token: 
             Some(u) => u,
             None => match TcpStream::connect(&gateway_authority).await {
                 Ok(u) => u,
-                Err(_) => return, // 上游不可达：断开客户端（浏览器重试）
+                Err(err) => {
+                    // 网关不可达：断开客户端（浏览器重试）；记一行供远程模式失联诊断
+                    log_terminal(&format!("连接网关 {gateway_authority} 失败：{err}"));
+                    return;
+                }
             },
         };
         if upstream.write_all(&rewritten).await.is_err() {
+            log_terminal("发送改写后请求头到网关失败（复用连接已死）");
             return; // 复用的上游连接已死：断开客户端，由其重建
         }
 
@@ -148,7 +169,10 @@ async fn handle_client(mut client: TcpStream, gateway_authority: String, token: 
 
         let completed = match forward_response(&mut upstream, &mut client).await {
             Ok(c) => c,
-            Err(_) => return, // 上游中断/写客户端失败：断开
+            Err(err) => {
+                log_terminal(&format!("响应转发中断（上游/客户端断开）：{err}"));
+                return; // 上游中断/写客户端失败：断开
+            }
         };
         if !completed || pipelined_dirty || client_wants_close(&head) {
             return; // UntilClose 收尾 / 脏连接 / 客户端要求关闭
@@ -325,6 +349,7 @@ where
             return Some((buf, rest));
         }
         if buf.len() > HEAD_CAP {
+            log_terminal(&format!("头超过 {}KB 上限，断开", HEAD_CAP / 1024));
             return None; // 找不到终止符还超限 → 断（找到的上面已返回）
         }
         let n = stream.read(&mut chunk).await.ok()?;
@@ -352,8 +377,8 @@ where
     }
     match classify_response_head(&head) {
         ResponseFraming::Length(n) => {
-            // excess 已算入体长；服务器谎报超发部分不透传（连接按不可复用处理更稳妥，
-            // 但浏览器场景不存在，从简：超出部分随 excess 截断丢弃）
+            // 头后多读的 excess 已在上面全量透传（含上游谎报超发的部分——浏览器
+            // 场景不存在谎报，取从简不回收）；此处只补足剩余差额
             let done = (excess.len() as u64).min(n);
             copy_exact(upstream, client, n - done).await?;
             Ok(true)
@@ -395,7 +420,9 @@ where
 /// chunked 应答原样透传：扫到结束帧 `0\r\n\r\n` 为止，字节不动（客户端自行解块）。
 /// 简化（已与 dsh 网关核实不触发）：不解析块大小、不处理 trailer——网关（Node
 /// http）JSON 应答无 trailer，JSON 文本字符串内的换行均被转义，不会出现裸
-/// `0\r\n\r\n` 误配。上游先于结束帧关闭 → Ok(false)（按 UntilClose 收尾，不复用）。
+/// `0\r\n\r\n` 误配；并假定网关不对 chunked 应答再叠 gzip 等压缩——二进制压缩流
+/// 里可能撞出裸 `0\r\n\r\n` 导致提前截断。上游先于结束帧关闭 → Ok(false)
+/// （按 UntilClose 收尾，不复用）。
 async fn copy_until_chunk_terminator<R, W>(from: &mut R, to: &mut W) -> std::io::Result<bool>
 where
     R: AsyncRead + Unpin,
@@ -844,6 +871,26 @@ mod tests {
         })
         .await;
         assert!(matches!(closed, Ok(true)), "超长头未导致连接被关闭（超时挂起）");
+    }
+
+    #[tokio::test]
+    async fn upstream_unreachable_closes_client_promptly() {
+        // 占住一个端口再释放：得到一个确定无人监听的端口（比写死端口可靠）
+        let dead = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let dead_port = dead.local_addr().unwrap().port();
+        drop(dead);
+        let proxy = spawn_proxy(dead_port, "t").await;
+        let mut c = TcpStream::connect(("127.0.0.1", proxy.port)).await.unwrap();
+        c.write_all(b"GET / HTTP/1.1\r\nHost: page.host\r\n\r\n")
+            .await
+            .unwrap();
+        // 网关连不上 → 代理干净断开（EOF 或 RST 都算），绝不挂起；不发合成应答
+        let mut buf = [0u8; 8];
+        let closed = timeout(Duration::from_secs(5), c.read(&mut buf)).await;
+        assert!(
+            matches!(closed, Ok(Ok(0)) | Ok(Err(_))),
+            "上游不可达时应立即断开客户端（超时挂起：{closed:?}）"
+        );
     }
 
     #[tokio::test]
