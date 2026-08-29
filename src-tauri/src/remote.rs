@@ -105,6 +105,8 @@ pub fn pair(address: &str, code: &str) -> Result<String, String> {
     let origin = parse_address(address)?.1;
     let body = serde_json::json!({ "code": code }).to_string();
     let raw = http_post_json(&origin, "/__remote/pair", &body).ok_or("无法连接远程实例（超时或拒绝）")?;
+    // 真机验收缺陷：网关（Node http 无 content-length）以 chunked 应答，先解码分块帧
+    let raw = dechunk_response(&raw);
     let head = String::from_utf8_lossy(&raw);
     let status_line = head.lines().next().unwrap_or("");
     let Some(resp_code) = status_code(status_line) else {
@@ -142,6 +144,44 @@ fn status_code(status_line: &str) -> Option<&str> {
         .strip_prefix("HTTP/1.0 ")
         .or_else(|| status_line.strip_prefix("HTTP/1.1 "))?;
     rest.split_whitespace().next()
+}
+
+/// 若应答带 `transfer-encoding: chunked`，在内存中把分块帧解码回原始 body
+/// （`1f\r\n…31字节…\r\n1f\r\n…\r\n0\r\n\r\n` → `…62字节…`）。head 原样保留，
+/// 状态码映射不受影响；非 chunked 应答原样返回。纯内存操作，读循环不变。
+fn dechunk_response(raw: &[u8]) -> Vec<u8> {
+    let Some(split) = raw.windows(4).position(|w| w == b"\r\n\r\n") else {
+        return raw.to_vec();
+    };
+    let (head, body) = raw.split_at(split + 4);
+    let head_lower = String::from_utf8_lossy(head).to_ascii_lowercase();
+    let chunked = head_lower
+        .lines()
+        .any(|l| l.starts_with("transfer-encoding:") && l.contains("chunked"));
+    if !chunked {
+        return raw.to_vec();
+    }
+    let mut out = head.to_vec();
+    let mut rest = body;
+    loop {
+        // 读一行块大小（到 \r\n；容忍 `1f;ext` 形式的 chunk 扩展；十六进制大小写均可）
+        let Some(line_end) = rest.windows(2).position(|w| w == b"\r\n") else {
+            break;
+        };
+        let line = String::from_utf8_lossy(&rest[..line_end]);
+        let Ok(size) = usize::from_str_radix(line.trim().split(';').next().unwrap_or("").trim(), 16)
+        else {
+            break;
+        };
+        rest = &rest[line_end + 2..];
+        if size == 0 || size > rest.len() {
+            break; // 末块 0 → 到此为止（容忍尾随字节）；块长溢出按截断容错
+        }
+        out.extend_from_slice(&rest[..size]);
+        rest = &rest[size..];
+        rest = rest.strip_prefix(b"\r\n").unwrap_or(rest); // 块后 CRLF（末块可能缺失）
+    }
+    out
 }
 
 /// 极简 HTTP/1.1 POST JSON（Connection: close，读满或超时为止）。
@@ -234,14 +274,15 @@ mod tests {
 
     /* ── pair()：对假网关的 canned 应答做状态解析 ── */
     /// 起一个一次性 HTTP 服务，读入请求后回一段固定字节即关闭（风格同 readiness.rs）。
-    fn serve_once(response: &'static str) -> u16 {
+    fn serve_once(response: impl Into<Vec<u8>>) -> u16 {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
+        let response = response.into();
         std::thread::spawn(move || {
             if let Ok((mut stream, _)) = listener.accept() {
                 let mut buf = [0u8; 1024];
                 let _ = stream.read(&mut buf);
-                let _ = stream.write_all(response.as_bytes());
+                let _ = stream.write_all(&response);
             }
         });
         port
@@ -269,5 +310,34 @@ mod tests {
         let p = serve_once("");
         let err = pair(&format!("127.0.0.1:{p}"), "any-code").unwrap_err();
         assert!(err.contains("无有效应答"));
+    }
+
+    #[test]
+    fn pair_parses_chunked_ok_response() {
+        // 真机验收缺陷：网关（Node http 无 content-length）以 chunked 传输编码应答，
+        // body 分两块（块大小十六进制大小写各一），末尾 0\r\n\r\n。
+        let body = r#"{"ok":true,"token":"tok-chunked-1","deviceId":"d1","name":"n"}"#;
+        let (a, b) = body.split_at(body.len() / 2);
+        let canned = format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ntransfer-encoding: chunked\r\nconnection: close\r\n\r\n{:X}\r\n{a}\r\n{:x}\r\n{b}\r\n0\r\n\r\n",
+            a.len(),
+            b.len()
+        );
+        let p = serve_once(canned);
+        let token = pair(&format!("127.0.0.1:{p}"), "any-code").unwrap();
+        assert_eq!(token, "tok-chunked-1");
+    }
+
+    #[test]
+    fn pair_maps_403_with_chunked_encoding() {
+        // 403 + chunked：状态映射读的是 head，不受分块影响 → 配对码无效
+        let body = r#"{"ok":false,"error":"invalid code"}"#;
+        let canned = format!(
+            "HTTP/1.1 403 Forbidden\r\ntransfer-encoding: chunked\r\nconnection: close\r\n\r\n{:x}\r\n{body}\r\n0\r\n\r\n",
+            body.len()
+        );
+        let p = serve_once(canned);
+        let err = pair(&format!("127.0.0.1:{p}"), "bad-code").unwrap_err();
+        assert!(err.contains("配对码无效"));
     }
 }
