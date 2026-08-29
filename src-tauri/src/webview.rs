@@ -78,6 +78,32 @@ pub const DECORUM_ICON_CSS: &str = r##"
 })();
 "##;
 
+/// 远程页面（http + 非回环主机）不是安全上下文，Web Crypto 的 `crypto.randomUUID`
+/// 在其中不存在，dsh 前端（如 Agent 预设页）调用即崩。兜底 polyfill：仅当缺失且
+/// `crypto.getRandomValues` 可用时，用同一密码学随机源实现同语义 UUIDv4——只补缺，
+/// 安全上下文（本地回环/https）的原生实现永远不被覆盖。
+pub const SECURE_CONTEXT_SHIM_JS: &str = r##"
+(function () {
+  try {
+    if (typeof crypto !== 'undefined'
+      && typeof crypto.randomUUID !== 'function'
+      && typeof crypto.getRandomValues === 'function') {
+      var buf = new Uint8Array(16);
+      crypto.randomUUID = function () {
+        crypto.getRandomValues(buf);
+        buf[6] = (buf[6] & 0x0f) | 0x40; // version 4
+        buf[8] = (buf[8] & 0x3f) | 0x80; // variant 10
+        var h = Array.prototype.map.call(buf, function (x) {
+          return x.toString(16).padStart(2, '0');
+        }).join('');
+        return h.slice(0, 8) + '-' + h.slice(8, 12) + '-' + h.slice(12, 16)
+          + '-' + h.slice(16, 20) + '-' + h.slice(20);
+      };
+    }
+  } catch (e) { /* crypto 不可用的极端环境：维持原状 */ }
+})();
+"##;
+
 /// 创建主窗口（程序化创建以挂导航守卫；配置文件中 windows 留空）。
 /// 无边框：decorum 覆盖式标题栏（Windows 悬浮原生风格按钮；macOS Overlay 红绿灯），
 /// Harness 页面经 TITLEBAR_INSET_CSS 下移，不被悬浮条遮挡。
@@ -109,6 +135,7 @@ pub fn create_main_window(app: &tauri::AppHandle) -> tauri::Result<()> {
             .hidden_title(true);
     }
     let window = builder
+        .initialization_script(SECURE_CONTEXT_SHIM_JS)
         .initialization_script(TITLEBAR_INSET_CSS)
         .initialization_script(DECORUM_ICON_CSS)
         .on_navigation(move |url| {
@@ -198,4 +225,23 @@ pub fn open_external(target: &str) {
         c
     };
     let _ = crate::runtime::no_window(&mut cmd).spawn();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// polyfill 的安全属性必须钉死：只补缺（存在原生实现时绝不覆盖）、
+    /// 依赖 crypto.getRandomValues 同源随机、实现 UUIDv4 的版本/变体位。
+    #[test]
+    fn secure_context_shim_only_fills_missing_api() {
+        let s = SECURE_CONTEXT_SHIM_JS;
+        assert!(s.contains("typeof crypto.randomUUID !== 'function'"), "缺少「仅缺失时定义」守卫");
+        assert!(s.contains("typeof crypto.getRandomValues === 'function'"), "缺少随机源可用性守卫");
+        assert!(s.contains("crypto.randomUUID = function"), "未定义补缺赋值");
+        assert!(s.contains("| 0x40") && s.contains("| 0x80"), "缺少 UUIDv4 版本/变体位");
+        // 整体 try/catch 包裹：极端环境不抛错
+        assert!(s.trim_start().starts_with("(function () {"));
+        assert!(s.contains("} catch (e)"));
+    }
 }
