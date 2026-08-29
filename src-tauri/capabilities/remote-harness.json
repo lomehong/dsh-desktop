@@ -1,10 +1,16 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "remote-harness",
-  "description": "已配对的 Harness 页面（本地回环或远程网关）：仅授予无边框标题栏所需的最小窗口控制权限，无文件/系统访问。能加载进壳的页面只有导航守卫放行的已配对 origin，故 urls 可放宽到任意 http 地址",
+  "description": "Harness 页面（本地回环或已配对远程网关 origin）：仅授予无边框标题栏所需的最小窗口控制与事件通道权限（decorum 按钮依赖 event listen），无文件/系统访问；能加载的页面由导航守卫约束",
   "local": false,
-  "remote": { "urls": ["http://*:*"] },
-  "windows": ["main"],
+  "remote": {
+    "urls": [
+      "http://*:*"
+    ]
+  },
+  "windows": [
+    "main"
+  ],
   "permissions": [
     "core:window:allow-close",
     "core:window:allow-minimize",
@@ -14,6 +20,7 @@
     "core:window:allow-is-maximized",
     "core:window:allow-start-dragging",
     "core:window:allow-toggle-maximize",
-    "decorum:allow-show-snap-overlay"
+    "decorum:allow-show-snap-overlay",
+    "core:event:default"
   ]
 }
