@@ -193,6 +193,10 @@
       boot.style.display = on ? 'none' : 'flex';
       connectForm.classList.toggle('open', on);
       if (on) {
+        // 每次唤起都复位提交按钮：上次配对失败后经「修改远程配置」/托盘重开的是同一份
+        // 文档，不复位会把按钮永远卡在禁用的「配对中…」（如网关在但远端 dsh 未就绪的探活失败）
+        const btn = document.getElementById('btn-connect');
+        btn.disabled = false; btn.textContent = '连接';
         // 预填上次配对的地址（每次唤起至多取一次，不覆盖用户已输入的值）
         if (!connectAddrFilled) {
           connectAddrFilled = true;
@@ -283,12 +287,12 @@
           address: connectForm.elements.remoteAddr.value.trim(),
           code: connectForm.elements.remoteCode.value.trim(),
         });
-        // 成功：后端接管状态流转（配对 → 连接 → 就绪），表单随下一帧自动收起，
-        // 按钮保持禁用防止 400ms 空窗内重复提交
       } catch (err) {
-        btn.disabled = false; btn.textContent = '连接';
         setConnectStatus('连接失败：' + err);
       }
+      // 无论成败都复位按钮：成功路径的状态帧马上接管（配对 → 连接 → 就绪）并收起表单，
+      // 失败路径留在表单内提示；不复位会在状态帧缺席/迟到时把按钮卡死在「配对中…」
+      btn.disabled = false; btn.textContent = '连接';
     });
     // 取消：回本地模式（无远程配置时即回到本地启动流）
     document.getElementById('btn-connect-cancel').onclick = () => { try { invoke('switch_to_local'); } catch (e) {} };

@@ -53,11 +53,14 @@ fn is_remote(app: &tauri::AppHandle) -> bool {
 /// 按模式构建托盘菜单：
 /// - 本地：显示/隐藏、重启服务、连接远程实例…、[便携]分身向导、升级 DSH、[非便携]检查应用更新、
 ///   日志、数据目录、[非便携]开机自启、退出
-/// - 远程：显示/隐藏、重连远程实例、断开远程回到本地、日志、数据目录、退出
+/// - 远程：显示/隐藏、重连远程实例、断开远程回到本地、[非便携]检查应用更新、
+///   日志、数据目录、[非便携]开机自启、退出
 ///
-/// 向导/升级/检查更新/自启只在本地菜单出现：它们都是本地语义（保存向导后重启本地流、
-/// 升级后重拉本地服务），远程模式下应先「断开远程」再操作（升级路径的远程防御分支
-/// 见 install.rs::upgrade_runtime）。便携隐藏规则叠加在模式条件之上，远程模式同样适用。
+/// 远程菜单只隐藏「会拉起本地服务」的项：升级 DSH 装完要重拉本地服务、分身向导保存后
+/// 重启本地流——两者都应先「断开远程」再操作（升级路径的远程防御分支见
+/// install.rs::upgrade_runtime）。检查应用更新与开机自启是模式无关项：应用更新装完
+/// app.restart() 会按 mode.txt 重新进入上次模式（远程停远程），自启只是 OS 开关；
+/// 便携隐藏规则叠加在模式条件之上，远程模式同样适用。
 fn build_menu(app: &tauri::AppHandle, remote: bool) -> tauri::Result<Menu<tauri::Wry>> {
     use tauri_plugin_autostart::ManagerExt;
 
@@ -100,13 +103,15 @@ fn build_menu(app: &tauri::AppHandle, remote: bool) -> tauri::Result<Menu<tauri:
             items.push(&wizard);
         }
         items.push(&upgrade);
-        if !portable {
-            items.push(&check_update);
-        }
+    }
+    // 检查应用更新/开机自启与模式无关（更新装完 app.restart() 重读 mode.txt 回到原模式；
+    // 自启是纯 OS 开关），本地/远程菜单都保留，只按便携规则隐藏
+    if !portable {
+        items.push(&check_update);
     }
     items.push(&open_log);
     items.push(&open_dir);
-    if !remote && !portable {
+    if !portable {
         items.push(&autostart);
     }
     items.push(&sep);
