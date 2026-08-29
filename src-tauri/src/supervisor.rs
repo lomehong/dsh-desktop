@@ -285,13 +285,21 @@ pub fn start_service(app: &tauri::AppHandle) -> Result<(), String> {
     result
 }
 
-/// 重启服务（托盘菜单 / 守护触发）：杀整树 → 回加载页 → 重新走启动序列（端口会变化，导航锁随之更新）。
-pub fn restart_service(app: &tauri::AppHandle) {
+/// 收掉当前子进程（若有）：整树击杀并 wait 回收，child 句柄清空（守护线程随之失活）。
+/// 锁只护句柄摘取（guard 随 let 语句即释放）：击杀/回收可能耗时秒级，不占着 child 锁挡住守护线程。
+pub fn stop_child(app: &tauri::AppHandle) {
     let state: tauri::State<AppState> = app.state();
-    if let Some(mut child) = state.child.lock().unwrap().take() {
+    let child = state.child.lock().unwrap().take();
+    if let Some(mut child) = child {
         kill_tree(child.id() as u32);
         let _ = child.wait();
     }
+}
+
+/// 重启服务（托盘菜单 / 守护触发）：杀整树 → 回加载页 → 重新走启动序列（端口会变化，导航锁随之更新）。
+pub fn restart_service(app: &tauri::AppHandle) {
+    let state: tauri::State<AppState> = app.state();
+    stop_child(app);
     // 撤销旧 origin 放行，回到加载页
     *state.origin.lock().unwrap() = None;
     status::set(app, "正在重启服务…");
@@ -349,10 +357,8 @@ pub fn restart_by_mode(app: &tauri::AppHandle) {
         restart_service(app);
         return;
     }
-    if let Some(mut child) = state.child.lock().unwrap().take() {
-        kill_tree(child.id() as u32);
-        let _ = child.wait();
-    }
+    // 远程重连前先收掉残留 child（如升级运行时等路径在远程模式下拉起过的本地服务）
+    stop_child(app);
     *state.origin.lock().unwrap() = None;
     webview::navigate_to_loader(app);
     status::set(app, "正在重连远程实例…");

@@ -92,6 +92,8 @@ fn install_runtime(window: tauri::WebviewWindow, app: tauri::AppHandle) {
 }
 
 /// 便携版分身向导：保存字段 → 写预设/patch/凭证 → 自动（重）启动服务。
+/// 注意：完成后的 restart_service 是本地语义、不按模式分派（远程模式下重开向导的组合
+/// 待 Task 7 动态托盘/UI 一并处理）。
 #[tauri::command]
 fn persona_wizard_save(
     window: tauri::WebviewWindow,
@@ -111,7 +113,9 @@ fn persona_wizard_save(
 
 /// 连接远程实例：解析输入 → 配对换 token → 凭据/模式落盘 → 后台走远程连接序列。
 /// 地址填裸 `host:port`（配对码单独填），或把整条配对链接粘进配对码栏（address 忽略）。
-#[tauri::command]
+/// async 标记：函数体是同步网络调用（pair 最长 ~16s），必须离开主线程跑（否则窗口、
+/// 托盘与 400ms 的 get_status 轮询全部卡死），同时保留 Err 直接回到表单的 UX。
+#[tauri::command(async)]
 fn connect_remote(
     window: tauri::WebviewWindow,
     app: tauri::AppHandle,
@@ -143,10 +147,7 @@ fn connect_remote(
     *state.mode.lock().unwrap() = "remote";
     // 本地服务若有在跑先整树收掉：远程模式下 child 恒为 None，守护线程自然失活，
     // 不会出现「本地子进程退出 → 守护误拉本地服务把远程页面顶掉」的串台
-    if let Some(mut child) = state.child.lock().unwrap().take() {
-        supervisor::kill_tree(child.id() as u32);
-        let _ = child.wait();
-    }
+    supervisor::stop_child(&app);
     *state.origin.lock().unwrap() = None;
     let handle = app.clone();
     std::thread::spawn(move || {
@@ -157,24 +158,17 @@ fn connect_remote(
     Ok(())
 }
 
-/// 加载页「重试」：按当前模式重新走对应连接序列（后台线程，错误落状态）。
+/// 加载页「重试」：按当前模式经 restart_by_mode 重新走对应连接序列。统一走它而非
+/// start_service/connect_remote_flow：本地分支先杀残留 child 再拉起——探活超时后
+/// child 句柄仍是 Some，直接 start_service 会双拉孤儿 dsh；远程分支顺带回加载页，
+/// 两个错误态按钮（重试/重启）行为收敛。
 #[tauri::command]
 fn retry_connect(window: tauri::WebviewWindow, app: tauri::AppHandle) {
     if !caller_is_local(&window) {
         return;
     }
     let handle = app.clone();
-    std::thread::spawn(move || {
-        let state: tauri::State<AppState> = handle.state();
-        let result = if *state.mode.lock().unwrap() == "remote" {
-            supervisor::connect_remote_flow(&handle)
-        } else {
-            supervisor::start_service(&handle)
-        };
-        if let Err(err) = result {
-            status::fail(&handle, &err);
-        }
-    });
+    std::thread::spawn(move || supervisor::restart_by_mode(&handle));
 }
 
 /// 加载页切到「连接远程实例」连接屏（地址/配对码表单）。
@@ -204,13 +198,12 @@ fn switch_to_local(window: tauri::WebviewWindow, app: tauri::AppHandle) {
     let state: tauri::State<AppState> = app.state();
     // 防御性收尾：正常远程模式 child 恒为 None，但升级运行时等路径可能在远程模式下
     // 留下本地 child——不清掉会让 start_service 双拉本地实例
-    if let Some(mut child) = state.child.lock().unwrap().take() {
-        supervisor::kill_tree(child.id() as u32);
-        let _ = child.wait();
-    }
+    supervisor::stop_child(&app);
     *state.origin.lock().unwrap() = None;
     *state.mode.lock().unwrap() = "local";
     remote::save_mode("local");
+    // 先落一帧本地模式状态再回加载页：首帧轮询不再重放上一帧的远程错误态
+    status::set(&app, "正在切换到本地模式…");
     webview::navigate_to_loader(&app);
     let handle = app.clone();
     std::thread::spawn(move || {
@@ -296,7 +289,13 @@ fn main() {
                     return;
                 }
                 // 模式分叉：上次为远程模式则直接重连远程实例，否则走本地启动序列
-                if remote::load_mode() == "remote" {
+                //（manage 时已从 mode.txt 读入 AppState.mode，读内存值，单一事实来源）
+                let remote_mode = {
+                    let state: tauri::State<AppState> = handle.state();
+                    let mode = *state.mode.lock().unwrap();
+                    mode == "remote"
+                };
+                if remote_mode {
                     if let Err(err) = supervisor::connect_remote_flow(&handle) {
                         status::fail(&handle, &err);
                     }
