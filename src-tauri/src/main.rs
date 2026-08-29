@@ -9,6 +9,7 @@ mod install;
 mod persona;
 mod readiness;
 mod remote;
+mod remote_proxy;
 mod runtime;
 mod status;
 mod supervisor;
