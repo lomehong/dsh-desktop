@@ -134,17 +134,26 @@ fn connect_remote(
     };
     // 配对请求（网络往返最长 ~16s）先在轮询通道可见，避免连接屏停在旧状态
     status::connect_screen(&app, "正在配对远程实例…");
+    let prev_origin = remote::load().map(|c| c.origin);
     let token = remote::pair(&addr, &code)?;
     let origin = format!("http://{addr}");
     remote::save(&remote::RemoteConfig {
         address: addr,
-        origin,
+        origin: origin.clone(),
         token,
         paired_at: crate::runtime::unix_now() * 1000,
     })?;
     remote::save_mode("remote");
     let state: tauri::State<AppState> = app.state();
     *state.mode.lock().unwrap() = "remote";
+    // 首次配对（或换了远程地址）必须重启一次：WebView2 的安全上下文标记
+    // （--unsafely-treat-insecure-origin-as-secure，见 main 顶部）在浏览器环境创建时
+    // 固化，运行中无法补设——不重启的话 crypto.subtle 缺失，模型/设置页不可用。
+    // 同地址重新配对无需重启（开关已在位），直接走连接序列。
+    if prev_origin.as_deref() != Some(origin.as_str()) {
+        status::set(&app, "配对成功，正在重启以启用远程完整能力…");
+        app.restart();
+    }
     // 模式已翻转：托盘菜单换成远程菜单（重连/断开；set_menu 内部自派发主线程，
     // async 命令线程可直接调）
     tray::rebuild(&app);
@@ -214,6 +223,22 @@ fn restart_service_cmd(window: tauri::WebviewWindow, app: tauri::AppHandle) {
 }
 
 fn main() {
+    // 远程模式安全上下文标记：明文 http 的远程 origin 上 crypto.subtle/randomUUID
+    // 等安全上下文 API 被 WebView2 判不可用（模型/设置页直接不可用）。把已配对 origin
+    // 传给 Chromium 的 origin-as-secure 开关，仅影响本壳 webview 的 API 可用性判定，
+    // 不触及导航守卫与 IPC 边界（能加载的页面仍是已配对 origin，威胁模型不变）。
+    // 必须在 WebView2 环境创建前设置；首次配对由命令层 app.restart() 走一次重启生效。
+    // macOS（WKWebView）无对应机制：远程模式的模型/设置页受限，README 已知限制。
+    #[cfg(windows)]
+    if let Some(cfg) = remote::load() {
+        let flag = format!("--unsafely-treat-insecure-origin-as-secure={}", cfg.origin);
+        match std::env::var("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS") {
+            Ok(existing) => {
+                std::env::set_var("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", format!("{existing} {flag}"))
+            }
+            Err(_) => std::env::set_var("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", flag),
+        }
+    }
     tauri::Builder::default()
         // 二次启动：聚焦已有窗口（须最先注册）
         .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {

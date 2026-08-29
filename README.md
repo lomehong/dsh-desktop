@@ -35,6 +35,7 @@ curl -X POST http://127.0.0.1:3080/dsh-remote/api/pairing
 **安全边界（简述）**：webview 只受导航守卫约束（仅放行已配对 origin）；capability 仅窗口控制；自定义命令对 harness 页面零开放；凭据明文存 `remote.json`（与 dsh 会话密钥同威胁模型）；仅支持 http（网关不带 TLS）；一次只连一个远程实例。
 
 **已知限制**：远端 dsh ≥ 0.1.2 的 remote.mux-over-gateway 暂不支持（上游发布后适配）；远端 dsh 当前应为 0.1.1-rc.x（旧 events.mux 协议）。
+**安全上下文**：明文 http 的远程 origin 上 crypto.subtle/randomUUID 等 API 受限。Windows 上首次配对成功后会**自动重启一次**（把远程 origin 交给 WebView2 的 origin-as-secure 开关，此后模型/设置页完整可用）；同地址重新配对不重启。缺失的 randomUUID 另有初始化脚本兜底 polyfill。macOS（WKWebView）无对应机制，远程模式的模型/设置页受限。
 
 ## 开发
 
@@ -84,6 +85,7 @@ cargo build --release
 - 同一会话不要在网页版与桌面版并发发消息（回合会交错写入同一会话流）。
 - `升级 DSH` 作用于便携运行时；使用系统 `dsh` 回退启动时不升级系统安装。
 - 远程模式无自动重连守护：事件流断开仅记日志，切换/重连手动触发（托盘「重连远程实例」或错误态「重试」）。
+- macOS 远程模式：WKWebView 无 origin-as-secure 机制，模型/设置页（依赖 crypto.subtle）受限；Windows 首次配对自动重启后完整可用。
 
 ## 安全边界
 
