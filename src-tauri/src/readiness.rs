@@ -9,6 +9,17 @@ use std::time::Duration;
 /// 照常失败比静默放行更早暴露问题。Host 头必须是完整 authority
 /// （127.0.0.1:port）：v0.1.2 的 cookie 按 authority 签发与校验。
 pub fn http_ok(url: &str) -> bool {
+    http_ok_inner(url, None)
+}
+
+/// 同 http_ok，但可附加额外请求头（远程模式：x-remote-token 网关凭证）。
+/// （接线在模式状态机任务；bin crate 下 pub 不豁免 dead_code，先压掉）
+#[allow(dead_code)]
+pub fn http_ok_hdr(url: &str, extra_header: Option<(&str, &str)>) -> bool {
+    http_ok_inner(url, extra_header)
+}
+
+fn http_ok_inner(url: &str, extra_header: Option<(&str, &str)>) -> bool {
     let rest = url.strip_prefix("http://").unwrap_or(url);
     let (authority, path) = match rest.split_once('/') {
         Some((authority, tail)) => (authority, format!("/{tail}")),
@@ -26,7 +37,10 @@ pub fn http_ok(url: &str) -> bool {
         return false;
     };
     let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
-    let req = format!("GET {path} HTTP/1.1\r\nHost: {authority}\r\nConnection: close\r\n\r\n");
+    let extra_line = extra_header
+        .map(|(k, v)| format!("{k}: {v}\r\n"))
+        .unwrap_or_default();
+    let req = format!("GET {path} HTTP/1.1\r\nHost: {authority}\r\n{extra_line}Connection: close\r\n\r\n");
     if stream.write_all(req.as_bytes()).is_err() {
         return false;
     }
@@ -51,6 +65,19 @@ pub fn wait_http_ok(base: &str, timeout: Duration) -> bool {
     let start = std::time::Instant::now();
     while start.elapsed() < timeout {
         if http_ok(base) {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    }
+    false
+}
+
+/// 轮询直到就绪或超时，带网关凭证头（远程模式探活必须过网关的 401 这关）。
+#[allow(dead_code)]
+pub fn wait_http_ok_hdr(base: &str, token: Option<&str>, timeout: Duration) -> bool {
+    let start = std::time::Instant::now();
+    while start.elapsed() < timeout {
+        if http_ok_hdr(base, token.map(|t| ("x-remote-token", t))) {
             return true;
         }
         std::thread::sleep(Duration::from_millis(500));
@@ -115,5 +142,50 @@ mod tests {
         assert!(status_ok("HTTP/1.0 303 See Other"));
         assert!(status_ok("HTTP/1.1 401 Unauthorized") == false);
         assert!(status_ok("garbage") == false);
+    }
+
+    #[test]
+    fn forwards_extra_header_and_accepts_200() {
+        // 服务端校验 x-remote-token 头必须等于预期值才回 200，否则 401
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 1024];
+            let n = std::io::Read::read(&mut stream, &mut buf).unwrap();
+            let head = String::from_utf8_lossy(&buf[..n]).to_string();
+            let ok = head.contains("x-remote-token: tok-abc");
+            let _ = stream.write_all(if ok {
+                b"HTTP/1.1 200 OK\r\ncontent-length: 0\r\n\r\n".as_slice()
+            } else {
+                b"HTTP/1.1 401 Unauthorized\r\ncontent-length: 0\r\n\r\n".as_slice()
+            });
+        });
+        assert!(http_ok_hdr(
+            &format!("http://127.0.0.1:{port}/"),
+            Some(("x-remote-token", "tok-abc"))
+        ));
+        // 凭证不对：服务端 401 → 不算就绪
+        let listener2 = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port2 = listener2.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener2.accept().unwrap();
+            let mut buf = [0u8; 1024];
+            let _ = std::io::Read::read(&mut stream, &mut buf);
+            let _ = stream.write_all(b"HTTP/1.1 401 Unauthorized\r\ncontent-length: 0\r\n\r\n");
+        });
+        assert!(!http_ok_hdr(
+            &format!("http://127.0.0.1:{port2}/"),
+            Some(("x-remote-token", "wrong"))
+        ));
+    }
+
+    #[test]
+    fn wait_http_ok_hdr_times_out_without_match() {
+        assert!(!wait_http_ok_hdr(
+            "http://127.0.0.1:1/",
+            Some("t"),
+            Duration::from_millis(200)
+        ));
     }
 }
