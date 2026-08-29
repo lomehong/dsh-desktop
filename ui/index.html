@@ -37,37 +37,39 @@
   #status { font-size: 13px; color: #aeb9c8; min-height: 20px; max-width: 560px; text-align: center; white-space: pre-wrap; }
   #status.error { color: #ff8f8f; }
   .hint { font-size: 12px; color: #6d7a8a; }
-  .actions { display: none; gap: 12px; }
-  .actions button {
+  .actions, #remote-actions { display: none; gap: 12px; flex-wrap: wrap; justify-content: center; }
+  .actions button, #remote-actions button {
     padding: 8px 18px; border-radius: 8px; border: 1px solid rgba(255,255,255,0.25);
     background: rgba(255,255,255,0.08); color: #e8ecf1; font-size: 13px; cursor: pointer;
   }
-  .actions button:hover { background: rgba(255,255,255,0.16); }
-  /* ── 分身信息向导（便携版首次启动） ── */
-  #wizard { display: none; flex-direction: column; gap: 10px; width: 560px; max-height: 62vh; }
-  #wizard.open { display: flex; }
-  #wizard h2 { font-size: 16px; font-weight: 600; text-align: center; }
-  #wizard .subtitle { font-size: 12px; color: #8b98ab; text-align: center; margin-bottom: 4px; }
-  #wizard .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 14px; overflow-y: auto; padding-right: 4px; }
-  #wizard .field { display: flex; flex-direction: column; gap: 3px; }
-  #wizard .field.wide { grid-column: 1 / -1; }
-  #wizard label { font-size: 12px; color: #aeb9c8; }
-  #wizard input, #wizard textarea {
+  .actions button:hover, #remote-actions button:hover { background: rgba(255,255,255,0.16); }
+  /* ── 分身信息向导（便携版首启）与远程连接屏共用同套表单样式 ── */
+  #wizard, #connect { display: none; flex-direction: column; gap: 10px; width: 560px; max-height: 62vh; }
+  #wizard.open, #connect.open { display: flex; }
+  #wizard h2, #connect h2 { font-size: 16px; font-weight: 600; text-align: center; }
+  #wizard .subtitle, #connect .subtitle { font-size: 12px; color: #8b98ab; text-align: center; margin-bottom: 4px; }
+  #wizard .grid, #connect .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 14px; overflow-y: auto; padding-right: 4px; }
+  #wizard .field, #connect .field { display: flex; flex-direction: column; gap: 3px; }
+  #wizard .field.wide, #connect .field.wide { grid-column: 1 / -1; }
+  #wizard label, #connect label { font-size: 12px; color: #aeb9c8; }
+  #wizard input, #wizard textarea, #connect input {
     font: inherit; font-size: 13px; color: #e8ecf1;
     background: rgba(255,255,255,0.07); border: 1px solid rgba(255,255,255,0.18);
     border-radius: 7px; padding: 7px 10px; outline: none;
   }
-  #wizard input:focus, #wizard textarea:focus { border-color: #7b9bff; }
+  #wizard input:focus, #wizard textarea:focus, #connect input:focus { border-color: #7b9bff; }
   #wizard textarea { resize: vertical; min-height: 56px; }
-  #wizard .row-end { display: flex; gap: 12px; justify-content: flex-end; margin-top: 4px; }
-  #wizard button.primary {
+  #wizard .row-end, #connect .row-end { display: flex; gap: 12px; justify-content: flex-end; margin-top: 4px; }
+  #wizard button.primary, #connect button.primary {
     padding: 9px 26px; border-radius: 8px; border: none; cursor: pointer;
     background: linear-gradient(135deg, #4a6cf7, #7b5cf0); color: #fff; font-size: 14px;
   }
-  #wizard button.primary:disabled { opacity: 0.5; cursor: wait; }
-  #wizard .skip { font-size: 12px; color: #6d7a8a; background: none; border: none; cursor: pointer; padding: 9px 6px; }
+  #wizard button.primary:disabled, #connect button.primary:disabled { opacity: 0.5; cursor: wait; }
+  #wizard .skip, #connect .skip { font-size: 12px; color: #6d7a8a; background: none; border: none; cursor: pointer; padding: 9px 6px; }
   #wizard .cred-title { grid-column: 1 / -1; font-size: 12px; color: #8b98ab; margin-top: 6px;
     border-top: 1px dashed rgba(255,255,255,0.15); padding-top: 10px; }
+  /* 连接屏表单内的动态状态行（配对链接解析失败 / 连接错误提示） */
+  #connect-status { font-size: 12px; color: #ff8f8f; min-height: 16px; text-align: center; white-space: pre-wrap; }
 </style>
 </head>
 <body>
@@ -80,6 +82,14 @@
       <button id="btn-install">安装运行环境</button>
       <button id="btn-log">打开日志</button>
       <button id="btn-dir">打开数据目录</button>
+    </div>
+    <!-- 远程模式错误态按钮组（s.remote && s.error 时替换 #actions；日志/数据目录两模式都有） -->
+    <div class="actions" id="remote-actions">
+      <button id="btn-retry">重试</button>
+      <button id="btn-edit-remote">修改远程配置</button>
+      <button id="btn-tolocal">回到本地模式</button>
+      <button id="btn-log-remote">打开日志</button>
+      <button id="btn-dir-remote">打开数据目录</button>
     </div>
     <div class="hint">首次启动约需 10~60 秒，请稍候</div>
   </div>
@@ -106,16 +116,35 @@
     </div>
   </form>
 
+  <!-- 连接远程实例：地址 + 配对码；配对码栏可直接粘贴整条配对链接自动拆填 -->
+  <form id="connect" autocomplete="off">
+    <h2>连接远程实例</h2>
+    <div class="subtitle">配对成功后本壳将切换为远端分身；凭据保存在本机</div>
+    <div class="grid">
+      <div class="field wide"><label>远程地址</label><input name="remoteAddr" placeholder="192.168.1.146:3090"></div>
+      <div class="field wide"><label>配对码</label><input name="remoteCode" placeholder="粘贴配对链接或输入配对码"></div>
+    </div>
+    <div class="subtitle">（配对码从远端 dsh 设置页「远程访问」Tab 生成，10 分钟内有效、仅可用一次）</div>
+    <div id="connect-status"></div>
+    <div class="row-end">
+      <button type="button" class="skip" id="btn-connect-cancel">取消</button>
+      <button type="submit" class="primary" id="btn-connect">连接</button>
+    </div>
+  </form>
+
   <script>
     const boot = document.getElementById('boot');
     const el = document.getElementById('status');
     const spinner = document.getElementById('spinner');
     const actions = document.getElementById('actions');
+    const remoteActions = document.getElementById('remote-actions');
     const wizard = document.getElementById('wizard');
+    const connectForm = document.getElementById('connect');
     const invoke = window.__TAURI__ && window.__TAURI__.core && window.__TAURI__.core.invoke;
     const listen = window.__TAURI__ && window.__TAURI__.event && window.__TAURI__.event.listen;
     let stopped = false;
     let wizardMode = false;
+    let connectMode = false;
 
     // 向导默认值：与 dsh-persona scripts/setup.ps1 的 $personaDefaults 保持一致
     const DEFAULTS = {
@@ -151,19 +180,52 @@
       }
     }
 
+    // 连接屏状态行：配对链接解析失败 / 连接错误提示（空串即清空）
+    function setConnectStatus(text) {
+      document.getElementById('connect-status').textContent = text || '';
+    }
+
+    // 连接屏显隐：只在切换沿处理一次（s.connect=true 的帧每 400ms 重复到达）。
+    let connectAddrFilled = false;
+    function showConnect(on) {
+      if (connectMode === on) return;
+      connectMode = on;
+      boot.style.display = on ? 'none' : 'flex';
+      connectForm.classList.toggle('open', on);
+      if (on) {
+        // 预填上次配对的地址（每次唤起至多取一次，不覆盖用户已输入的值）
+        if (!connectAddrFilled) {
+          connectAddrFilled = true;
+          const addr = connectForm.elements.remoteAddr;
+          if (invoke) {
+            invoke('get_remote_address').then(a => { if (a && !addr.value) addr.value = a; }).catch(() => {});
+          }
+        }
+        connectForm.elements.remoteAddr.focus();
+      } else {
+        connectAddrFilled = false; // 下次唤起重新预填
+        setConnectStatus('');
+      }
+    }
+
     function render(s) {
       if (!s || !s.text) return;
       if (s.wizard) { showWizard(true); return; }
+      if (s.connect) { showConnect(true); return; }
       if (wizardMode) showWizard(false);
+      if (connectMode) showConnect(false);
       el.textContent = s.text || '';
       if (s.error) {
         el.classList.add('error'); spinner.style.display = 'none';
-        actions.style.display = 'flex';
         stopped = true;
+        // 远程模式错误态：本地语义的「安装运行环境」不适用，换远程按钮组；
+        // 打开日志/打开数据目录两种模式都保留
+        actions.style.display = s.remote ? 'none' : 'flex';
+        remoteActions.style.display = s.remote ? 'flex' : 'none';
       } else if (stopped && !s.ready) {
         // 安装重试：回到进行中状态
         el.classList.remove('error'); spinner.style.display = '';
-        actions.style.display = 'none'; stopped = false;
+        actions.style.display = 'none'; remoteActions.style.display = 'none'; stopped = false;
       }
       if (s.ready) { stopped = true; }
     }
@@ -194,9 +256,52 @@
       try { await invoke('persona_wizard_save', { fields: collectFields() }); } catch (e) {}
     };
 
+    // 配对码栏粘入整条配对链接时即时拆填（与后端 parse_pairing_link 同规则；
+    // 解析失败保留原值并在状态行提示）
+    connectForm.elements.remoteCode.addEventListener('input', () => {
+      const v = connectForm.elements.remoteCode.value.trim();
+      if (!v.includes('http://')) { setConnectStatus(''); return; }
+      try {
+        const u = new URL(v);
+        const code = u.searchParams.get('code');
+        if (u.pathname !== '/__remote/pair' || !code) throw new Error('不是配对链接');
+        connectForm.elements.remoteAddr.value = u.host; // origin 去掉 http:// 前缀
+        connectForm.elements.remoteCode.value = code;
+        setConnectStatus('');
+      } catch (e) {
+        setConnectStatus('未识别的配对链接：应为 http://地址:端口/__remote/pair?code=…');
+      }
+    });
+
+    connectForm.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const btn = document.getElementById('btn-connect');
+      btn.disabled = true; btn.textContent = '配对中…';
+      setConnectStatus('');
+      try {
+        await invoke('connect_remote', {
+          address: connectForm.elements.remoteAddr.value.trim(),
+          code: connectForm.elements.remoteCode.value.trim(),
+        });
+        // 成功：后端接管状态流转（配对 → 连接 → 就绪），表单随下一帧自动收起，
+        // 按钮保持禁用防止 400ms 空窗内重复提交
+      } catch (err) {
+        btn.disabled = false; btn.textContent = '连接';
+        setConnectStatus('连接失败：' + err);
+      }
+    });
+    // 取消：回本地模式（无远程配置时即回到本地启动流）
+    document.getElementById('btn-connect-cancel').onclick = () => { try { invoke('switch_to_local'); } catch (e) {} };
+
     document.getElementById('btn-install').onclick = () => { try { invoke('install_runtime'); } catch (e) {} };
     document.getElementById('btn-log').onclick = () => { try { invoke('open_log'); } catch (e) {} };
     document.getElementById('btn-dir').onclick = () => { try { invoke('open_runtime_dir'); } catch (e) {} };
+    // 远程错误态按钮组
+    document.getElementById('btn-retry').onclick = () => { try { invoke('retry_connect'); } catch (e) {} };
+    document.getElementById('btn-edit-remote').onclick = () => { try { invoke('show_connect'); } catch (e) {} };
+    document.getElementById('btn-tolocal').onclick = () => { try { invoke('switch_to_local'); } catch (e) {} };
+    document.getElementById('btn-log-remote').onclick = () => { try { invoke('open_log'); } catch (e) {} };
+    document.getElementById('btn-dir-remote').onclick = () => { try { invoke('open_runtime_dir'); } catch (e) {} };
     // 主通道：轮询（不受事件早于监听器挂载的竞态影响；向导态下持续轮询，保存后自动接续）
     if (invoke) {
       (async function poll() {

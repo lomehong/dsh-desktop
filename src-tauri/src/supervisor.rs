@@ -348,6 +348,29 @@ pub fn connect_remote_flow(app: &tauri::AppHandle) -> Result<(), String> {
     result
 }
 
+/// 切回本地模式（加载页 switch_to_local 命令与托盘「断开远程，回到本地」共用）：
+/// 收尾本地 child → 模式翻转并落盘 → 托盘菜单重建 → 撤 origin 回加载页 → 重新走本地启动序列。
+pub fn switch_to_local_flow(app: &tauri::AppHandle) {
+    let state: tauri::State<AppState> = app.state();
+    // 防御性收尾：正常远程模式 child 恒为 None，但升级运行时等路径可能在远程模式下
+    // 留下本地 child——不清掉会让 start_service 双拉本地实例
+    stop_child(app);
+    *state.origin.lock().unwrap() = None;
+    *state.mode.lock().unwrap() = "local";
+    crate::remote::save_mode("local");
+    // 模式已翻转：托盘菜单换成本地菜单（set_menu 内部自派发主线程，任意线程可调）
+    crate::tray::rebuild(app);
+    // 先落一帧本地模式状态再回加载页：首帧轮询不再重放上一帧的远程错误态
+    status::set(app, "正在切换到本地模式…");
+    webview::navigate_to_loader(app);
+    let handle = app.clone();
+    std::thread::spawn(move || {
+        if let Err(err) = start_service(&handle) {
+            status::fail(&handle, &err);
+        }
+    });
+}
+
 /// 托盘「重启服务」/ 重启命令的统一入口：按当前模式分派。
 /// 本地走 restart_service（杀树重启，行为不变）；远程先收掉残留 child（如升级运行时
 /// 等路径在远程模式下拉起过的本地服务）、撤 origin 回加载页，再走 connect_remote_flow。

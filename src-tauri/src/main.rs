@@ -91,9 +91,7 @@ fn install_runtime(window: tauri::WebviewWindow, app: tauri::AppHandle) {
     std::thread::spawn(move || install::install_and_start(&app));
 }
 
-/// 便携版分身向导：保存字段 → 写预设/patch/凭证 → 自动（重）启动服务。
-/// 注意：完成后的 restart_service 是本地语义、不按模式分派（远程模式下重开向导的组合
-/// 待 Task 7 动态托盘/UI 一并处理）。
+/// 便携版分身向导：保存字段 → 写预设/patch/凭证 → 按当前模式自动（重）启动/重连。
 #[tauri::command]
 fn persona_wizard_save(
     window: tauri::WebviewWindow,
@@ -106,7 +104,9 @@ fn persona_wizard_save(
     persona::save(&fields)?;
     std::thread::spawn(move || {
         status::set(&app, "分身配置完成，正在启动服务…");
-        supervisor::restart_service(&app);
+        // 按模式分派：本地重启服务 / 远程重连远程实例（保存向导不再是模式盲的本地重启，
+        // 否则远程模式下保存向导会把本地服务拉起来顶掉远程页面）
+        supervisor::restart_by_mode(&app);
     });
     Ok(())
 }
@@ -145,6 +145,9 @@ fn connect_remote(
     remote::save_mode("remote");
     let state: tauri::State<AppState> = app.state();
     *state.mode.lock().unwrap() = "remote";
+    // 模式已翻转：托盘菜单换成远程菜单（重连/断开；set_menu 内部自派发主线程，
+    // async 命令线程可直接调）
+    tray::rebuild(&app);
     // 本地服务若有在跑先整树收掉：远程模式下 child 恒为 None，守护线程自然失活，
     // 不会出现「本地子进程退出 → 守护误拉本地服务把远程页面顶掉」的串台
     supervisor::stop_child(&app);
@@ -189,28 +192,15 @@ fn get_remote_address(window: tauri::WebviewWindow, _app: tauri::AppHandle) -> S
     remote::load().map(|c| c.address).unwrap_or_default()
 }
 
-/// 切回本地模式：改模式并落盘 → 撤 origin 回加载页 → 重新走本地启动序列。
+/// 切回本地模式（加载页「取消」按钮 / 远程错误态「回到本地模式」按钮用）；
+/// 完整流程见 supervisor::switch_to_local_flow（托盘「断开远程，回到本地」走同一路径）。
 #[tauri::command]
 fn switch_to_local(window: tauri::WebviewWindow, app: tauri::AppHandle) {
     if !caller_is_local(&window) {
         return;
     }
-    let state: tauri::State<AppState> = app.state();
-    // 防御性收尾：正常远程模式 child 恒为 None，但升级运行时等路径可能在远程模式下
-    // 留下本地 child——不清掉会让 start_service 双拉本地实例
-    supervisor::stop_child(&app);
-    *state.origin.lock().unwrap() = None;
-    *state.mode.lock().unwrap() = "local";
-    remote::save_mode("local");
-    // 先落一帧本地模式状态再回加载页：首帧轮询不再重放上一帧的远程错误态
-    status::set(&app, "正在切换到本地模式…");
-    webview::navigate_to_loader(&app);
     let handle = app.clone();
-    std::thread::spawn(move || {
-        if let Err(err) = supervisor::start_service(&handle) {
-            status::fail(&handle, &err);
-        }
-    });
+    std::thread::spawn(move || supervisor::switch_to_local_flow(&handle));
 }
 
 /// 重启服务（加载页按钮用，语义同托盘「重启服务」）：按模式分派。

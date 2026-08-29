@@ -1,7 +1,19 @@
-//! 托盘：显示/隐藏、重启服务、升级 DSH、检查应用更新、打开日志与数据目录、开机自启、退出。
+//! 托盘：按当前模式（本地/远程）动态构建菜单 + 显示/隐藏、重启、升级 DSH、检查应用更新、
+//! 打开日志与数据目录、开机自启、退出。
+use std::sync::OnceLock;
+
 use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem};
-use tauri::tray::TrayIconBuilder;
+use tauri::tray::{TrayIcon, TrayIconBuilder};
 use tauri::Manager;
+
+/// 已构建的托盘图标句柄：模式切换时经 set_menu 整体换菜单（图标不重建、不闪烁）。
+/// 菜单事件处理器只在 build_tray 注册一次——tauri 把菜单事件挂在全局监听表
+/// （TrayIcon::on_menu_event 实现即向 global_event_listeners 追加），
+/// remove+rebuild 会让处理器随重建成倍叠加触发，因此换菜单而非换图标。
+static TRAY: OnceLock<TrayIcon<tauri::Wry>> = OnceLock::new();
+
+const TOOLTIP_LOCAL: &str = "DSH Desktop — 双击打开；右键菜单退出";
+const TOOLTIP_REMOTE: &str = "DSH Desktop（远程模式）— 双击打开；右键菜单退出";
 
 /// 检查应用自更新（tauri-plugin-updater，签名公钥内置于 tauri.conf.json）。
 fn check_app_update(app: &tauri::AppHandle) {
@@ -32,7 +44,21 @@ fn check_app_update(app: &tauri::AppHandle) {
     });
 }
 
-pub fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
+/// 当前模式（AppState.mode 现读）；state 未就绪时按本地处理（与 status.rs 的投影一致）。
+fn is_remote(app: &tauri::AppHandle) -> bool {
+    app.try_state::<crate::AppState>()
+        .is_some_and(|s| *s.mode.lock().unwrap() == "remote")
+}
+
+/// 按模式构建托盘菜单：
+/// - 本地：显示/隐藏、重启服务、连接远程实例…、[便携]分身向导、升级 DSH、[非便携]检查应用更新、
+///   日志、数据目录、[非便携]开机自启、退出
+/// - 远程：显示/隐藏、重连远程实例、断开远程回到本地、日志、数据目录、退出
+///
+/// 向导/升级/检查更新/自启只在本地菜单出现：它们都是本地语义（保存向导后重启本地流、
+/// 升级后重拉本地服务），远程模式下应先「断开远程」再操作（升级路径的远程防御分支
+/// 见 install.rs::upgrade_runtime）。便携隐藏规则叠加在模式条件之上，远程模式同样适用。
+fn build_menu(app: &tauri::AppHandle, remote: bool) -> tauri::Result<Menu<tauri::Wry>> {
     use tauri_plugin_autostart::ManagerExt;
 
     // 便携模式（U盘包）：应用更新与开机自启都面向安装版（更新会装到宿主机、
@@ -40,7 +66,15 @@ pub fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
     let portable = crate::runtime::portable_root().is_some();
 
     let show = MenuItem::with_id(app, "show", "显示 / 隐藏", true, None::<&str>)?;
-    let restart = MenuItem::with_id(app, "restart", "重启服务", true, None::<&str>)?;
+    let restart = MenuItem::with_id(
+        app,
+        "restart",
+        if remote { "重连远程实例" } else { "重启服务" },
+        true,
+        None::<&str>,
+    )?;
+    let connect = MenuItem::with_id(app, "connect", "连接远程实例…", true, None::<&str>)?;
+    let tolocal = MenuItem::with_id(app, "tolocal", "断开远程，回到本地", true, None::<&str>)?;
     let upgrade = MenuItem::with_id(app, "upgrade", "升级 DSH 运行时（npm 最新版）", true, None::<&str>)?;
     let wizard = MenuItem::with_id(app, "wizard", "重新运行分身向导", true, None::<&str>)?;
     let check_update = MenuItem::with_id(app, "check-update", "检查 DSH Desktop 应用更新", true, None::<&str>)?;
@@ -56,37 +90,50 @@ pub fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
     )?;
     let sep = PredefinedMenuItem::separator(app)?;
     let quit = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
+
     let mut items: Vec<&dyn tauri::menu::IsMenuItem<_>> = vec![&show, &restart];
-    if portable {
-        items.push(&wizard);
-    }
-    items.push(&upgrade);
-    if !portable {
-        items.push(&check_update);
+    if remote {
+        items.push(&tolocal);
+    } else {
+        items.push(&connect);
+        if portable {
+            items.push(&wizard);
+        }
+        items.push(&upgrade);
+        if !portable {
+            items.push(&check_update);
+        }
     }
     items.push(&open_log);
     items.push(&open_dir);
-    if !portable {
+    if !remote && !portable {
         items.push(&autostart);
     }
     items.push(&sep);
     items.push(&quit);
-    let menu = Menu::with_items(app, &items)?;
+    Menu::with_items(app, &items)
+}
+
+pub fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
+    let remote = is_remote(app);
+    let menu = build_menu(app, remote)?;
 
     #[allow(unused_mut)] // macOS 分支会整体重绑定
-    let mut tray = TrayIconBuilder::with_id("dsh-tray")
+    let mut builder = TrayIconBuilder::with_id("dsh-tray")
         .icon(app.default_window_icon().expect("缺少应用图标").clone())
-        .tooltip("DSH Desktop — 双击打开；右键菜单退出")
+        .tooltip(if remote { TOOLTIP_REMOTE } else { TOOLTIP_LOCAL })
         .menu(&menu)
         .show_menu_on_left_click(false);
 
     // macOS 菜单栏习惯：单击即弹菜单（Windows 保持左键穿透、双击唤起窗口）
     #[cfg(target_os = "macos")]
     {
-        tray = tray.show_menu_on_left_click(true);
+        builder = builder.show_menu_on_left_click(true);
     }
 
-    tray.on_menu_event(|app, event| match event.id().as_ref() {
+    // 菜单事件处理器全程只注册这一次；模式切换只换菜单（见 rebuild），id 分发不受影响
+    let icon = builder
+        .on_menu_event(|app, event| match event.id().as_ref() {
             "show" => {
                 if let Some(w) = app.get_webview_window("main") {
                     if w.is_visible().unwrap_or(false) {
@@ -99,8 +146,22 @@ pub fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
             }
             "restart" => {
                 let handle = app.clone();
-                // 按模式分派（本地 restart_service / 远程 connect_remote_flow）；菜单文案动态化在 Task 7
+                // 按模式分派（本地 restart_service / 远程 connect_remote_flow）；文案随菜单变化，id 复用
                 std::thread::spawn(move || crate::supervisor::restart_by_mode(&handle));
+            }
+            "connect" => {
+                // 连接远程实例：先把壳带回加载页（若正停在 harness 页，eval 导航回加载页），
+                // 再落一帧连接屏状态（新加载页轮询 get_status 首帧即渲染表单），最后窗口置前
+                crate::webview::navigate_to_loader(app);
+                crate::status::connect_screen(app, "连接远程实例");
+                if let Some(w) = app.get_webview_window("main") {
+                    let _ = w.set_focus();
+                }
+            }
+            "tolocal" => {
+                let handle = app.clone();
+                // 与加载页 switch_to_local 命令同一流程（模式翻转 + 托盘重建 + 本地启动序列）
+                std::thread::spawn(move || crate::supervisor::switch_to_local_flow(&handle));
             }
             "upgrade" => {
                 let handle = app.clone();
@@ -146,5 +207,28 @@ pub fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
             }
         })
         .build(app)?;
+    let _ = TRAY.set(icon);
     Ok(())
+}
+
+/// 模式翻转后按当前模式重建托盘菜单（connect_remote 成功落凭据、switch_to_local 两处调用）。
+/// MenuItem/Menu 的创建与 set_menu/set_tooltip 在 tauri 内部均经 run_main_thread 派发
+/// （已在主线程则就地执行、否则排队并阻塞等待结果），因此 async 命令线程可直接调用，
+/// 无需调用侧再包 run_on_main_thread。
+pub fn rebuild(app: &tauri::AppHandle) {
+    let Some(tray) = TRAY.get() else {
+        return;
+    };
+    let remote = is_remote(app);
+    let result = build_menu(app, remote).and_then(|menu| {
+        tray.set_menu(Some(menu))?;
+        tray.set_tooltip(Some(if remote { TOOLTIP_REMOTE } else { TOOLTIP_LOCAL }))?;
+        Ok(())
+    });
+    if let Err(e) = result {
+        if let Some(mut log) = crate::runtime::open_log_append() {
+            use std::io::Write;
+            let _ = writeln!(log, "[托盘] 菜单按模式重建失败: {e}");
+        }
+    }
 }

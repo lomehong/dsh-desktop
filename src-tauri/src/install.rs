@@ -332,34 +332,61 @@ pub fn upgrade_dsh(app: &tauri::AppHandle) -> Result<String, String> {
 }
 
 /// 托盘「升级 DSH 运行时」：停服务 → 检查并安装 → 重新启动。
+/// 模式盲项收编：远程模式下不「停服务」（本地 child 恒为 None）、不撤 origin，
+/// 升级完成后按远程模式重连——绝不 start_service 把本地服务拉起来顶掉远程页面
+/// （升级的本地运行时等下次回到本地时生效）。
 pub fn upgrade_runtime(app: &tauri::AppHandle) {
     status::set(app, "正在查询 npm 上 DSH 运行时的最新版本…");
-    // 先停服务，避免替换运行中的文件
     let state: tauri::State<crate::AppState> = app.state();
-    if let Some(mut child) = state.child.lock().unwrap().take() {
-        supervisor::kill_tree(child.id() as u32);
-        let _ = child.wait();
+    let remote_mode = *state.mode.lock().unwrap() == "remote";
+    if !remote_mode {
+        // 先停服务，避免替换运行中的文件
+        if let Some(mut child) = state.child.lock().unwrap().take() {
+            supervisor::kill_tree(child.id() as u32);
+            let _ = child.wait();
+        }
+        *state.origin.lock().unwrap() = None;
     }
-    *state.origin.lock().unwrap() = None;
+    // 回加载页显示升级进度（远程模式仅导航不撤 origin：升级失败仍可直接重连）
     crate::webview::navigate_to_loader(app);
     match upgrade_dsh(app) {
         Ok(msg) => {
-            status::set(app, &format!("{msg}，正在启动服务…"));
+            let next = if remote_mode { "正在重连远程实例…" } else { "正在启动服务…" };
+            status::set(app, &format!("{msg}，{next}"));
         }
         Err(e) => {
             status::fail(app, &e);
             return;
         }
     }
-    if let Err(e) = supervisor::start_service(app) {
+    if remote_mode {
+        if let Err(e) = supervisor::connect_remote_flow(app) {
+            status::fail(app, &e);
+        }
+    } else if let Err(e) = supervisor::start_service(app) {
         status::fail(app, &e);
     }
 }
 
 /// 首启安装入口：安装完成后自动续跑启动序列。
+/// 模式盲项收编：「安装运行环境」按钮理论上只在本地错误态出现，仍按模式防御性分派——
+/// 远程模式下安装完成后重连远程实例，不拉本地服务。
 pub fn install_and_start(app: &tauri::AppHandle) {
     if let Err(e) = install_runtime(app) {
         status::fail(app, &e);
+        return;
+    }
+    let remote_mode = {
+        let state: tauri::State<crate::AppState> = app.state();
+        // 先落局部变量再比较：块尾表达式会让 MutexGuard 临时值活过 state 的析构（E0597）
+        let mode = *state.mode.lock().unwrap();
+        mode == "remote"
+    };
+    if remote_mode {
+        status::set(app, "运行环境就绪，正在重连远程实例…");
+        if let Err(e) = supervisor::connect_remote_flow(app) {
+            status::fail(app, &e);
+        }
         return;
     }
     status::set(app, "运行环境就绪，正在启动服务…");
