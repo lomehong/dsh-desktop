@@ -56,7 +56,7 @@ fn run(app: tauri::AppHandle, base_url: String, launch_url: String, gen: u64) {
     // dsh ≥0.1.2：token 换 cookie。rc.2 无认证（200 无 Set-Cookie）→ None。
     let cookie = exchange_cookie(&launch_url);
     match &cookie {
-        Some(c) => log_note("已用一次性 token 换取会话 cookie（≥0.1.2 认证协议）"),
+        Some(_) => log_note("已用一次性 token 换取会话 cookie（≥0.1.2 认证协议）"),
         None => log_note("服务未返回会话 cookie（≤0.1.1 免认证协议）"),
     }
 
@@ -82,6 +82,59 @@ fn run(app: tauri::AppHandle, base_url: String, launch_url: String, gen: u64) {
         }
         Err(e) => log_note(&format!("remote.mux 连接失败，放弃订阅（服务重启后会重试）: {e}")),
     }
+}
+
+/* ════════════════════════ 远程模式（dsh-remote 网关） ════════════════════════ */
+
+/// 远程模式订阅线程：带网关凭证连远程实例的事件流（无本地一次性 token 可换 cookie）。
+/// （接线在模式状态机任务；bin crate 下 pub 不豁免 dead_code，先压掉）
+#[allow(dead_code)]
+pub fn spawn_remote(app: &tauri::AppHandle, base_url: &str, token: &str) {
+    let gen = {
+        let state: tauri::State<AppState> = app.state();
+        state.events_gen.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1
+    };
+    let app = app.clone();
+    let base = base_url.to_string();
+    let token = token.to_string();
+    std::thread::spawn(move || run_remote(app, base, token, gen));
+}
+
+fn run_remote(app: tauri::AppHandle, base_url: String, token: String, gen: u64) {
+    log_note(&format!("远程事件流启动 (gen={gen}): base={base_url}"));
+    // 远程网关没有本地 launch_url/一次性 token：跳过 exchange_cookie，直接带凭证头握手。
+    // 失败只记日志不重试——断流不影响已加载页面，模式切换时世代号自然接管重连。
+    match connect_legacy_with_token(&base_url, &token) {
+        Ok(socket) => {
+            log_note("远程事件流已连接（events.mux + x-remote-token）");
+            legacy_loop(app, socket, gen);
+        }
+        Err(e) => log_note(&format!("远程事件流连接失败，放弃订阅: {e}")),
+    }
+}
+
+/// 远程模式 WS 握手：请求带 x-remote-token 头（网关据此鉴权；Host 仍按 URL 推导，
+/// 手法同 connect_remote 的 Cookie 注入）。
+fn connect_legacy_with_token(base_url: &str, token: &str) -> Result<WsStream, String> {
+    let url = format!("{base_url}/api/events.mux").replace("http://", "ws://");
+    let request = build_handshake_request(&url, token)?;
+    tungstenite::connect(request)
+        .map(|(s, _)| s)
+        .map_err(|e| e.to_string())
+}
+
+/// 构造带 x-remote-token 头的 WS 握手请求（纯构造不发起连接，便于单测）。
+fn build_handshake_request(
+    url: &str,
+    token: &str,
+) -> Result<tungstenite::http::Request<()>, String> {
+    let mut request = url
+        .into_client_request()
+        .map_err(|e| format!("构造握手请求失败: {e}"))?;
+    let value =
+        tungstenite::http::HeaderValue::from_str(token).map_err(|e| format!("非法 token 头: {e}"))?;
+    request.headers_mut().insert("x-remote-token", value);
+    Ok(request)
 }
 
 /* ════════════════════════ 旧协议（≤0.1.1 events.mux） ════════════════════════ */
@@ -568,5 +621,15 @@ mod tests {
     fn set_cookie_header_is_case_insensitive() {
         let head = "HTTP/1.1 303 See Other\r\nSET-COOKIE: a=b\r\n\r\n";
         assert_eq!(exchange_cookie_from_head(head).unwrap(), "a=b");
+    }
+
+    /* ── 远程模式：握手请求带网关凭证 ── */
+    #[test]
+    fn remote_handshake_request_carries_token_header() {
+        let request =
+            build_handshake_request("ws://192.168.1.146:3090/api/events.mux", "tok-1").unwrap();
+        assert_eq!(request.headers().get("x-remote-token").unwrap(), "tok-1");
+        // Host 仍按 URL 推导（网关按 Host 判定合法 authority）
+        assert_eq!(request.headers().get("host").unwrap(), "192.168.1.146:3090");
     }
 }
