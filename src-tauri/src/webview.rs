@@ -78,10 +78,10 @@ pub const DECORUM_ICON_CSS: &str = r##"
 })();
 "##;
 
-/// 远程页面（http + 非回环主机）不是安全上下文，Web Crypto 的 `crypto.randomUUID`
-/// 在其中不存在，dsh 前端（如 Agent 预设页）调用即崩。兜底 polyfill：仅当缺失且
-/// `crypto.getRandomValues` 可用时，用同一密码学随机源实现同语义 UUIDv4——只补缺，
-/// 安全上下文（本地回环/https）的原生实现永远不被覆盖。
+/// 兜底 polyfill：仅当缺失且 `crypto.getRandomValues` 可用时，用同一密码学随机源
+/// 实现同语义 UUIDv4——只补缺，安全上下文（本地回环/https）的原生实现永远不被覆盖。
+/// 远程页面现已经本地回环反代加载（origin 天然安全上下文），此脚本平时为空操作；
+/// 保留作保险，覆盖极老内核等意外场景。
 pub const SECURE_CONTEXT_SHIM_JS: &str = r##"
 (function () {
   try {
@@ -104,24 +104,6 @@ pub const SECURE_CONTEXT_SHIM_JS: &str = r##"
 })();
 "##;
 
-/// wry 在 Windows 上给 WebView2 的默认参数。`additional_browser_args` 是覆盖式传入
-/// （不给才用默认），显式传参时必须自带这串默认禁用项，否则默认行为丢失。
-const WEBVIEW2_DEFAULT_ARGS: &str = "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection";
-
-/// 构造 WebView2 附加参数：已配对远程实例时，把该 origin 标记为安全上下文——
-/// 明文 http 的远程页面上 crypto.subtle/randomUUID 等受限 API 才可用（模型/设置页依赖）。
-/// 只影响本壳 webview 的 API 可用性判定，不触及导航守卫与 IPC 边界。
-pub fn webview_browser_args() -> String {
-    #[cfg(windows)]
-    if let Some(cfg) = crate::remote::load() {
-        return format!(
-            "{WEBVIEW2_DEFAULT_ARGS} --unsafely-treat-insecure-origin-as-secure={}",
-            cfg.origin
-        );
-    }
-    WEBVIEW2_DEFAULT_ARGS.to_string()
-}
-
 /// 创建主窗口（程序化创建以挂导航守卫；配置文件中 windows 留空）。
 /// 无边框：decorum 覆盖式标题栏（Windows 悬浮原生风格按钮；macOS Overlay 红绿灯），
 /// Harness 页面经 TITLEBAR_INSET_CSS 下移，不被悬浮条遮挡。
@@ -131,7 +113,7 @@ pub fn webview_browser_args() -> String {
 /// 那条路径有竞态（eval 可能落在导航完成前的旧页面上），此处恢复为一贯做法。
 pub fn create_main_window(app: &tauri::AppHandle) -> tauri::Result<()> {
     let handle = app.clone();
-    let builder = tauri::WebviewWindowBuilder::new(
+    let mut builder = tauri::WebviewWindowBuilder::new(
         app,
         "main",
         tauri::WebviewUrl::App("index.html".into()),
@@ -140,9 +122,6 @@ pub fn create_main_window(app: &tauri::AppHandle) -> tauri::Result<()> {
     .inner_size(1280.0, 800.0)
     .min_inner_size(980.0, 640.0)
     .center();
-    // WebView2 附加参数：wry 默认禁用项 + （已配对远程实例时）origin 安全上下文标记。
-    // Windows 专用设定，其它平台由 tauri 忽略。
-    let mut builder = builder.additional_browser_args(&webview_browser_args());
     // Windows/Linux：创建期即去掉原生边框（decorum 的运行时 set_decorations 在程序化
     // 建窗场景下不生效，原生标题栏会与自定义按钮并存）；macOS 走 Overlay 红绿灯路线。
     #[cfg(not(target_os = "macos"))]
@@ -156,8 +135,6 @@ pub fn create_main_window(app: &tauri::AppHandle) -> tauri::Result<()> {
             .hidden_title(true);
     }
     let window = builder
-        // WebView2 附加参数：默认禁用项 + （已配对远程实例时）origin 安全上下文标记。
-        // Windows 专用 API；cfg 门控保参在非 Windows 上不传。
         .initialization_script(SECURE_CONTEXT_SHIM_JS)
         .initialization_script(TITLEBAR_INSET_CSS)
         .initialization_script(DECORUM_ICON_CSS)

@@ -9,7 +9,6 @@
 //! 兼容；不再有新请求进入）。两处已注明的简化（chunked 请求兜底、chunked 结束帧
 //! 扫描）见对应函数注释——dsh 前端与自家工具全部发 content-length，网关（Node
 //! http）应答为 content-length 或无 trailer 的 chunked，均不受影响。
-#![allow(dead_code)] // Task B 接线前：公开 API 仅被单测触达，非测试构建暂视为死代码（接线后移除）
 
 use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};

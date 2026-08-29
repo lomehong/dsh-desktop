@@ -309,7 +309,20 @@ pub fn restart_service(app: &tauri::AppHandle) {
     }
 }
 
-/// 远程连接序列：凭据探活 → origin 入放行表 → 事件流(带凭证) → 导航（经 pair?token= 种 cookie）。
+/// 收掉当前本地回环反代（若有）：关闭回环监听，活动连接按各自框架自然收尾
+/// （尽力而为，见 remote_proxy 模块注释）。与 stop_child 同款手法：锁只护句柄摘取。
+pub fn stop_proxy(app: &tauri::AppHandle) {
+    let state: tauri::State<AppState> = app.state();
+    let proxy = state.proxy.lock().unwrap().take();
+    if let Some(proxy) = proxy {
+        proxy.stop();
+    }
+}
+
+/// 远程连接序列：收旧反代 → 起新反代 → 经反代全路径探活 → 代理 origin 入放行表 →
+/// 事件流直连网关（带凭证）→ 导航（经 pair?token= 种 cookie）。
+/// 页面以 http://127.0.0.1:<port>（反代）加载：dsh 视为本机浏览器（模型/设置完整可用），
+/// 回环天然是安全上下文；代理自动注入 x-remote-token，探活无须手工带头。
 /// 与 start_service 共用同一把 `restarting` 互斥锁，防本地/远程并发双拉；远程模式不落
 /// child 句柄（子进程归远端管），守护线程因 child=None 自然失活，不会误拉本地服务。
 pub fn connect_remote_flow(app: &tauri::AppHandle) -> Result<(), String> {
@@ -322,25 +335,42 @@ pub fn connect_remote_flow(app: &tauri::AppHandle) -> Result<(), String> {
         *r = true;
     }
     let result = (|| -> Result<(), String> {
+        // 收掉上一轮反代（若有）：重连/换实例时旧监听端口与旧 origin 一并作废
+        stop_proxy(app);
         let cfg = crate::remote::load().ok_or("尚未配对远程实例，请先输入地址与配对码")?;
         status::set(app, &format!("连接远程实例 {}…", cfg.address));
-        // 探活带网关凭证头：过不了网关 401 这关就不算就绪（凭证失效早暴露）
-        if !crate::readiness::wait_http_ok_hdr(
-            &format!("{}/", cfg.origin),
-            Some(&cfg.token),
+        // remote_proxy::start 是 async，而本函数是跑在专用 std 线程上的同步流程
+        // （命令层/setup 均另起线程调用），用 tauri::async_runtime::block_on 在本线程
+        // 内联完成（与 tray.rs 的 block_on 用法一致）：保住「启动→探活→失败即停」
+        // 的顺序式错误处理形状，不必把一串调用方改成 async。std::thread 不携带
+        // tokio 运行时上下文，这里 block_on 不会踩「runtime 内再起 runtime」。
+        let proxy = tauri::async_runtime::block_on(crate::remote_proxy::start(
+            crate::remote_proxy::ProxyConfig {
+                origin: cfg.origin.clone(),
+                token: cfg.token.clone(),
+            },
+        ))?;
+        *state.proxy.lock().unwrap() = Some(proxy.clone());
+        let proxy_origin = format!("http://127.0.0.1:{}", proxy.port);
+        // 探活走代理（全路径体检；代理自动注入凭证头，网关 401 这关照过——凭证失效早暴露）
+        if !crate::readiness::wait_http_ok(
+            &format!("{proxy_origin}/"),
             Duration::from_secs(HEALTH_WAIT_SECS),
         ) {
+            stop_proxy(app);
             return Err(format!("无法连接远程实例 {}（超时或凭证失效）", cfg.address));
         }
-        // 凭证有效才放行导航与事件流：origin 换成远程网关，导航守卫同步收紧
-        *state.origin.lock().unwrap() = Some(cfg.origin.clone());
+        // 凭证有效才放行导航与事件流：origin 换成代理回环 origin，导航守卫同步收紧
+        *state.origin.lock().unwrap() = Some(proxy_origin.clone());
+        // 壳通知仍直连网关（不经代理：少一跳，事件流 WS 直连）
         crate::events::spawn_remote(app, &cfg.origin, &cfg.token);
         // 经 pair?token= 导航：网关 303 + Set-Cookie 种下 webview 凭证后落到 /
         // （同 dsh 一次性 token 心智；必须原生导航——跨站发起的页面导航不带
-        // SameSite=Strict 的 cookie，理由同 navigate_to_harness 注释）
+        // SameSite=Strict 的 cookie，理由同 navigate_to_harness 注释）。
+        // 303 的相对 Location 落回代理 origin，cookie 即种在页面 origin（127.0.0.1:port）。
         webview::navigate_to_harness(
             app,
-            &format!("{}/__remote/pair?token={}", cfg.origin, cfg.token),
+            &format!("{proxy_origin}/__remote/pair?token={}", cfg.token),
         );
         Ok(())
     })();
@@ -355,6 +385,8 @@ pub fn switch_to_local_flow(app: &tauri::AppHandle) {
     // 防御性收尾：正常远程模式 child 恒为 None，但升级运行时等路径可能在远程模式下
     // 留下本地 child——不清掉会让 start_service 双拉本地实例
     stop_child(app);
+    // 收掉远程反代：页面即将回本地加载页，回环监听不再有流量
+    stop_proxy(app);
     *state.origin.lock().unwrap() = None;
     *state.mode.lock().unwrap() = "local";
     crate::remote::save_mode("local");
@@ -373,15 +405,16 @@ pub fn switch_to_local_flow(app: &tauri::AppHandle) {
 
 /// 托盘「重启服务」/ 重启命令的统一入口：按当前模式分派。
 /// 本地走 restart_service（杀树重启，行为不变）；远程先收掉残留 child（如升级运行时
-/// 等路径在远程模式下拉起过的本地服务）、撤 origin 回加载页，再走 connect_remote_flow。
+/// 等路径在远程模式下拉起过的本地服务）与旧反代、撤 origin 回加载页，再走 connect_remote_flow。
 pub fn restart_by_mode(app: &tauri::AppHandle) {
     let state: tauri::State<AppState> = app.state();
     if *state.mode.lock().unwrap() != "remote" {
         restart_service(app);
         return;
     }
-    // 远程重连前先收掉残留 child（如升级运行时等路径在远程模式下拉起过的本地服务）
+    // 远程重连前先收掉残留 child 与旧反代（connect_remote_flow 入口还会再兜一道）
     stop_child(app);
+    stop_proxy(app);
     *state.origin.lock().unwrap() = None;
     webview::navigate_to_loader(app);
     status::set(app, "正在重连远程实例…");

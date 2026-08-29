@@ -25,6 +25,9 @@ use tauri::Manager;
 
 struct AppState {
     child: Mutex<Option<Child>>,
+    /// 远程模式的本地回环反代句柄：远程页面以 http://127.0.0.1:<port>（代理）origin
+    /// 加载。切回本地 / 远程重连 / 每轮连接序列开头 / 退出时经 supervisor::stop_proxy 收掉。
+    proxy: Mutex<Option<remote_proxy::ProxyHandle>>,
     restarts: Mutex<u32>,
     launch: Mutex<Option<Launch>>,
     /// 当前放行的 Harness origin（如 http://127.0.0.1:4418）；重启换端口时更新。
@@ -135,26 +138,17 @@ fn connect_remote(
     };
     // 配对请求（网络往返最长 ~16s）先在轮询通道可见，避免连接屏停在旧状态
     status::connect_screen(&app, "正在配对远程实例…");
-    let prev_origin = remote::load().map(|c| c.origin);
     let token = remote::pair(&addr, &code)?;
     let origin = format!("http://{addr}");
     remote::save(&remote::RemoteConfig {
         address: addr,
-        origin: origin.clone(),
+        origin,
         token,
         paired_at: crate::runtime::unix_now() * 1000,
     })?;
     remote::save_mode("remote");
     let state: tauri::State<AppState> = app.state();
     *state.mode.lock().unwrap() = "remote";
-    // 首次配对（或换了远程地址）必须重启一次：WebView2 的安全上下文标记
-    // （--unsafely-treat-insecure-origin-as-secure，见 main 顶部）在浏览器环境创建时
-    // 固化，运行中无法补设——不重启的话 crypto.subtle 缺失，模型/设置页不可用。
-    // 同地址重新配对无需重启（开关已在位），直接走连接序列。
-    if prev_origin.as_deref() != Some(origin.as_str()) {
-        status::set(&app, "配对成功，正在重启以启用远程完整能力…");
-        app.restart();
-    }
     // 模式已翻转：托盘菜单换成远程菜单（重连/断开；set_menu 内部自派发主线程，
     // async 命令线程可直接调）
     tray::rebuild(&app);
@@ -162,6 +156,9 @@ fn connect_remote(
     // 不会出现「本地子进程退出 → 守护误拉本地服务把远程页面顶掉」的串台
     supervisor::stop_child(&app);
     *state.origin.lock().unwrap() = None;
+    // 远程页面经壳内本地回环反代加载（origin 恒为 127.0.0.1:<随机端口>），首次配对
+    // 或换实例都不需要重启 webview——连接序列直接拉起新代理
+    status::connect_screen(&app, "配对成功，正在连接远程实例…");
     let handle = app.clone();
     std::thread::spawn(move || {
         if let Err(err) = supervisor::connect_remote_flow(&handle) {
@@ -224,10 +221,6 @@ fn restart_service_cmd(window: tauri::WebviewWindow, app: tauri::AppHandle) {
 }
 
 fn main() {
-    // 远程模式安全上下文：已配对远程 origin 时由 webview_browser_args() 经
-    // additional_browser_args 显式传入 origin-as-secure 开关（环境变量方式在
-    // WebView2 的环境选项合并中不可靠，真机验收已证伪）。此后不再读远程配置，
-    // 若远程配置在 webview 创建后才出现（首次配对），由命令层 app.restart() 重启生效。
     tauri::Builder::default()
         // 二次启动：聚焦已有窗口（须最先注册）
         .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
@@ -245,6 +238,7 @@ fn main() {
         .plugin(tauri_plugin_decorum::init())
         .manage(AppState {
             child: Mutex::new(None),
+            proxy: Mutex::new(None),
             restarts: Mutex::new(0),
             launch: Mutex::new(None),
             origin: Mutex::new(None),
@@ -341,6 +335,8 @@ fn main() {
                     supervisor::kill_tree(child.id() as u32);
                     let _ = child.wait();
                 }
+                // 反代收尾：本地回环监听关闭（尽力而为——进程退出本身也会终结它）
+                supervisor::stop_proxy(app);
             }
         });
 }
