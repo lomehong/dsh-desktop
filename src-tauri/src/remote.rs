@@ -2,10 +2,19 @@
 //! - POST /__remote/pair {code} → {ok,token,…}；403 码无效；429 限速
 //! - GET  /__remote/pair?token=<token> → 303 + Set-Cookie（给 webview 种凭证）
 //!
-//! 凭据明文落盘 remote.json（与 dsh 宿主会话密钥同威胁模型，README 声明）。
+//! 凭据落盘 remote.json：安装版 Windows 以 DPAPI（CurrentUser）加密 token（`tokenEnc`，
+//! 经 PowerShell 调用，零新依赖），明文 `token` 字段省略；便携模式与非 Windows 保持明文
+//! （与 dsh 宿主会话密钥同威胁模型，README 声明）——DPAPI 绑定用户+机器，U盘换机永远
+//! 解不开，加密反成死档，便利优先回退明文。加密失败也回退明文（本模块无日志器，静默；
+//! 有明文可用好过丢凭据要求重配）。读取双形状兼容：旧明文照读并惰性迁移为加密；
+//! `tokenEnc` 解密失败（换用户/重装系统）→ token 置空照常返回，连接流程给出重新配对文案。
 use std::io::{Read, Write};
 use std::net::TcpStream;
+#[cfg(windows)]
+use std::process::{Command, Stdio};
 use std::time::Duration;
+#[cfg(windows)]
+use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
 
@@ -15,6 +24,20 @@ pub struct RemoteConfig {
     pub origin: String,  // http://host:port
     pub token: String,
     pub paired_at: u64,
+}
+
+/// 落盘形状（`StoredConfig` 只在读写文件时存在，内存形态始终是 `RemoteConfig` 明文 token）：
+/// 安装版 Windows → `{"address","origin","tokenEnc","paired_at"}`；便携/非 Windows/回退 →
+/// `{"address","origin","token","paired_at"}`（与历史文件逐字节同形状）。两形状均可读。
+#[derive(Serialize, Deserialize)]
+struct StoredConfig {
+    address: String,
+    origin: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    token: String,
+    #[serde(default, skip_serializing_if = "Option::is_none", rename = "tokenEnc")]
+    token_enc: Option<String>,
+    paired_at: u64,
 }
 
 pub fn config_path() -> std::path::PathBuf {
@@ -37,25 +60,164 @@ pub fn save_mode(mode: &str) {
     let _ = std::fs::write(crate::runtime::runtime_root().join(mode_file()), mode);
 }
 
+/// 是否按加密落盘：仅安装版 Windows（便携 = U盘换机 DPAPI 永远解不开，保持明文）。
+fn encrypt_enabled() -> bool {
+    cfg!(windows) && crate::runtime::portable_root().is_none()
+}
+
 pub fn load() -> Option<RemoteConfig> {
-    load_config_from(&config_path())
+    let (cfg, legacy_plaintext) = load_config_detailed(&config_path(), crypto_impl())?;
+    // 惰性迁移：安装版 Windows 读到旧明文 → 立即重写为加密（尽力而为，失败不阻塞使用；
+    // 一次性代价：本进程内最多多一次 PowerShell 调用）
+    if legacy_plaintext && !cfg.token.is_empty() && encrypt_enabled() {
+        let _ = save(&cfg);
+    }
+    Some(cfg)
 }
 
 pub fn save(cfg: &RemoteConfig) -> Result<(), String> {
-    save_config_to(&config_path(), cfg)
+    save_config_to(&config_path(), cfg, encrypt_enabled())
 }
 
-fn load_config_from(path: &std::path::Path) -> Option<RemoteConfig> {
+/// 读配置并报告 token 是否来自旧明文形状（无 `tokenEnc` 字段）——`load()` 据此惰性迁移。
+/// crypto 为加解密 seam（测试注入假实现；真实现 = DPAPI）。
+fn load_config_detailed(
+    path: &std::path::Path,
+    crypto: CryptoFn,
+) -> Option<(RemoteConfig, bool)> {
     // 损坏/缺失一律 None（配对即覆盖，无需恢复语义）
-    serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()
+    let stored: StoredConfig = serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()?;
+    let legacy_plaintext = stored.token_enc.is_none();
+    let token = match stored.token_enc {
+        // 解密失败（换用户/换机/字段损毁）→ token 置空：配置照常返回，
+        // 连接流程对「配置在场但 token 为空」给出重新配对文案（见 supervisor connect_remote_flow）
+        Some(blob) => crypto(&blob, Direction::Unprotect).unwrap_or_default(),
+        None => stored.token,
+    };
+    Some((
+        RemoteConfig {
+            address: stored.address,
+            origin: stored.origin,
+            token,
+            paired_at: stored.paired_at,
+        },
+        legacy_plaintext,
+    ))
 }
 
-fn save_config_to(path: &std::path::Path, cfg: &RemoteConfig) -> Result<(), String> {
+fn save_config_to(path: &std::path::Path, cfg: &RemoteConfig, encrypt: bool) -> Result<(), String> {
+    save_config_with(path, cfg, encrypt, crypto_impl())
+}
+
+/// crypto 为加解密 seam（测试注入假实现；真实现 = DPAPI）。encrypt=false 落明文
+/// （便携/非 Windows）；encrypt=true 但加密失败也回退明文（便利优先，见模块注释）。
+fn save_config_with(
+    path: &std::path::Path,
+    cfg: &RemoteConfig,
+    encrypt: bool,
+    crypto: CryptoFn,
+) -> Result<(), String> {
+    let mut stored = StoredConfig {
+        address: cfg.address.clone(),
+        origin: cfg.origin.clone(),
+        token: cfg.token.clone(),
+        token_enc: None,
+        paired_at: cfg.paired_at,
+    };
+    if encrypt {
+        if let Some(blob) = crypto(&cfg.token, Direction::Protect) {
+            stored.token_enc = Some(blob);
+            stored.token.clear(); // 密文在场，明文字段省略（skip_serializing_if）
+        }
+    }
     // tmp + rename：写一半崩溃不会留下半个 remote.json
     let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, serde_json::to_string(cfg).map_err(|e| e.to_string())?)
+    std::fs::write(&tmp, serde_json::to_string(&stored).map_err(|e| e.to_string())?)
         .map_err(|e| e.to_string())?;
     std::fs::rename(&tmp, path).map_err(|e| e.to_string())
+}
+
+/* ── token 加解密（DPAPI via PowerShell，零新依赖） ── */
+
+/// 加解密方向：Protect（明文→base64 密文）/ Unprotect（base64 密文→明文）。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Direction {
+    Protect,
+    Unprotect,
+}
+
+/// 加解密 seam：真实现为 Windows DPAPI，测试注入假实现（真 DPAPI 无法在 CI 跑）。
+type CryptoFn = fn(&str, Direction) -> Option<String>;
+
+fn crypto_impl() -> CryptoFn {
+    #[cfg(windows)]
+    return dpapi_windows;
+    #[cfg(not(windows))]
+    // 非 Windows 无 DPAPI：恒 None。save 从不请求加密（encrypt_enabled恒false），
+    // load 读到 tokenEnc（如手工拷贝文件）→ token 置空 → 提示重新配对
+    return |_: &str, _: Direction| -> Option<String> { None };
+}
+
+/// DPAPI 超时上限：挂死的 PowerShell 不能冻结 connect 流程（同 connect_remote 的教训）。
+#[cfg(windows)]
+const DPAPI_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// 组装 PowerShell 脚本（纯函数，便于单测转义与形状）：
+/// - `Add-Type -AssemblyName System.Security` 必需——没有它 ProtectedData 解析不可靠
+///   （本机实测曾静默产出垃圾）；
+/// - try/catch 保证失败也走 stdout（`ERR: ` 前缀）而非空输出/难排查；
+/// - `$p` 用单引号字符串内嵌：`'` 双写成 `''`（PS 单引号串唯一转义），其余字符全字面量。
+fn dpapi_script(input: &str, dir: Direction) -> String {
+    let escaped = input.replace('\'', "''");
+    let call = match dir {
+        Direction::Protect => "[Convert]::ToBase64String([System.Security.Cryptography.ProtectedData]::Protect([Text.Encoding]::UTF8.GetBytes($p),$null,[System.Security.Cryptography.DataProtectionScope]::CurrentUser))",
+        Direction::Unprotect => "[Text.Encoding]::UTF8.GetString([System.Security.Cryptography.ProtectedData]::Unprotect([Convert]::FromBase64String($p),$null,[System.Security.Cryptography.DataProtectionScope]::CurrentUser))",
+    };
+    format!(
+        "$p='{escaped}'; try {{ Add-Type -AssemblyName System.Security; Write-Output ({call}) }} catch {{ Write-Output ('ERR: ' + $_.Exception.Message) }}"
+    )
+}
+
+/// Windows 真实现：PowerShell + DPAPI(CurrentUser)。stdout 起始 `ERR: ` / 空输出 / 超时
+/// / spawn 失败一律 None（调用方决定回退明文或置空 token）。
+#[cfg(windows)]
+fn dpapi_windows(input: &str, dir: Direction) -> Option<String> {
+    let script = dpapi_script(input, dir);
+    let mut command = Command::new("powershell");
+    command.args(["-NoProfile", "-Command", &script]);
+    let mut child = crate::runtime::no_window(&mut command)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    // 轮询 + 超时击杀（std 无 wait_timeout；~15 行换掉「一次挂死冻结整条 connect 流」的坑）
+    let deadline = Instant::now() + DPAPI_TIMEOUT;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+            Err(_) => return None,
+        }
+    }
+    // 进程已退出再读管道：token/密文量级远小于管道缓冲，不构成子进程写阻塞（否则走超时）
+    let mut raw = Vec::new();
+    if let Some(mut pipe) = child.stdout.take() {
+        let _ = pipe.read_to_end(&mut raw);
+    }
+    // lossy：stdout 编码随控制台代码页，base64/token 均为 ASCII，非 ASCII 字节不致命
+    let out = String::from_utf8_lossy(&raw);
+    let out = out.trim();
+    if out.is_empty() || out.starts_with("ERR: ") {
+        return None;
+    }
+    Some(out.to_string())
 }
 
 /// 解析地址输入：裸 `host:port` 或 `http://host:port`；只支持 http、端口必填。
@@ -258,18 +420,144 @@ mod tests {
         let path = dir.join("remote.json");
         // 用可注入路径的内部函数测；损坏文件 → None
         std::fs::write(&path, "{broken").unwrap();
-        assert!(load_config_from(&path).is_none());
+        assert!(load_config_detailed(&path, crypto_impl()).is_none());
         let cfg = RemoteConfig {
             address: "192.168.1.146:3090".into(),
             origin: "http://192.168.1.146:3090".into(),
             token: "tok-1".into(),
             paired_at: 12345,
         };
-        save_config_to(&path, &cfg).unwrap();
-        let loaded = load_config_from(&path).unwrap();
+        // encrypt=false：与历史文件同形状的明文往返（加密路径由 seam 注入的专项测试覆盖）
+        save_config_to(&path, &cfg, false).unwrap();
+        let loaded = load_config_detailed(&path, crypto_impl()).unwrap().0;
         assert_eq!(loaded.token, "tok-1");
         assert_eq!(loaded.origin, cfg.origin);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /* ── token 落盘加密（DPAPI seam 注入；真 DPAPI 只做真机验收，测试恒注入假加解密） ── */
+    /// 假加密器：Protect 加 `enc::` 前缀，Unprotect 去前缀；对含 `'` 的 token 也原样往返。
+    fn fake_crypto(input: &str, dir: Direction) -> Option<String> {
+        match dir {
+            Direction::Protect => Some(format!("enc::{input}")),
+            Direction::Unprotect => input.strip_prefix("enc::").map(str::to_string),
+        }
+    }
+
+    /// 恒失败的加密器：注入「加密失败」与「解密失败」两种情形。
+    fn failing_crypto(_input: &str, _dir: Direction) -> Option<String> {
+        None
+    }
+
+    fn secret_config() -> RemoteConfig {
+        RemoteConfig {
+            address: "192.168.1.146:3090".into(),
+            origin: "http://192.168.1.146:3090".into(),
+            token: "tok-sec'ret".into(),
+            paired_at: 42,
+        }
+    }
+
+    fn temp_dir(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "dsh-remote-enc-{tag}-{}-{}",
+            std::process::id(),
+            crate::runtime::unix_now()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn save_encrypted_writes_tokenenc_and_omits_plaintext_token() {
+        let dir = temp_dir("save-enc");
+        let path = dir.join("remote.json");
+        save_config_with(&path, &secret_config(), true, fake_crypto).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("tokenEnc"), "应写入 tokenEnc 字段：{text}");
+        assert!(text.contains("enc::"), "密文应来自注入的加密器：{text}");
+        assert!(!text.contains("\"token\""), "明文 token 字段应省略：{text}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn save_plaintext_when_encrypt_disabled() {
+        let dir = temp_dir("save-plain");
+        let path = dir.join("remote.json");
+        save_config_with(&path, &secret_config(), false, fake_crypto).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("\"token\":\"tok-sec'ret\""), "应为明文：{text}");
+        assert!(!text.contains("tokenEnc"), "不应出现密文字段：{text}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn encrypt_failure_falls_back_to_plaintext() {
+        // 便利优先：加密失败（PowerShell 出错等）→ 回退明文落盘，不丢凭据
+        let dir = temp_dir("enc-fallback");
+        let path = dir.join("remote.json");
+        save_config_with(&path, &secret_config(), true, failing_crypto).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("\"token\":\"tok-sec'ret\""), "应回退明文：{text}");
+        assert!(!text.contains("tokenEnc"), "不应留半截密文字段：{text}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn load_encrypted_restores_token_via_decryptor() {
+        let dir = temp_dir("load-enc");
+        let path = dir.join("remote.json");
+        save_config_with(&path, &secret_config(), true, fake_crypto).unwrap();
+        let (cfg, plaintext) = load_config_detailed(&path, fake_crypto).unwrap();
+        assert_eq!(cfg.token, "tok-sec'ret");
+        assert!(!plaintext, "tokenEnc 形状不算旧明文（不触发迁移）");
+        assert_eq!(cfg.address, secret_config().address);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn load_corrupt_tokenenc_degrades_to_empty_token() {
+        // 解密失败（换用户/换机/损毁）：配置照常载入但 token 为空 → 下游给出重新配对文案
+        let dir = temp_dir("load-corrupt");
+        let path = dir.join("remote.json");
+        save_config_with(&path, &secret_config(), true, fake_crypto).unwrap();
+        let (cfg, plaintext) = load_config_detailed(&path, failing_crypto).unwrap();
+        assert!(cfg.token.is_empty());
+        assert_eq!(cfg.address, secret_config().address, "其余字段不受影响");
+        assert!(!plaintext);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn legacy_plaintext_file_loads_as_before() {
+        // 旧版文件形状（无 tokenEnc）：原样读出，且标记为「旧明文」（供惰性迁移判断）
+        let dir = temp_dir("load-legacy");
+        let path = dir.join("remote.json");
+        std::fs::write(
+            &path,
+            r#"{"address":"192.168.1.146:3090","origin":"http://192.168.1.146:3090","token":"tok-legacy","paired_at":7}"#,
+        )
+        .unwrap();
+        let (cfg, plaintext) = load_config_detailed(&path, fake_crypto).unwrap();
+        assert_eq!(cfg.token, "tok-legacy");
+        assert!(plaintext, "旧形状应报告明文以触发惰性迁移");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn dpapi_script_escapes_and_selects_direction() {
+        // 单引号双写是 PS 单引号字符串唯一的转义；方向决定 Protect/Unprotect 形状
+        let protect = dpapi_script("a'b", Direction::Protect);
+        assert!(protect.contains("$p='a''b'"), "单引号须双写：{protect}");
+        assert!(protect.contains("::Protect("));
+        assert!(!protect.contains("::Unprotect("));
+        let unprotect = dpapi_script("a'b", Direction::Unprotect);
+        assert!(unprotect.contains("$p='a''b'"));
+        assert!(unprotect.contains("::Unprotect("));
+        assert!(unprotect.contains("FromBase64String"));
+        // try/catch 兜底：失败走 `ERR: ` 前缀而非静默/非零码
+        assert!(protect.contains("'ERR: '"));
+        assert!(protect.contains("Add-Type -AssemblyName System.Security"));
     }
 
     /* ── pair()：对假网关的 canned 应答做状态解析 ── */

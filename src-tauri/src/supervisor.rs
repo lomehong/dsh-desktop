@@ -338,6 +338,11 @@ pub fn connect_remote_flow(app: &tauri::AppHandle) -> Result<(), String> {
         // 收掉上一轮反代（若有）：重连/换实例时旧监听端口与旧 origin 一并作废
         stop_proxy(app);
         let cfg = crate::remote::load().ok_or("尚未配对远程实例，请先输入地址与配对码")?;
+        // 配置在场但 token 为空 ⇒ remote.json 是 tokenEnc 形状且解密失败（DPAPI 绑定
+        // 用户+机器：换账户/重装系统后解不开）。与「尚未配对」区分，给出明确的重配指引。
+        if cfg.token.is_empty() {
+            return Err("凭证无法解密，请重新配对远程实例".into());
+        }
         status::set(app, &format!("连接远程实例 {}…", cfg.address));
         // remote_proxy::start 是 async，而本函数是跑在专用 std 线程上的同步流程
         // （命令层/setup 均另起线程调用），用 tauri::async_runtime::block_on 在本线程
