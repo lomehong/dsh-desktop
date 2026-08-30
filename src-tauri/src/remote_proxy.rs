@@ -64,6 +64,8 @@ pub async fn start(config: ProxyConfig) -> Result<ProxyHandle, String> {
                 _ = stop_flag.notified() => break,
                 accepted = listener.accept() => match accepted {
                     Ok((client, _)) => {
+                        // NODELAY：交互式 RPC 全是小包，Nagle+延迟 ACK 会让每段多付 200ms
+                        let _ = client.set_nodelay(true);
                         let authority = gateway_authority.clone();
                         let token = token.clone();
                         let proxy_origin = proxy_origin.clone();
@@ -137,7 +139,10 @@ async fn handle_client(
         let mut upstream = match upstream_slot.take() {
             Some(u) => u,
             None => match TcpStream::connect(&gateway_authority).await {
-                Ok(u) => u,
+                Ok(u) => {
+                    let _ = u.set_nodelay(true);
+                    u
+                }
                 Err(err) => {
                     // 网关不可达：断开客户端（浏览器重试）；记一行供远程模式失联诊断
                     log_terminal(&format!("连接网关 {gateway_authority} 失败：{err}"));
