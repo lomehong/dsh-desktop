@@ -124,7 +124,7 @@ fn tooltip_text(remote: bool) -> String {
     if !remote {
         return TOOLTIP_LOCAL.to_string();
     }
-    let addr = crate::remote::load().map(|c| c.address).unwrap_or_default();
+    let addr = crate::remote::load_display().map(|(a, _)| a).unwrap_or_default();
     if addr.is_empty() {
         "DSH Desktop（远程模式）— 双击打开；右键菜单退出".to_string()
     } else {

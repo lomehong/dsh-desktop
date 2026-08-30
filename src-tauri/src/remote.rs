@@ -65,6 +65,16 @@ fn encrypt_enabled() -> bool {
     cfg!(windows) && crate::runtime::portable_root().is_none()
 }
 
+/// 仅取展示信息（address/origin）——不解密 token：托盘提示等主线程消费方
+/// 用它避免每次重建都付一次 PowerShell 解密（典型百毫秒、最坏 10 秒）。
+pub fn load_display() -> Option<(String, String)> {
+    let raw = std::fs::read_to_string(config_path()).ok()?;
+    let stored: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    let address = stored.get("address")?.as_str()?.to_string();
+    let origin = stored.get("origin")?.as_str()?.to_string();
+    Some((address, origin))
+}
+
 pub fn load() -> Option<RemoteConfig> {
     let (cfg, legacy_plaintext) = load_config_detailed(&config_path(), crypto_impl())?;
     // 惰性迁移：安装版 Windows 读到旧明文 → 立即重写为加密（尽力而为，失败不阻塞使用；
@@ -167,6 +177,7 @@ const DPAPI_TIMEOUT: Duration = Duration::from_secs(10);
 ///   （本机实测曾静默产出垃圾）；
 /// - try/catch 保证失败也走 stdout（`ERR: ` 前缀）而非空输出/难排查；
 /// - `$p` 用单引号字符串内嵌：`'` 双写成 `''`（PS 单引号串唯一转义），其余字符全字面量。
+#[cfg_attr(not(windows), allow(dead_code))]
 fn dpapi_script(input: &str, dir: Direction) -> String {
     let escaped = input.replace('\'', "''");
     let call = match dir {

@@ -132,8 +132,8 @@ pub fn process_name(pid: u32) -> Option<String> {
     for line in text.lines() {
         let mut fields = line.split(',').map(|f| f.trim_matches('"'));
         let name = fields.next()?.to_string();
-        let pid: u32 = fields.next()?.parse().ok()?;
-        if pid == pid {
+        let row_pid: u32 = fields.next()?.parse().ok()?;
+        if row_pid == pid {
             return Some(name);
         }
     }
