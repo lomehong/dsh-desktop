@@ -87,6 +87,8 @@ fn run(app: tauri::AppHandle, base_url: String, launch_url: String, gen: u64) {
 /* ════════════════════════ 远程模式（dsh-remote 网关） ════════════════════════ */
 
 /// 远程模式订阅线程：带网关凭证连远程实例的事件流（无本地一次性 token 可换 cookie）。
+/// 线程内置断线退避重连（见 run_remote）：世代号不过期则持续重试，模式切换/重连
+/// 流程推进世代号即让位退出。
 pub fn spawn_remote(app: &tauri::AppHandle, base_url: &str, token: &str) {
     let gen = {
         let state: tauri::State<AppState> = app.state();
@@ -101,14 +103,60 @@ pub fn spawn_remote(app: &tauri::AppHandle, base_url: &str, token: &str) {
 fn run_remote(app: tauri::AppHandle, base_url: String, token: String, gen: u64) {
     log_note(&format!("远程事件流启动 (gen={gen}): base={base_url}"));
     // 远程网关没有本地 launch_url/一次性 token：跳过 exchange_cookie，直接带凭证头握手。
-    // 失败只记日志不重试——断流不影响已加载页面，模式切换时世代号自然接管重连。
-    match connect_legacy_with_token(&base_url, &token) {
-        Ok(socket) => {
-            log_note("远程事件流已连接（events.mux + x-remote-token）");
-            legacy_loop(app, socket, gen);
+    // 0.1.17 起断线自动重连（带退避）：连接失败或断流后按 backoff_delay_ms 序列重试，
+    // 世代号不过期则按 30s 封顶节奏持续重试——通知路径的守护语义（v1 的已知局限，
+    // 见 README 已知限制）。模式切换/重连流程会推进世代号（spawn_remote 每次 +1），
+    // 旧线程自检退出，不会重复通知。
+    let mut attempt: u32 = 0;
+    loop {
+        if generation_expired(&app, gen) {
+            log_note("世代过期，停止远程订阅线程");
+            return;
         }
-        Err(e) => log_note(&format!("远程事件流连接失败，放弃订阅: {e}")),
+        match connect_legacy_with_token(&base_url, &token) {
+            Ok(socket) => {
+                // 连接成功后退避重新起步：「偶发断流」与「持续不可达」分开计数
+                attempt = 0;
+                log_note("远程事件流已连接（events.mux + x-remote-token）");
+                legacy_loop(app.clone(), socket, gen); // 返回即断流（世代过期时循环顶自检退出）
+                log_note("远程事件流断开，将按退避序列自动重连");
+            }
+            Err(e) => log_note(&format!("远程事件流连接失败（将自动重试）: {e}")),
+        }
+        let delay_ms = backoff_delay_ms(attempt);
+        attempt = attempt.saturating_add(1);
+        // 分片睡眠：期间世代过期即刻退出，模式切换无须等完整退避（最长 30s）结束
+        if !sleep_while_generation_valid(&app, gen, delay_ms) {
+            log_note("世代过期，停止远程订阅线程");
+            return;
+        }
     }
+}
+
+/// 远程重连退避序列（毫秒）：2s → 4s → 8s → 16s → 30s 封顶，其后恒 30s。
+/// 纯函数便于单测；attempt 从 0 计（首次失败后的等待）。
+fn backoff_delay_ms(attempt: u32) -> u64 {
+    match attempt {
+        0 => 2_000,
+        1 => 4_000,
+        2 => 8_000,
+        3 => 16_000,
+        _ => 30_000,
+    }
+}
+
+/// 分片睡眠 total_ms，每 250ms 检查一次世代号；过期返回 false（调用方退出线程）。
+fn sleep_while_generation_valid(app: &tauri::AppHandle, gen: u64, total_ms: u64) -> bool {
+    let mut remaining = total_ms;
+    while remaining > 0 {
+        if generation_expired(app, gen) {
+            return false;
+        }
+        let slice = remaining.min(250);
+        std::thread::sleep(std::time::Duration::from_millis(slice));
+        remaining -= slice;
+    }
+    !generation_expired(app, gen)
 }
 
 /// 远程模式 WS 握手：请求带 x-remote-token 头（网关据此鉴权；Host 仍按 URL 推导，
@@ -619,6 +667,19 @@ mod tests {
     fn set_cookie_header_is_case_insensitive() {
         let head = "HTTP/1.1 303 See Other\r\nSET-COOKIE: a=b\r\n\r\n";
         assert_eq!(exchange_cookie_from_head(head).unwrap(), "a=b");
+    }
+
+    /* ── 远程模式：断线退避重连序列 ── */
+    #[test]
+    fn remote_reconnect_backoff_doubles_then_caps_at_30s() {
+        assert_eq!(backoff_delay_ms(0), 2_000);
+        assert_eq!(backoff_delay_ms(1), 4_000);
+        assert_eq!(backoff_delay_ms(2), 8_000);
+        assert_eq!(backoff_delay_ms(3), 16_000);
+        // 第 5 次起封顶 30s，此后恒定（守护语义：世代不过期则一直重试）
+        assert_eq!(backoff_delay_ms(4), 30_000);
+        assert_eq!(backoff_delay_ms(100), 30_000);
+        assert_eq!(backoff_delay_ms(u32::MAX), 30_000);
     }
 
     /* ── 远程模式：握手请求带网关凭证 ── */
