@@ -348,6 +348,7 @@ pub fn connect_remote_flow(app: &tauri::AppHandle) -> Result<(), String> {
             crate::remote_proxy::ProxyConfig {
                 origin: cfg.origin.clone(),
                 token: cfg.token.clone(),
+                address: cfg.address.clone(),
             },
         ))?;
         *state.proxy.lock().unwrap() = Some(proxy.clone());

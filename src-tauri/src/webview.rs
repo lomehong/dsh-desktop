@@ -104,6 +104,37 @@ pub const SECURE_CONTEXT_SHIM_JS: &str = r##"
 })();
 "##;
 
+/// 模式角标：窗口左上角常驻小徽标（「本地」/「远程 · 地址」），让用户一眼分辨
+/// 当前连的是哪个实例。远程模式由代理本地应答 `/__remote/badge`（含展示地址）；
+/// 本地模式该路径在本地 dsh 上 404 → 保持「本地」。仅装饰，pointer-events 关闭。
+pub const MODE_BADGE_JS: &str = r##"
+(function () {
+  if (location.protocol !== 'http:' || location.port === '') return;
+  var apply = function () {
+    var b = document.createElement('div');
+    b.textContent = '本地';
+    b.style.cssText = 'position:fixed;top:0;left:0;height:18px;line-height:18px;' +
+      'font-size:11px;padding:0 8px;border-radius:0 0 6px 0;' +
+      'background:rgba(20,26,38,.55);color:#dfe6ef;z-index:2147483646;' +
+      'pointer-events:none;font-family:system-ui,"Microsoft YaHei",sans-serif;user-select:none;';
+    document.body.appendChild(b);
+    fetch('/__remote/badge').then(function (r) {
+      return r.ok ? r.json() : null;
+    }).then(function (j) {
+      if (j && j.mode === 'remote') {
+        b.textContent = '远程 · ' + (j.address || '');
+        b.style.background = 'rgba(74,108,247,.6)';
+      }
+    }).catch(function () {});
+  };
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', apply);
+  } else {
+    apply();
+  }
+})();
+"##;
+
 /// 创建主窗口（程序化创建以挂导航守卫；配置文件中 windows 留空）。
 /// 无边框：decorum 覆盖式标题栏（Windows 悬浮原生风格按钮；macOS Overlay 红绿灯），
 /// Harness 页面经 TITLEBAR_INSET_CSS 下移，不被悬浮条遮挡。
@@ -135,6 +166,7 @@ pub fn create_main_window(app: &tauri::AppHandle) -> tauri::Result<()> {
             .hidden_title(true);
     }
     let window = builder
+        .initialization_script(MODE_BADGE_JS)
         .initialization_script(SECURE_CONTEXT_SHIM_JS)
         .initialization_script(TITLEBAR_INSET_CSS)
         .initialization_script(DECORUM_ICON_CSS)

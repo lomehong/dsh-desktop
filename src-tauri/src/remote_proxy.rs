@@ -21,6 +21,8 @@ pub struct ProxyConfig {
     /// 网关 origin，如 http://192.168.1.146:3090
     pub origin: String,
     pub token: String,
+    /// 远程实例展示地址（如 192.168.1.146:3090），供 `/__remote/badge` 模式角标应答
+    pub address: String,
 }
 
 #[derive(Clone)]
@@ -51,6 +53,7 @@ pub async fn start(config: ProxyConfig) -> Result<ProxyHandle, String> {
     let stop = Arc::new(tokio::sync::Notify::new());
     let stop_flag = Arc::clone(&stop);
     let token = config.token;
+    let badge_address = config.address;
     // 本代理 origin：页面经此 origin 加载，请求的 Origin/Referer 会带它——
     // 双层代理下必须改写为网关 origin，否则 dsh 的同源围栏（Origin vs Host）403
     let proxy_origin = format!("http://127.0.0.1:{port}");
@@ -64,8 +67,9 @@ pub async fn start(config: ProxyConfig) -> Result<ProxyHandle, String> {
                         let authority = gateway_authority.clone();
                         let token = token.clone();
                         let proxy_origin = proxy_origin.clone();
+                        let badge_address = badge_address.clone();
                         // 每条客户端连接一个任务；连接内自行维护 keep-alive 循环
-                        tokio::spawn(handle_client(client, authority, token, proxy_origin));
+                        tokio::spawn(handle_client(client, authority, token, proxy_origin, badge_address));
                     }
                     Err(err) => {
                         // 瞬时错误必须继续：Windows 上对端连接后未发数据即 RST
@@ -108,6 +112,7 @@ async fn handle_client(
     gateway_authority: String,
     token: String,
     proxy_origin: String,
+    badge_address: String,
 ) {
     // 上游连接随客户端连接复用；None = 尚未建立 / 已被透传分支消耗
     let mut upstream_slot: Option<TcpStream> = None;
@@ -115,6 +120,19 @@ async fn handle_client(
         let Some((head, excess)) = read_head(&mut client).await else {
             return; // 对端先关 / 头超 64KB / 读错误
         };
+        // 本地应答的模式角标查询（远程模式下窗口角标 fetch；不转发上游）
+        if is_badge_request(&head) {
+            let body = format!(
+                "{{\"mode\":\"remote\",\"address\":\"{}\"}}",
+                badge_address.replace('\\', "\\\\").replace('"', "\\\"")
+            );
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = client.write_all(resp.as_bytes()).await;
+            return; // Connection: close 语义
+        }
         let rewritten = rewrite_request_head(&head, &gateway_authority, &token, &proxy_origin);
         let mut upstream = match upstream_slot.take() {
             Some(u) => u,
@@ -317,6 +335,18 @@ fn is_upgrade_request(head: &[u8]) -> bool {
         .iter()
         .skip(1)
         .any(|line| header_name(line).is_some_and(|n| n.eq_ignore_ascii_case(b"upgrade")))
+}
+
+/// 模式角标查询：`GET /__remote/badge`（可有查询串）。精确路径，其余请求不命中。
+fn is_badge_request(head: &[u8]) -> bool {
+    let lines = head_lines(head);
+    let Some(line) = lines.first() else { return false };
+    let line = String::from_utf8_lossy(line);
+    let mut parts = line.split_whitespace();
+    let method = parts.next().unwrap_or("");
+    let target = parts.next().unwrap_or("");
+    method.eq_ignore_ascii_case("GET")
+        && (target == "/__remote/badge" || target.starts_with("/__remote/badge?"))
 }
 
 /// 客户端是否要求响应后关闭：Connection: close，或 HTTP/1.0 未声明 keep-alive。
@@ -542,10 +572,11 @@ mod tests {
     }
 
     /// 对假上游起一个代理（origin 指向该上游）。
-    async fn spawn_proxy(gateway_port: u16, token: &str) -> ProxyHandle {
+    async fn spawn_proxy(gateway_port: u16, token: &str, address: &str) -> ProxyHandle {
         start(ProxyConfig {
             origin: format!("http://127.0.0.1:{gateway_port}"),
             token: token.to_string(),
+            address: address.to_string(),
         })
         .await
         .expect("启动代理失败")
@@ -728,7 +759,7 @@ mod tests {
             }
         })
         .await;
-        let proxy = spawn_proxy(upstream_port, "tok-e2e-get").await;
+        let proxy = spawn_proxy(upstream_port, "tok-e2e-get", "198.18.0.7:9999").await;
         let raw = roundtrip(
             proxy.port,
             b"GET /abc?q=1 HTTP/1.1\r\nHost: page.host\r\nX-Trace: t1\r\n\r\n",
@@ -774,7 +805,7 @@ mod tests {
             }
         })
         .await;
-        let proxy = spawn_proxy(upstream_port, "tok-post").await;
+        let proxy = spawn_proxy(upstream_port, "tok-post", "198.18.0.7:9999").await;
         // 真机验收缺陷复现：页面以代理 origin 加载，POST 自带 Origin/Referer
         let request = format!(
             "POST /api HTTP/1.1\r\nHost: page.host\r\nOrigin: http://127.0.0.1:{0}\r\nReferer: http://127.0.0.1:{0}/settings\r\nContent-Type: application/json\r\nContent-Length: 5\r\n\r\nhello",
@@ -819,7 +850,7 @@ mod tests {
             }
         })
         .await;
-        let proxy = spawn_proxy(upstream_port, "tok-chunked").await;
+        let proxy = spawn_proxy(upstream_port, "tok-chunked", "198.18.0.7:9999").await;
         let raw = roundtrip(proxy.port, b"GET /p HTTP/1.1\r\nHost: page.host\r\n\r\n").await;
         let text = String::from_utf8_lossy(&raw);
         // 分块帧原样直达客户端（客户端自行解块）
@@ -859,7 +890,7 @@ mod tests {
                 // 两个响应发完即收（drop = 关闭；后续由客户端断开收尾）
             }
         });
-        let proxy = spawn_proxy(upstream_port, "tok-ka").await;
+        let proxy = spawn_proxy(upstream_port, "tok-ka", "198.18.0.7:9999").await;
         // 同一条客户端 TCP 连接先后发两个请求
         let mut c = TcpStream::connect(("127.0.0.1", proxy.port)).await.unwrap();
         c.write_all(b"GET /one HTTP/1.1\r\nHost: page.host\r\n\r\n")
@@ -906,7 +937,7 @@ mod tests {
             }
         })
         .await;
-        let proxy = spawn_proxy(upstream_port, "tok-ws").await;
+        let proxy = spawn_proxy(upstream_port, "tok-ws", "198.18.0.7:9999").await;
         let mut c = TcpStream::connect(("127.0.0.1", proxy.port)).await.unwrap();
         c.write_all(
             b"GET /ws HTTP/1.1\r\nHost: page.host\r\nUpgrade: WebSocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n",
@@ -944,7 +975,7 @@ mod tests {
     async fn oversized_head_closes_connection() {
         // 头超限在读阶段就该断，永远走不到连上游这步
         let gate = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let proxy = spawn_proxy(gate.local_addr().unwrap().port(), "t").await;
+        let proxy = spawn_proxy(gate.local_addr().unwrap().port(), "t", "198.18.0.7:9999").await;
         let mut c = TcpStream::connect(("127.0.0.1", proxy.port)).await.unwrap();
         let big = vec![b'a'; 64 * 1024 + 1];
         let _ = c.write_all(&big).await; // 代理中途关闭时写侧可能报错，忽略
@@ -967,7 +998,7 @@ mod tests {
         let dead = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let dead_port = dead.local_addr().unwrap().port();
         drop(dead);
-        let proxy = spawn_proxy(dead_port, "t").await;
+        let proxy = spawn_proxy(dead_port, "t", "198.18.0.7:9999").await;
         let mut c = TcpStream::connect(("127.0.0.1", proxy.port)).await.unwrap();
         c.write_all(b"GET / HTTP/1.1\r\nHost: page.host\r\n\r\n")
             .await
@@ -981,10 +1012,31 @@ mod tests {
         );
     }
 
+    /// 模式角标查询：代理本地应答（含展示地址），不触上游（上游端口故意给死）。
+    #[tokio::test]
+    async fn badge_answered_locally_without_upstream() {
+        // 死端口：若代理误转发，连接失败就不会有本地应答
+        let dead = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let dead_port = dead.local_addr().unwrap().port();
+        drop(dead);
+        let proxy = spawn_proxy(dead_port, "t", "203.0.113.7:3090").await;
+        let mut s = TcpStream::connect(("127.0.0.1", proxy.port)).await.unwrap();
+        s.write_all(b"GET /__remote/badge HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
+            .await
+            .unwrap();
+        let mut buf = Vec::new();
+        s.read_to_end(&mut buf).await.unwrap();
+        let raw = String::from_utf8_lossy(&buf);
+        assert!(raw.starts_with("HTTP/1.1 200 OK"), "应 200：{raw}");
+        assert!(raw.contains("\"mode\":\"remote\""));
+        assert!(raw.contains("203.0.113.7:3090"));
+    }
+
     #[tokio::test]
     async fn stop_closes_listener() {
+
         let gate = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let proxy = spawn_proxy(gate.local_addr().unwrap().port(), "t").await;
+        let proxy = spawn_proxy(gate.local_addr().unwrap().port(), "t", "198.18.0.7:9999").await;
         proxy.stop();
         // 端口最终不再可连（监听被关闭）；轮询等待避免时序脆弱
         for _ in 0..200 {

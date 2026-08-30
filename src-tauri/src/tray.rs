@@ -13,7 +13,7 @@ use tauri::Manager;
 static TRAY: OnceLock<TrayIcon<tauri::Wry>> = OnceLock::new();
 
 const TOOLTIP_LOCAL: &str = "DSH Desktop — 双击打开；右键菜单退出";
-const TOOLTIP_REMOTE: &str = "DSH Desktop（远程模式）— 双击打开；右键菜单退出";
+/// 远程模式提示带实例地址，一眼分清连的是谁。
 
 /// 检查应用自更新（tauri-plugin-updater，签名公钥内置于 tauri.conf.json）。
 fn check_app_update(app: &tauri::AppHandle) {
@@ -119,6 +119,19 @@ fn build_menu(app: &tauri::AppHandle, remote: bool) -> tauri::Result<Menu<tauri:
     Menu::with_items(app, &items)
 }
 
+/// 托盘提示：远程模式带实例地址（读已存凭据；缺失则退回通用文案）。
+fn tooltip_text(remote: bool) -> String {
+    if !remote {
+        return TOOLTIP_LOCAL.to_string();
+    }
+    let addr = crate::remote::load().map(|c| c.address).unwrap_or_default();
+    if addr.is_empty() {
+        "DSH Desktop（远程模式）— 双击打开；右键菜单退出".to_string()
+    } else {
+        format!("DSH Desktop — 远程 {addr}；双击打开；右键菜单退出")
+    }
+}
+
 pub fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
     let remote = is_remote(app);
     let menu = build_menu(app, remote)?;
@@ -126,7 +139,7 @@ pub fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
     #[allow(unused_mut)] // macOS 分支会整体重绑定
     let mut builder = TrayIconBuilder::with_id("dsh-tray")
         .icon(app.default_window_icon().expect("缺少应用图标").clone())
-        .tooltip(if remote { TOOLTIP_REMOTE } else { TOOLTIP_LOCAL })
+        .tooltip(tooltip_text(remote))
         .menu(&menu)
         .show_menu_on_left_click(false);
 
@@ -227,7 +240,7 @@ pub fn rebuild(app: &tauri::AppHandle) {
     let remote = is_remote(app);
     let result = build_menu(app, remote).and_then(|menu| {
         tray.set_menu(Some(menu))?;
-        tray.set_tooltip(Some(if remote { TOOLTIP_REMOTE } else { TOOLTIP_LOCAL }))?;
+        tray.set_tooltip(Some(tooltip_text(remote)))?;
         Ok(())
     });
     if let Err(e) = result {
