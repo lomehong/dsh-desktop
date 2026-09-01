@@ -10,16 +10,27 @@ use crate::{status, supervisor};
 use tauri::Manager;
 
 /// 固定的 dsh 基线版本（全新环境首装用；升级走 npm latest，可用 DSH_DESKTOP_DSH_VERSION 固定）。
-pub const DSH_VERSION: &str = "0.1.1-rc.2";
+pub const DSH_VERSION: &str = "0.1.2-alpha.3";
 /// 便携 Node 版本（dsh rc.x 的 zstd 要求需要 Node 24）。
 const NODE_VERSION: &str = "24.19.0";
-/// 壳已适配的 dsh 最高版本（语义化三元组）。v0.1.2 起 Web 界面启用一次性 token
-/// 认证且事件流端点更换为 /api/remote.mux：壳侧已双协议适配（v0.1.15，events.rs
-/// 针对 v0.1.2-alpha.1 协议 + 伪服务 E2E 验证），但尚未对 0.1.2 正式版真机复核——
-/// alpha→final 协议若有漂移，通知会静默失效。待 npm 发布 0.1.2 后真机验证一次，
-/// 再把此值上调到 (0,1,2) 放行升级。npm latest 超出此版本时拒绝升级并引导先升级
-/// 应用本体；DSH_DESKTOP_DSH_VERSION 显式指定视为知情强制，不受限。
-const DSH_MAX_ADAPTED: (u64, u64, u64) = (0, 1, 1);
+/// 壳已适配的 dsh 最高版本（语义化三元组）。v0.1.18 起真机复核了 0.1.2-alpha.2
+/// 的双协议适配（events.rs remote.mux + token→cookie 在 alpha.2 端点下工作；
+/// persona 插件同步迁移到 SettingsProvider.installSection API）——升到 (0,1,2)
+/// 放行 0.1.2 系列（含 alpha/rc 预发布与未来的正式版）。npm latest 超出此版本时
+/// 仍拒绝升级并引导先升级应用本体；DSH_DESKTOP_DSH_VERSION 显式指定视为知情
+/// 强制，不受限。
+const DSH_MAX_ADAPTED: (u64, u64, u64) = (0, 1, 2);
+
+/// 壳已适配的 dsh 最高版本三元组（supervisor 启动预检用）。
+pub fn max_adapted() -> (u64, u64, u64) {
+    DSH_MAX_ADAPTED
+}
+
+/// 解析语义化版本三元组（忽略 `-rc.x`/`-alpha.x`/`+build` 等后缀；解析失败返回 None）。
+/// supervisor 启动预检复用，故公开。
+pub fn version_triple_public(v: &str) -> Option<(u64, u64, u64)> {
+    version_triple(v)
+}
 
 /// 解析语义化版本三元组（忽略 `-rc.x`/`-alpha.x`/`+build` 等后缀；解析失败返回 None）。
 fn version_triple(v: &str) -> Option<(u64, u64, u64)> {
@@ -409,12 +420,17 @@ mod tests {
     }
 
     #[test]
-    fn guard_blocks_next_patch_line_allows_current() {
-        // 预发布段按其所属三元组参与比较：0.1.2-alpha.1 已含破坏性变更，必须拦
-        assert!(version_triple("0.1.2-alpha.1").unwrap() > DSH_MAX_ADAPTED);
-        assert!(version_triple("0.1.2").unwrap() > DSH_MAX_ADAPTED);
+    fn guard_blocks_next_minor_line_allows_current() {
+        // 预发布段按其所属三元组参与比较：0.1.3-alpha.1 起视为需要壳配套适配
+        // （0.1.3+ 可能引入新的 settings API/事件流端点变更）——必须拦
+        assert!(version_triple("0.1.3-alpha.1").unwrap() > DSH_MAX_ADAPTED);
+        assert!(version_triple("0.1.3").unwrap() > DSH_MAX_ADAPTED);
         assert!(version_triple("0.2.0").unwrap() > DSH_MAX_ADAPTED);
-        // 同版本线内的 patch/rc 更新放行
+        // 0.1.2 系列（含 alpha/rc/正式）≤ 当前适配线 (0,1,2)：放行
+        assert!(version_triple("0.1.2-alpha.2").unwrap() <= DSH_MAX_ADAPTED);
+        assert!(version_triple("0.1.2-rc.1").unwrap() <= DSH_MAX_ADAPTED);
+        assert!(version_triple("0.1.2").unwrap() <= DSH_MAX_ADAPTED);
+        // 旧 0.1.1.x 也放行
         assert!(version_triple("0.1.1-rc.3").unwrap() <= DSH_MAX_ADAPTED);
         assert!(version_triple("0.1.1").unwrap() <= DSH_MAX_ADAPTED);
     }

@@ -227,12 +227,25 @@ pub fn bootstrap_runtime() -> Result<Launch, String> {
     Ok(Launch::System)
 }
 
+/// 日志轮转阈值：超过即把当前日志改名为 `.old`（覆盖上一代）再重新开始。
+/// 崩溃场景一次可写数百 KB stack trace，无轮转会无限膨胀。只保留一代 `.old`，
+/// 足够回溯最近一次问题；改名失败（如被占用）就地续写，不阻断主流程。
+const LOG_ROTATE_BYTES: u64 = 10 * 1024 * 1024;
+
 /// 以追加模式打开日志文件（目录不存在时创建；失败时静默返回 None，诊断日志不阻断主流程）。
+/// 超过 LOG_ROTATE_BYTES 先轮转：dsh-desktop.log → dsh-desktop.log.old。
 pub fn open_log_append() -> Option<std::fs::File> {
     use std::io::Write;
     let path = log_file();
     if let Some(dir) = path.parent() {
         let _ = std::fs::create_dir_all(dir);
+    }
+    if let Ok(meta) = std::fs::metadata(&path) {
+        if meta.len() >= LOG_ROTATE_BYTES {
+            let mut old = path.clone().into_os_string();
+            old.push(".old");
+            let _ = std::fs::rename(&path, &old);
+        }
     }
     match std::fs::OpenOptions::new().create(true).append(true).open(&path) {
         Ok(mut f) => {

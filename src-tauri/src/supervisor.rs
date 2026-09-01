@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crate::runtime::{self, Launch};
-use crate::{status, webview, AppState};
+use crate::{install, status, webview, AppState};
 use tauri::Manager;
 
 /// 等待 stdout 出现 URL 行的时限（全新 DSH_HOME 首启要装 profile 依赖，给足时间）。
@@ -26,6 +26,14 @@ pub struct Running {
     pub launch_url: String,
 }
 
+/// URL 等待循环从读线程收到的信号：找到了监听地址，或读到了致命崩溃特征。
+#[derive(Debug, PartialEq)]
+enum SpawnSignal {
+    Ready(String, String),
+    /// stderr 命中崩溃特征（Node.js 崩溃横幅）；附错误首行供加载页直接展示。
+    Crashed(String),
+}
+
 /// 从一行 stdout 解析 `dsh web: <url>[ (LAN: <url>)]`，返回 (origin, 启动 URL)。
 /// v0.1.2 起 URL 携带一次性 token，必须原样保留；只认 loopback 地址，
 /// LAN 候选（括号内）一律忽略。解析不出 loopback 地址的行直接跳过，
@@ -40,6 +48,18 @@ fn parse_web_url(line: &str) -> Option<(String, String)> {
         return None;
     }
     Some((format!("http://127.0.0.1:{digits}"), url.to_string()))
+}
+
+/// 识别 Node.js 致命错误横幅（纯函数便于单测）。崩溃 stderr 以
+/// `Node.js v<semver>` 整行收尾（行首 `[err] ` 前缀容忍）；错误信息中途出现
+/// 「Node.js」字样不算。摘要把手在 stderr 读线程：横幅前最近一条 `Error:` 行。
+fn crash_banner(line: &str) -> Option<String> {
+    let t = line.trim_start_matches("[err] ").trim();
+    if t.starts_with("Node.js v") && t["Node.js v".len()..].starts_with(|c: char| c.is_ascii_digit()) {
+        Some(t.to_string())
+    } else {
+        None
+    }
 }
 
 /// 进程登记（JSON）：壳 pid + dsh 子进程 pid + 实际端口。
@@ -207,9 +227,15 @@ pub fn spawn_dsh(app: &tauri::AppHandle, launch: Launch) -> Result<Running, Stri
     let state: tauri::State<AppState> = app.state();
     *state.child.lock().unwrap() = Some(child);
 
-    let (tx, rx) = std::sync::mpsc::channel::<(String, String)>();
+    let (tx, rx) = std::sync::mpsc::channel::<SpawnSignal>();
     let log_out = Arc::clone(&log);
     let tx_out = tx.clone();
+    // 原始 tx 立即丢弃：发送端只剩两个读线程各自的 clone——stdout/stderr 双双 EOF
+    // （进程退出）时通道断开，下方 recv_timeout 的 Disconnected 分支才可达。
+    // 否则崩溃场景永远白等满 URL_WAIT_SECS（0.1.18 真实故障：node 崩溃后壳仍报
+    // 「180 秒未报告监听地址」而非「服务提前退出」）。
+    let tx_err = tx.clone();
+    drop(tx);
     std::thread::spawn(move || {
         let reader = BufReader::new(stdout);
         for line in reader.lines() {
@@ -217,23 +243,40 @@ pub fn spawn_dsh(app: &tauri::AppHandle, launch: Launch) -> Result<Running, Stri
             if let Ok(mut f) = log_out.lock() {
                 let _ = writeln!(f, "[out] {line}");
             }
-            if let Some(url) = parse_web_url(&line) {
-                let _ = tx_out.send(url);
+            if let Some((origin, url)) = parse_web_url(&line) {
+                let _ = tx_out.send(SpawnSignal::Ready(origin, url));
             }
         }
     });
+    // stderr 读线程：整行 tee 进日志之外，识别 Node.js 崩溃横幅（fatal stack 的
+    // 收尾行），并把横幅前最近一条 `Error:` 行记作摘要随信号发出——加载页错误
+    // 态直接可读，无须用户翻几百行日志（典型：插件 API 不匹配导致启动即崩）。
     let log_err = Arc::clone(&log);
     std::thread::spawn(move || {
         let reader = BufReader::new(stderr);
+        let mut last_error_line: Option<String> = None;
         for line in reader.lines() {
             let Ok(line) = line else { break };
             if let Ok(mut f) = log_err.lock() {
                 let _ = writeln!(f, "[err] {line}");
             }
+            let stripped = line.trim_start_matches("[err] ").trim();
+            if stripped.starts_with("Error:") || stripped.starts_with("AggregateError:") {
+                last_error_line = Some(stripped.to_string());
+            }
+            if let Some(banner) = crash_banner(&line) {
+                let _ = tx_err.send(SpawnSignal::Crashed(match &last_error_line {
+                    Some(e) => format!("{e}（{banner}）"),
+                    None => banner,
+                }));
+                break; // 崩溃已确认：等待循环随即收尸，读线程无须继续
+            }
         }
+        drop(tx_err); // stderr EOF：进程退出，解除 URL 等待（崩溃快速失败路径之一）
     });
 
     let deadline = std::time::Instant::now() + Duration::from_secs(URL_WAIT_SECS);
+    let mut crash_detail: Option<String> = None;
     let (base_url, launch_url) = loop {
         if std::time::Instant::now() > deadline {
             // 经槽位取句柄再整树击杀：槽位空 = 退出流程（RunEvent::Exit）已收尸，防双杀
@@ -247,15 +290,34 @@ pub fn spawn_dsh(app: &tauri::AppHandle, launch: Launch) -> Result<Running, Stri
             ));
         }
         match rx.recv_timeout(Duration::from_millis(500)) {
-            Ok(url) => break url,
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+            Ok(SpawnSignal::Ready(origin, url)) => break (origin, url),
+            Ok(SpawnSignal::Crashed(detail)) => {
+                crash_detail = Some(detail);
+                // 不立即失败：给 URL 一线机会（横幅偶尔与就绪日志交错时避免误报，
+                // e.g. 子线程崩了主进程仍在）。下一轮 recv_timeout 继续等 URL。
+                continue;
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                // 已见崩溃横幅且再无 URL 到来：按崩溃快速失败，附可读摘要
+                if let Some(detail) = crash_detail.take() {
+                    if let Some(mut child) = state.child.lock().unwrap().take() {
+                        kill_tree(child.id() as u32);
+                        let _ = child.wait();
+                    }
+                    return Err(format!("dsh 启动崩溃：{detail}。完整日志: {}", runtime::log_file().display()));
+                }
+                continue;
+            }
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
                 // 输出流先于 URL 结束：进程已退出（同样经槽位取回再 wait 回收）
                 if let Some(mut child) = state.child.lock().unwrap().take() {
                     let _ = child.wait();
                 }
+                let hint = crash_detail
+                    .map(|d| format!("（{d}）"))
+                    .unwrap_or_default();
                 return Err(format!(
-                    "服务提前退出，未报告监听地址。请查看日志: {}",
+                    "服务提前退出，未报告监听地址{hint}。请查看日志: {}",
                     runtime::log_file().display()
                 ));
             }
@@ -305,6 +367,26 @@ fn acquire_restarting(state: &tauri::State<AppState>) -> bool {
 fn start_service_locked(app: &tauri::AppHandle) -> Result<(), String> {
     let state: tauri::State<AppState> = app.state();
     let launch = resolve_launch(app)?;
+    // 核心版本预检（仅便携运行时；System 回退由用户自管）：运行时核心若为
+    // 超出壳适配线（DSH_MAX_ADAPTED）的版本（如上游已发布 0.1.3+ 但壳尚未放行），
+    // 插件 API 代际可能不匹配——与其让服务崩溃后报「180 秒未报告监听地址」，
+    // 不如启动前给出可操作文案（0.1.18 真实故障复盘）。解析失败不拦截（宽容：
+    // 版本串异常时照常尝试启动，崩了有崩溃摘要兜底）。
+    if launch == Launch::Portable {
+        if let Some(v) = install::installed_dsh_version() {
+            if let Some(triple) = install::version_triple_public(&v) {
+                let (max_major, max_minor, max_patch) = install::max_adapted();
+                if triple > (max_major, max_minor, max_patch) {
+                    let is_pre = v.contains("-alpha") || v.contains("-rc") || v.contains("-beta");
+                    let tag = if is_pre { "预发布版" } else { "新版本" };
+                    return Err(format!(
+                        "运行时 dsh 核心为 v{v}（{tag}），超出当前应用适配线（≤{max_major}.{max_minor}.{max_patch}）。\
+                         插件可能因 API 不匹配而启动失败。请升级 dsh-desktop 应用本体以适配此版本。"
+                    ));
+                }
+            }
+        }
+    }
     status::set(app, "正在启动 DSH 服务…");
     // spawn_dsh 内部已把 child 挂入 state（冷启动孤儿修复）；此处拿回 Running 后
     // 用真实端口覆盖占位 pid 记录并重新登记句柄
@@ -592,9 +674,38 @@ mod tests {
         assert_eq!(rec.port, 0);
     }
 
+    /* ── Node 崩溃横幅识别（0.1.18 崩溃快速失败） ── */
     #[test]
-    fn base_url_port_parses_origin_or_falls_back_to_zero() {
-        assert_eq!(base_url_port("http://127.0.0.1:44182"), 44182);
-        assert_eq!(base_url_port("http://127.0.0.1"), 0);
+    fn crash_banner_matches_node_version_line() {
+        assert_eq!(
+            crash_banner("[err] Node.js v24.19.0").as_deref(),
+            Some("Node.js v24.19.0")
+        );
+        assert_eq!(crash_banner("Node.js v20.11.1").as_deref(), Some("Node.js v20.11.1"));
     }
+
+    #[test]
+    fn crash_banner_ignores_mentions_and_non_banner_lines() {
+        // 错误信息中途出现「Node.js」字样不算横幅
+        assert!(crash_banner("[err] Error: requires Node.js v24 or later").is_none());
+        assert!(crash_banner("[err]     at async boot (file:///.../boot.js:1:1)").is_none());
+        assert!(crash_banner("").is_none());
+    }
+
+    #[test]
+    fn spawn_signal_ready_and_crashed_are_distinct() {
+        let ready = SpawnSignal::Ready("http://127.0.0.1:1".into(), "http://127.0.0.1:1/".into());
+        let crashed = SpawnSignal::Crashed("Error: boom（Node.js v24.19.0）".into());
+        assert_ne!(ready, crashed);
+        assert_eq!(
+            ready,
+            SpawnSignal::Ready("http://127.0.0.1:1".into(), "http://127.0.0.1:1/".into())
+        );
+    }
+
+     #[test]
+     fn base_url_port_parses_origin_or_falls_back_to_zero() {
+         assert_eq!(base_url_port("http://127.0.0.1:44182"), 44182);
+         assert_eq!(base_url_port("http://127.0.0.1"), 0);
+     }
 }
