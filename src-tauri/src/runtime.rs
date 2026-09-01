@@ -76,26 +76,11 @@ fn dsh_bin_js_in(root: &PathBuf) -> PathBuf {
     p.join("node_modules").join("@deepseek-ai").join("dsh").join("lib").join("bin.js")
 }
 
-/// 便携运行时候选根：自有目录优先，其次复用 dsh-persona（数字分身）安装的便携运行时，
-/// 避免在 persona 机器上重复下载安装（persona 的 node/dsh 不在系统 PATH，System 回退探不到）。
-/// 便携模式（U盘包）下只认包内 Data 根，绝不复用宿主机上的任何运行时。
+/// 便携运行时候选根：仅认自有目录（dsh-desktop-app-data 或便携包 Data）。
+/// 不再回退 dsh-persona——桌面应用完全拥有自己的运行时生命周期，
+/// 不依赖任何外部目录状态。运行时缺失时由自愈机制自动重装。
 fn portable_roots() -> Vec<PathBuf> {
-    let mut roots = vec![runtime_root()];
-    if portable_root().is_some() {
-        return roots;
-    }
-    #[cfg(windows)]
-    if let Ok(local) = std::env::var("LOCALAPPDATA") {
-        roots.push(PathBuf::from(local).join("dsh-persona"));
-    }
-    #[cfg(not(windows))]
-    if let Ok(home) = std::env::var("HOME") {
-        roots.push(PathBuf::from(&home).join("Library/Application Support/dsh-persona"));
-        roots.push(PathBuf::from(
-            std::env::var("XDG_DATA_HOME").unwrap_or_else(|_| format!("{home}/.local/share")),
-        ).join("dsh-persona"));
-    }
-    roots
+    vec![runtime_root()]
 }
 
 /// node 与 dsh 都就绪的便携根目录；都没有时返回 None（bootstrap 走 System 回退或引导安装）。
@@ -195,7 +180,37 @@ pub fn no_window(cmd: &mut Command) -> &mut Command {
     cmd
 }
 
-/// 只检测、不安装：node 与 dsh 都就绪才返回启动方式，否则给出安装指引。
+/// DSH 要求的最低 Node 主版本号（zstd 解压需要 Node ≥ 24 的 createZstdDecompress）。
+const MIN_NODE_MAJOR: u32 = 24;
+
+/// 自愈信号前缀：bootstrap_runtime 返回此错误表示"系统 Node 不兼容，需自动重装便携运行时"。
+/// supervisor 检测此前缀触发 install::ensure_runtime_locked() 自愈流程。
+pub const NEED_AUTO_REPAIR: &str = "[auto-repair]";
+
+/// 检测系统 node 的主版本号。返回 None 表示无法执行或解析失败。
+fn system_node_major() -> Option<u32> {
+    let out = Command::new("node").arg("--version").output().ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let ver = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    // "v24.19.0" → 24
+    ver.strip_prefix('v')
+        .and_then(|v| v.split('.').next())
+        .and_then(|n| n.parse::<u32>().ok())
+}
+
+/// 系统 node 是否满足 DSH 运行要求（版本 ≥ MIN_NODE_MAJOR）。
+pub fn system_node_capable() -> bool {
+    system_node_major().map_or(false, |major| major >= MIN_NODE_MAJOR)
+}
+
+/// 只检测、不安装：node 与 dsh 都就绪才返回启动方式，否则返回自愈信号。
+/// 自愈触发条件（均由 supervisor 检测 NEED_AUTO_REPAIR 前缀）：
+/// - 系统 Node 不存在
+/// - 系统 Node 存在但版本 < MIN_NODE_MAJOR（如 nvm v23 缺 zstd）
+/// - 系统 dsh 命令不存在
+/// 便携模式（U盘包）下不触发自愈（离线场景无法下载），仍走安装指引。
 pub fn bootstrap_runtime() -> Result<Launch, String> {
     let node_path = node_exe();
     let bin_path = dsh_bin_js();
@@ -206,23 +221,42 @@ pub fn bootstrap_runtime() -> Result<Launch, String> {
         let mut log = log;
         let _ = writeln!(
             log,
-            "[检测] runtime_root={:?} node={:?} exists={} bin={:?} exists={} portable={}",
+            "[检测] runtime_root={:?} node={:?} exists={} bin={:?} exists={} portable={} sys_node_capable={}",
             runtime_root(),
             node_path,
             node_path.exists(),
             bin_path,
             bin_path.exists(),
-            portable
+            portable,
+            system_node_capable()
         );
     }
     if portable {
         return Ok(Launch::Portable);
     }
-    if !command_exists("node") {
-        return Err("未检测到 Node.js。\n请点击下方「安装运行环境」，或先安装 Node.js（https://nodejs.org/）。".into());
+    // 便携模式（U盘包）：离线场景无法自动下载，仍走手动安装指引
+    if portable_root().is_some() {
+        if !command_exists("node") {
+            return Err("未检测到 Node.js。\n请点击下方「安装运行环境」，或先安装 Node.js（https://nodejs.org/）。".into());
+        }
+        if !command_exists("dsh") {
+            return Err("未检测到 DSH。\n请点击下方「安装运行环境」，或先执行 npm install -g @deepseek-ai/dsh。".into());
+        }
+        return Ok(Launch::System);
     }
+    // 安装版：系统 Node 不存在或版本不兼容 → 自愈信号
+    if !command_exists("node") {
+        return Err(format!("{NEED_AUTO_REPAIR} 系统未安装 Node.js，将自动安装便携运行时。"));
+    }
+    if !system_node_capable() {
+        let major = system_node_major().map_or("未知".into(), |m| format!("v{m}"));
+        return Err(format!(
+            "{NEED_AUTO_REPAIR} 系统 Node 版本 {major} 不满足 DSH 要求（需 ≥ v{MIN_NODE_MAJOR}），将自动安装便携运行时。"
+        ));
+    }
+    // 系统 Node 兼容但 dsh 命令不存在 → 也触发自愈（装便携运行时比要求用户手动 npm i -g 更可靠）
     if !command_exists("dsh") {
-        return Err("未检测到 DSH。\n请点击下方「安装运行环境」，或先执行 npm install -g @deepseek-ai/dsh。".into());
+        return Err(format!("{NEED_AUTO_REPAIR} 系统未安装 DSH，将自动安装便携运行时。"));
     }
     Ok(Launch::System)
 }

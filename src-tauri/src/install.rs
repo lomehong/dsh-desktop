@@ -242,6 +242,88 @@ fn download(url: &str, dest: &PathBuf) -> Result<(), String> {
     Err(format!("下载失败 ({url})"))
 }
 
+/// 自愈入口（锁内调用）：由 supervisor 在 bootstrap_runtime 返回 NEED_AUTO_REPAIR 时触发。
+/// 与 install_runtime 共享安装逻辑，但不取 restarting 闸锁（调用方已持锁）。
+/// 安装完成后自动修复插件符号链接。
+pub fn ensure_runtime_locked(app: &tauri::AppHandle) -> Result<(), String> {
+    install_runtime_inner(app)?;
+    repair_plugin_symlinks();
+    Ok(())
+}
+
+/// 修复插件符号链接：扫描 DSH_HOME 下的自定义插件目录，将断裂的
+/// node_modules/@deepseek-ai 符号链接重新指向当前便携运行时的包目录。
+/// 静默执行——修复失败不阻断启动（插件加载失败由 DSH 自身报错）。
+fn repair_plugin_symlinks() {
+    let dsh_home = match std::env::var("DSH_HOME") {
+        Ok(h) if !h.is_empty() => PathBuf::from(h),
+        _ => {
+            let home = std::env::var(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).unwrap_or_default();
+            PathBuf::from(home).join(".dsh")
+        }
+    };
+    if !dsh_home.is_dir() {
+        return;
+    }
+    // 便携运行时中 @deepseek-ai 包的实际位置
+    let root = runtime::runtime_root();
+    let target = {
+        let mut p = root.join("node");
+        if !cfg!(windows) {
+            p = p.join("lib");
+        }
+        p.join("node_modules").join("@deepseek-ai")
+    };
+    if !target.is_dir() {
+        return;
+    }
+    // 扫描 DSH_HOME 下的子目录，找含 node_modules/@deepseek-ai 的插件
+    let entries = match std::fs::read_dir(&dsh_home) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    let mut repaired = 0u32;
+    for entry in entries.flatten() {
+        let plugin_dir = entry.path();
+        if !plugin_dir.is_dir() {
+            continue;
+        }
+        let nm_scope = plugin_dir.join("node_modules").join("@deepseek-ai");
+        // 只处理符号链接（目录或文件形式均可能）
+        let is_symlink = std::fs::symlink_metadata(&nm_scope)
+            .map(|m| m.file_type().is_symlink())
+            .unwrap_or(false);
+        if !is_symlink {
+            continue;
+        }
+        // 检查链接目标是否有效
+        if nm_scope.exists() {
+            continue; // 链接仍有效，跳过
+        }
+        // 断链：删除旧链接，重建指向当前运行时
+        let _ = std::fs::remove_file(&nm_scope);
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::symlink_dir;
+            if symlink_dir(&target, &nm_scope).is_ok() {
+                repaired += 1;
+            }
+        }
+        #[cfg(unix)]
+        {
+            if std::os::unix::fs::symlink(&target, &nm_scope).is_ok() {
+                repaired += 1;
+            }
+        }
+    }
+    if repaired > 0 {
+        if let Some(mut log) = runtime::open_log_append() {
+            use std::io::Write;
+            let _ = writeln!(log, "[自愈] 修复了 {repaired} 个插件符号链接 → {}", target.display());
+        }
+    }
+}
+
 /// 安装便携运行时（幂等）：Node 缺则下载解压，dsh 缺则 npm -g 安装固定版本。
 /// 每步经 status 更新到加载页。供首启引导与托盘升级共用。
 pub fn install_runtime(app: &tauri::AppHandle) -> Result<(), String> {

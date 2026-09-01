@@ -333,14 +333,31 @@ pub fn spawn_dsh(app: &tauri::AppHandle, launch: Launch) -> Result<Running, Stri
 }
 
 /// 读取已记录的启动方式；无记录时重新探测。
+/// 自愈机制：当 bootstrap_runtime 返回 NEED_AUTO_REPAIR 信号（系统 Node 版本不兼容），
+/// 自动安装便携运行时并修复插件符号链接，然后以 Portable 模式启动。
 fn resolve_launch(app: &tauri::AppHandle) -> Result<Launch, String> {
     let state: tauri::State<AppState> = app.state();
     if let Some(l) = *state.launch.lock().unwrap() {
         return Ok(l);
     }
-    let launch = runtime::bootstrap_runtime()?;
-    *state.launch.lock().unwrap() = Some(launch);
-    Ok(launch)
+    match runtime::bootstrap_runtime() {
+        Ok(launch) => {
+            *state.launch.lock().unwrap() = Some(launch);
+            Ok(launch)
+        }
+        Err(e) if e.starts_with(runtime::NEED_AUTO_REPAIR) => {
+            // 自愈流程：自动安装便携运行时 + 修复插件符号链接
+            status::set(app, "检测到运行时不兼容，正在自动修复…");
+            if let Some(mut log) = runtime::open_log_append() {
+                use std::io::Write;
+                let _ = writeln!(log, "[自愈] 触发原因: {e}");
+            }
+            install::ensure_runtime_locked(app)?;
+            *state.launch.lock().unwrap() = Some(Launch::Portable);
+            Ok(Launch::Portable)
+        }
+        Err(e) => Err(e),
+    }
 }
 
 /// `restarting` 闸锁：流程原子化的关键。空闲时置位并返回 true；已有流程在途返回 false
