@@ -23,10 +23,15 @@ jobs:
       - name: Build (debug)
         run: cargo build --manifest-path src-tauri/Cargo.toml
 
+      - name: Install Node 24 + dsh for smoke test
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
       - name: Install dsh runtime for smoke test
         shell: pwsh
         run: |
-          npm install -g "@deepseek-ai/dsh@0.1.1-rc.2"
+          npm install -g "@deepseek-ai/dsh@0.1.2-alpha.3"
           dsh --version
 
       - name: Smoke test (boot → ready → graceful exit, no orphans)
@@ -52,7 +57,7 @@ jobs:
           New-Item -ItemType Directory -Force -Path "$usb\Data\home","$usb\Data\node" | Out-Null
           Copy-Item "src-tauri\target\debug\dsh-desktop.exe" $usb
           Copy-Item (Get-Command node.exe).Source "$usb\Data\node\node.exe"
-          npm install -g "@deepseek-ai/dsh@0.1.1-rc.2" --prefix "$usb\Data\node" --no-progress
+          npm install -g "@deepseek-ai/dsh@0.1.2-alpha.3" --prefix "$usb\Data\node" --no-progress
           # 完成标记：跳过向导直接启动（向导 UI 由本地验收覆盖）
           Set-Content "$usb\Data\home\persona-configured.json" '{"configured":true,"owner":"ci"}'
           # 宿主侧基准：记录本次冒烟前宿主 ~/.dsh 是否已有 profiles/web
