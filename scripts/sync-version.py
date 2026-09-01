@@ -13,14 +13,15 @@ def main() -> int:
     tag = sys.argv[1].strip() if len(sys.argv) > 1 else ""
     version = re.sub(r"^v", "", tag)
     if not re.fullmatch(r"\d+\.\d+\.\d+(?:[-+].+)?", version):
-        print(f"sync-version: 非法 tag 版本 {tag!r}，跳过同步")
+        # 输出保持纯 ASCII：Windows runner 控制台为 cp1252，非 ASCII 会 UnicodeEncodeError
+        print(f"sync-version: invalid tag version {tag!r}, skip")
         return 0
 
     cargo_path = "src-tauri/Cargo.toml"
     text = open(cargo_path, encoding="utf-8").read()
     text, n = re.subn(r'(?m)^version = "[^"]+"', f'version = "{version}"', text, count=1)
     if n != 1:
-        print("sync-version: Cargo.toml 中未找到 package version 行")
+        print("sync-version: package version line not found in Cargo.toml")
         return 1
     open(cargo_path, "w", encoding="utf-8").write(text)
 
@@ -32,7 +33,7 @@ def main() -> int:
         json.dump(conf, f, indent=2, ensure_ascii=False)
         f.write("\n")
 
-    print(f"sync-version: 版本已同步 -> {version}")
+    print(f"sync-version: synced -> {version}")
     return 0
 
 
