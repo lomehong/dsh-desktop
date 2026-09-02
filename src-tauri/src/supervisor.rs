@@ -413,6 +413,8 @@ fn start_service_locked(app: &tauri::AppHandle) -> Result<(), String> {
             status::set(app, "检测到运行时包不完整，切换官方源重装 DSH…");
             install::force_reinstall_official()?;
         }
+        // 核心版本变化自愈：清空 profile 插件目录强制按新核心重装，防版本错位崩溃。
+        install::refresh_profile_plugins_if_core_changed();
     }
     status::set(app, "正在启动 DSH 服务…");
     // spawn_dsh 内部已把 child 挂入 state（冷启动孤儿修复）；此处拿回 Running 后

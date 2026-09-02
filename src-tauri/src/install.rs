@@ -370,6 +370,58 @@ fn repair_plugin_symlinks() {
     }
 }
 
+/// 当前 DSH home：便携模式用包内 home，否则 env DSH_HOME，默认 ~/.dsh。
+pub fn dsh_home() -> PathBuf {
+    if let Some(h) = runtime::portable_home() {
+        return h;
+    }
+    match std::env::var("DSH_HOME") {
+        Ok(h) if !h.is_empty() => PathBuf::from(h),
+        _ => {
+            let home = std::env::var(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).unwrap_or_default();
+            PathBuf::from(home).join(".dsh")
+        }
+    }
+}
+
+fn core_version_marker() -> PathBuf {
+    runtime::runtime_root().join("last-core-version")
+}
+
+/// 核心 dsh 版本变化时清空各 profile 的 node_modules，强制按新核心重新解析插件。
+/// 修复「核心升级但 profile 插件仍是旧版/符号链接指向残留安装」的版本错位（真实故障：
+/// alpha.4 核心 + 旧 dsh-tool-subagent 缺 exports / 旧树 import .css 崩溃）。
+/// dsh 首启会自动重装 profile 依赖，故删除安全。首次运行（无标记）只记录不清理。
+pub fn refresh_profile_plugins_if_core_changed() {
+    let Some(cur) = installed_dsh_version() else { return };
+    let marker = core_version_marker();
+    let prev = std::fs::read_to_string(&marker).unwrap_or_default();
+    let prev = prev.trim().to_string();
+    if prev.is_empty() {
+        let _ = std::fs::write(&marker, &cur);
+        return; // 首次运行：仅记录，避免误清健康环境
+    }
+    if prev == cur {
+        return;
+    }
+    let _ = std::fs::write(&marker, &cur);
+    let profiles = dsh_home().join("profiles");
+    let Ok(entries) = std::fs::read_dir(&profiles) else { return };
+    let mut cleared = 0u32;
+    for e in entries.flatten() {
+        let nm = e.path().join("node_modules");
+        if nm.is_dir() && std::fs::remove_dir_all(&nm).is_ok() {
+            cleared += 1;
+        }
+    }
+    if cleared > 0 {
+        if let Some(mut log) = runtime::open_log_append() {
+            use std::io::Write;
+            let _ = writeln!(log, "[自愈] 核心 {prev} -> {cur}，清空 {cleared} 个 profile 插件目录强制重装");
+        }
+    }
+}
+
 /// 安装便携运行时（幂等）：Node 缺则下载解压，dsh 缺则 npm -g 安装固定版本。
 /// 每步经 status 更新到加载页。供首启引导与托盘升级共用。
 pub fn install_runtime(app: &tauri::AppHandle) -> Result<(), String> {
