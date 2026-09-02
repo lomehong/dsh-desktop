@@ -177,12 +177,11 @@ pub fn spawn_dsh(app: &tauri::AppHandle, launch: Launch) -> Result<Running, Stri
             c.args(["--port", "0"])
                 .env("PATH", format!("{}{}{}", node_dir.display(), sep, sys))
                 .current_dir(node_dir);
-            // 便携模式（U盘包）：DSH home 重定向到包内 Data/home，分身状态随U盘走，
-            // 宿主机 ~/.dsh 零读写；npm 缓存同样留在包内，不在宿主留痕
-            if let Some(home) = runtime::portable_home() {
-                c.env("DSH_HOME", &home);
-                c.env("npm_config_cache", home.join(".npm-cache"));
-            }
+            // dsh-desktop 专属 DSH home（便携=包内 home，安装版=数据目录 home）：
+            // 与系统 dsh/persona 的 ~/.dsh 隔离，杜绝多版本交叉污染 profile 插件树。
+            let home = runtime::app_home();
+            c.env("DSH_HOME", &home);
+            c.env("npm_config_cache", home.join(".npm-cache"));
             // macOS .app bundle 环境缺少 HOME / NODE_PATH，Node.js ESM 模块解析依赖它们
             #[cfg(not(windows))]
             {
@@ -413,6 +412,8 @@ fn start_service_locked(app: &tauri::AppHandle) -> Result<(), String> {
             status::set(app, "检测到运行时包不完整，切换官方源重装 DSH…");
             install::force_reinstall_official()?;
         }
+        // 专用 home 初始化：首次运行把旧 ~/.dsh 用户数据迁进专属 home（跳过 node_modules）。
+        install::migrate_legacy_home()?;
         // 核心版本变化自愈：清空 profile 插件目录强制按新核心重装，防版本错位崩溃。
         install::refresh_profile_plugins_if_core_changed();
     }

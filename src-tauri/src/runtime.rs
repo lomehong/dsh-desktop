@@ -29,6 +29,13 @@ pub fn portable_home() -> Option<PathBuf> {
     portable_root().map(|r| r.join("home"))
 }
 
+/// dsh-desktop 专属 DSH home：便携=包内 `Data/home`，安装版=数据目录下 `home`。
+/// 与系统 dsh / persona 的 `~/.dsh` 隔离，避免多版本安装交叉污染同一套 profile 插件
+/// （真实故障：alpha.4 核心 + 共享 ~/.dsh 旧插件 → 版本错位崩溃）。
+pub fn app_home() -> PathBuf {
+    portable_home().unwrap_or_else(|| runtime_root().join("home"))
+}
+
 /// 运行时根目录（便携模式 = `Data`）：
 /// 安装版 Windows: %LOCALAPPDATA%\dsh-desktop-app-data；macOS: ~/Library/Application Support/dsh-desktop-app-data
 /// 不用 `dsh-desktop`：NSIS 卸载器会整目录删除 InstallLocation，若应用恰好装在同名目录

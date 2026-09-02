@@ -370,11 +370,13 @@ fn repair_plugin_symlinks() {
     }
 }
 
-/// 当前 DSH home：便携模式用包内 home，否则 env DSH_HOME，默认 ~/.dsh。
+/// 当前 DSH home：始终用 dsh-desktop 专属 home（与系统 dsh/persona 的 ~/.dsh 隔离）。
 pub fn dsh_home() -> PathBuf {
-    if let Some(h) = runtime::portable_home() {
-        return h;
-    }
+    runtime::app_home()
+}
+
+/// 旧共享 home（~/.dsh 或 env DSH_HOME）：隔离后的一次性迁移来源。
+fn legacy_home() -> PathBuf {
     match std::env::var("DSH_HOME") {
         Ok(h) if !h.is_empty() => PathBuf::from(h),
         _ => {
@@ -382,6 +384,58 @@ pub fn dsh_home() -> PathBuf {
             PathBuf::from(home).join(".dsh")
         }
     }
+}
+
+/// 把旧 ~/.dsh 的用户数据迁进专属 home（仅首次、目标为空时）。
+/// 跳过所有 node_modules，避免把旧插件树/残留符号链接带进新环境。
+/// 迁移完成后 dsh 首启会按新核心重装 profile 插件。
+pub fn migrate_legacy_home() -> Result<(), String> {
+    let target = dsh_home();
+    // 已初始化（有迁移标记 / 分身完成标记 / web profile 配置）则跳过
+    if target.join(".migrated-from-legacy").exists()
+        || target.join("persona-configured.json").exists()
+        || target.join("profiles").join("web").join("package.json").exists()
+    {
+        return Ok(());
+    }
+    let source = legacy_home();
+    if !source.is_dir() || source == target {
+        return Ok(());
+    }
+    std::fs::create_dir_all(&target).map_err(|e| format!("创建 home 失败: {e}"))?;
+
+    fn copy_tree(src: &PathBuf, dst: &PathBuf) -> u32 {
+        let mut n = 0u32;
+        if let Ok(rd) = std::fs::read_dir(src) {
+            for e in rd.flatten() {
+                let sp = e.path();
+                if sp.file_name().map_or(false, |f| f == "node_modules") {
+                    continue; // 跳过插件树，避免带入旧版/断链
+                }
+                let dp = dst.join(e.file_name());
+                if sp.is_dir() {
+                    if std::fs::create_dir_all(&dp).is_ok() {
+                        n += copy_tree(&sp, &dp);
+                    }
+                } else if std::fs::copy(&sp, &dp).is_ok() {
+                    n += 1;
+                }
+            }
+        }
+        n
+    }
+    let n = copy_tree(&source, &target);
+    let _ = std::fs::write(target.join(".migrated-from-legacy"), "1");
+    if let Some(mut log) = runtime::open_log_append() {
+        use std::io::Write;
+        let _ = writeln!(
+            log,
+            "[迁移] 旧 DSH home {} → {}（{n} 个文件）",
+            source.display(),
+            target.display()
+        );
+    }
+    Ok(())
 }
 
 fn core_version_marker() -> PathBuf {
