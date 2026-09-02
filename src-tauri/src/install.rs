@@ -134,8 +134,8 @@ pub fn installed_dsh_version() -> Option<String> {
         .map(String::from)
 }
 
-/// 查询 npm registry 上 @deepseek-ai/dsh 的 latest 版本。
-fn latest_dsh_version() -> Result<String, String> {
+/// 查询 npm registry 上 @deepseek-ai/dsh 指定 dist-tag 的版本。
+fn dist_tag_version(tag: &str) -> Result<String, String> {
     let npm = npm_tool().ok_or("便携运行时未安装，无法查询版本")?;
     let mut last_err = String::new();
     for registry in npm_registry() {
@@ -146,7 +146,7 @@ fn latest_dsh_version() -> Result<String, String> {
         } else {
             Command::new(&npm)
         };
-        c.args(["view", "@deepseek-ai/dsh", "dist-tags.latest"]).arg(&registry);
+        c.args(["view", "@deepseek-ai/dsh", &format!("dist-tags.{tag}")]).arg(&registry);
         prepend_node_path(&mut c);
         match no_window(&mut c).output() {
             Ok(o) if o.status.success() => {
@@ -163,14 +163,29 @@ fn latest_dsh_version() -> Result<String, String> {
     Err(format!("查询最新版本失败：{last_err}（可设置 DSH_DESKTOP_NPM_REGISTRY）"))
 }
 
-/// 升级目标版本：DSH_DESKTOP_DSH_VERSION 显式指定，否则取 registry latest。
+/// 升级通道选择：已装 alpha 的用户跟随 alpha tag，其余跟随 latest。
+/// 避免「升级按钮变降级」——latest 目前指向旧稳定线，alpha 用户点升级会被拉回去。
+fn upgrade_channel() -> &'static str {
+    match installed_dsh_version() {
+        Some(v) if v.contains("-alpha") => "alpha",
+        _ => "latest",
+    }
+}
+
+/// 升级目标版本：DSH_DESKTOP_DSH_VERSION 显式指定优先；否则按当前通道取 tag。
+/// 通道 tag 查询失败（如 alpha tag 不存在）时回退 latest。
 fn target_version() -> Result<String, String> {
     if let Ok(v) = std::env::var("DSH_DESKTOP_DSH_VERSION") {
         if !v.is_empty() {
             return Ok(v);
         }
     }
-    latest_dsh_version()
+    let channel = upgrade_channel();
+    match dist_tag_version(channel) {
+        Ok(v) => Ok(v),
+        Err(e) if channel != "latest" => dist_tag_version("latest").map_err(|_| e),
+        Err(e) => Err(e),
+    }
 }
 
 /// 安装指定版本的 dsh 到活动便携运行时（输出落日志）。
