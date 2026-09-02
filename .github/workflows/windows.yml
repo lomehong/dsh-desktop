@@ -31,7 +31,7 @@ jobs:
       - name: Install dsh runtime for smoke test
         shell: pwsh
         run: |
-          npm install --legacy-peer-deps -g "@deepseek-ai/dsh@0.1.2-alpha.5"
+          npm install -g "@deepseek-ai/dsh@0.1.2-alpha.5"
           dsh --version
 
       - name: Smoke test (boot → ready → graceful exit, no orphans)
@@ -57,7 +57,7 @@ jobs:
           New-Item -ItemType Directory -Force -Path "$usb\Data\home","$usb\Data\node" | Out-Null
           Copy-Item "src-tauri\target\debug\dsh-desktop.exe" $usb
           Copy-Item (Get-Command node.exe).Source "$usb\Data\node\node.exe"
-          npm install --legacy-peer-deps -g "@deepseek-ai/dsh@0.1.2-alpha.5" --prefix "$usb\Data\node" --no-progress
+          npm install -g "@deepseek-ai/dsh@0.1.2-alpha.5" --prefix "$usb\Data\node" --no-progress
           # 完成标记：跳过向导直接启动（向导 UI 由本地验收覆盖）
           Set-Content "$usb\Data\home\persona-configured.json" '{"configured":true,"owner":"ci"}'
           # 宿主侧基准：记录本次冒烟前宿主 ~/.dsh 是否已有 profiles/web
