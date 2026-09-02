@@ -30,7 +30,7 @@ jobs:
 
       - name: Install dsh
         run: |
-          npm install --legacy-peer-deps -g "@deepseek-ai/dsh@0.1.2-alpha.4"
+          npm install --legacy-peer-deps -g "@deepseek-ai/dsh@0.1.2-alpha.5"
           dsh --version
 
       - name: Smoke test (boot → ready → graceful exit, no orphans)

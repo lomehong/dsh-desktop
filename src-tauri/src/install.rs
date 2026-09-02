@@ -10,7 +10,7 @@ use crate::{status, supervisor};
 use tauri::Manager;
 
 /// 固定的 dsh 基线版本（全新环境首装用；升级走 npm latest，可用 DSH_DESKTOP_DSH_VERSION 固定）。
-pub const DSH_VERSION: &str = "0.1.2-alpha.4";
+pub const DSH_VERSION: &str = "0.1.2-alpha.5";
 /// 便携 Node 版本（dsh rc.x 的 zstd 要求需要 Node 24）。
 const NODE_VERSION: &str = "24.19.0";
 /// 壳已适配的 dsh 最高版本（语义化三元组）。v0.1.18 起真机复核了 0.1.2-alpha.2
