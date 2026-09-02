@@ -169,8 +169,12 @@ pub fn spawn_dsh(app: &tauri::AppHandle, launch: Launch) -> Result<Running, Stri
             let sep = if cfg!(windows) { ";" } else { ":" };
             let sys = std::env::var("PATH").unwrap_or_default();
             let mut c = Command::new(&node);
-            c.arg(&bin)
-                .args(["web", "--no-open", "--port", "0"])
+            c.arg(&bin).arg("web");
+            // 容错：镜像旧包可能缺 --no-open，按实际能力决定是否传，避免「unknown option」崩溃
+            if install::web_supports_no_open() {
+                c.arg("--no-open");
+            }
+            c.args(["--port", "0"])
                 .env("PATH", format!("{}{}{}", node_dir.display(), sep, sys))
                 .current_dir(node_dir);
             // 便携模式（U盘包）：DSH home 重定向到包内 Data/home，分身状态随U盘走，
@@ -402,6 +406,12 @@ fn start_service_locked(app: &tauri::AppHandle) -> Result<(), String> {
                     ));
                 }
             }
+        }
+        // 镜像完整性自愈：已装包若缺 --no-open（npmmirror 滞后旧 tarball），切官方源重装。
+        // 重装后能力即恢复；若离线重装失败，spawn 侧容错会省略 --no-open 兜底不崩。
+        if !install::web_supports_no_open() {
+            status::set(app, "检测到运行时包不完整，切换官方源重装 DSH…");
+            install::force_reinstall_official()?;
         }
     }
     status::set(app, "正在启动 DSH 服务…");

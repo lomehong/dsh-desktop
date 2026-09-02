@@ -190,35 +190,66 @@ fn target_version() -> Result<String, String> {
 
 /// 安装指定版本的 dsh 到活动便携运行时（输出落日志）。
 fn npm_install_dsh(version: &str) -> Result<(), String> {
-    let node_dir = active_root().join("node");
-    let npm_cmd = npm_tool().ok_or("便携 Node 缺少 npm")?;
     let mut last_err = String::new();
     for registry in npm_registry() {
-        let mut log = runtime::open_log_append();
-        let mut c = if cfg!(windows) {
-            let mut c = Command::new("cmd.exe");
-            c.args(["/C"]).arg(&npm_cmd);
-            c
-        } else {
-            Command::new(&npm_cmd)
-        };
-        c.args(["install", "-g", &format!("@deepseek-ai/dsh@{version}"), "--prefix"])
-            .arg(&node_dir)
-            .arg(&registry);
-        prepend_node_path(&mut c);
-        if let Some(f) = log.as_mut() {
-            use std::io::Write;
-            let _ = writeln!(f, "[npm] registry={registry} target={version}");
-            if let Some(o) = f.try_clone().ok() { c.stdout(std::process::Stdio::from(o)); }
-            if let Some(e) = f.try_clone().ok() { c.stderr(std::process::Stdio::from(e)); }
-        }
-        match no_window(&mut c).status() {
-            Ok(s) if s.success() => return Ok(()),
-            Ok(_) => last_err = "npm 退出码非零（详见日志）".into(),
-            Err(e) => last_err = e.to_string(),
+        match npm_install_dsh_once(version, &registry) {
+            Ok(()) => return Ok(()),
+            Err(e) => last_err = e,
         }
     }
     Err(format!("DSH v{version} 安装失败：{last_err}"))
+}
+
+/// 探测已装便携 dsh 的 web 命令是否接受 --no-open。
+/// 防 npmmirror 镜像滞后返回缺该 flag 的旧 tarball（真实故障：装到 alpha.4 但无 --no-open）。
+pub fn web_supports_no_open() -> bool {    let node = runtime::node_exe();
+    let bin = runtime::dsh_bin_js();
+    if !node.exists() || !bin.exists() {
+        return true; // 无可探测对象，视为支持（后续启动自检会兜底）
+    }
+    let mut c = Command::new(&node);
+    c.arg(&bin).args(["web", "--help"]);
+    prepend_node_path(&mut c);
+    match no_window(&mut c).output() {
+        Ok(o) => {
+            let s = format!("{}{}", String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr));
+            s.contains("--no-open")
+        }
+        Err(_) => true,
+    }
+}
+
+/// 强制从官方源重装基线 dsh（镜像包不完整时的自愈手段）。
+pub fn force_reinstall_official() -> Result<(), String> {
+    npm_install_dsh_once(DSH_VERSION, "--registry=https://registry.npmjs.org")
+}
+
+fn npm_install_dsh_once(version: &str, registry: &str) -> Result<(), String> {
+    let node_dir = active_root().join("node");
+    let npm_cmd = npm_tool().ok_or("便携 Node 缺少 npm")?;
+    let mut log = runtime::open_log_append();
+    let mut c = if cfg!(windows) {
+        let mut c = Command::new("cmd.exe");
+        c.args(["/C"]).arg(&npm_cmd);
+        c
+    } else {
+        Command::new(&npm_cmd)
+    };
+    c.args(["install", "-g", &format!("@deepseek-ai/dsh@{version}"), "--prefix"])
+        .arg(&node_dir)
+        .arg(registry);
+    prepend_node_path(&mut c);
+    if let Some(f) = log.as_mut() {
+        use std::io::Write;
+        let _ = writeln!(f, "[npm] registry={registry} target={version}");
+        if let Some(o) = f.try_clone().ok() { c.stdout(std::process::Stdio::from(o)); }
+        if let Some(e) = f.try_clone().ok() { c.stderr(std::process::Stdio::from(e)); }
+    }
+    match no_window(&mut c).status() {
+        Ok(s) if s.success() => Ok(()),
+        Ok(_) => Err("npm 退出码非零（详见日志）".into()),
+        Err(e) => Err(e.to_string()),
+    }
 }
 
 /// 下载单个文件：优先 curl（各平台自带），Windows 用 PowerShell、Unix 用 wget 兜底。
@@ -404,6 +435,16 @@ fn install_runtime_inner(app: &tauri::AppHandle) -> Result<(), String> {
     if !runtime::dsh_bin_js().exists() {
         status::set(app, &format!("正在安装 DSH v{DSH_VERSION}（首次约 1~3 分钟）…"));
         npm_install_dsh(DSH_VERSION)?;
+    }
+    // 3) 镜像完整性校验：npmmirror 可能滞后返回缺 --no-open 的旧 tarball（真实故障）。
+    // 装完探测能力，不完整则切官方源强制重装，保证启动参数与包能力一致。
+    if !web_supports_no_open() {
+        status::set(app, "镜像包不完整，切换官方源重装 DSH…");
+        if let Some(mut log) = runtime::open_log_append() {
+            use std::io::Write;
+            let _ = writeln!(log, "[自愈] 镜像 tarball 缺 --no-open，切 npmjs 重装 v{DSH_VERSION}");
+        }
+        npm_install_dsh_once(DSH_VERSION, "--registry=https://registry.npmjs.org")?;
     }
     Ok(())
 }
