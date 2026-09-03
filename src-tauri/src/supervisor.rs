@@ -1,7 +1,8 @@
 //! 子进程监督：spawn（随机端口 + stdout URL 解析）、守护重启、整树击杀。
+use std::collections::VecDeque;
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, Command, Stdio};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
 use crate::runtime::{self, Launch};
@@ -15,6 +16,57 @@ const HEALTH_WAIT_SECS: u64 = 60;
 /// 服务异常退出后的自动重启上限（一次会话内）。
 pub const MAX_AUTO_RESTARTS: u32 = 3;
 
+/// 流程闸锁（0.1.28 起排队语义）：一条流程（收尾/翻转/探活/启动）从头到尾独占
+/// 一把闸锁；其他流程 acquire 时**排队等待**而非静默放弃——旧版「见置位即整段
+/// 静默返回」会丢并发请求，用户视角是「点了没反应」（守护线程在流程在途时检测到
+/// 子进程退出、随后 start_service 静默 no-op，服务甚至不会重启）。
+///
+/// 不变式（延续 0.1.17）：一条流程只取放闸锁各一次，中途不释放——否则托盘断开等
+/// 并发流程可在流程中途插入 stop/mode 翻转，造成 mode/origin/UI 短暂分叉。锁内
+/// 主体一律以 `_locked` 后缀命名，禁止再取本锁。模式读取也移入锁内（restart_by_mode：
+/// 排队等到的时点模式可能已被前一流程翻转，锁外读是脏读）。
+///
+/// 死锁面评估：acquire 阻塞时不持任何其他锁；持闸锁期间调用的 tray::rebuild/status/
+/// webview 均在主线程派发且主线程从不取本锁（所有触达本锁的命令/托盘路径都先另起
+/// 线程）；watch_child 每 3s tick 见置位即跳过（探测语义不变，守护在流程期间暂停）；
+/// 其余 child/proxy 锁的获取顺序恒为 restarting → child/proxy，无环。流程主体内
+/// 全部等待有界（URL 180s + HTTP 60s），排队者不会无限饥饿。
+pub struct FlowGate {
+    held: Mutex<bool>,
+    idle: Condvar,
+}
+
+impl FlowGate {
+    pub const fn new() -> Self {
+        Self {
+            held: Mutex::new(false),
+            idle: Condvar::new(),
+        }
+    }
+
+    /// 阻塞直到取得闸锁。调用方都在专用线程上（命令层/托盘/守护各自 spawn），
+    /// 排队等待不卡主线程；在途流程结束后本流程才整段执行。
+    pub fn acquire(&self) {
+        let mut held = self.held.lock().unwrap();
+        while *held {
+            held = self.idle.wait(held).unwrap();
+        }
+        *held = true;
+    }
+
+    /// 释放闸锁并唤醒全部排队者（被唤醒者竞争 Mutex，天然串行取锁）。
+    pub fn release(&self) {
+        *self.held.lock().unwrap() = false;
+        self.idle.notify_all();
+    }
+
+    /// 探测（不排队）：仅守护线程 tick 用——流程在途期间跳过检查即可，
+    /// 检测到退出后的重启意图走 start_service 的排队 acquire，不会丢。
+    pub fn is_held(&self) -> bool {
+        *self.held.lock().unwrap()
+    }
+}
+
 /// 一个已拉起的 dsh web 服务：子进程句柄 + 实际监听地址（随机端口）。
 pub struct Running {
     pub child: Child,
@@ -24,6 +76,10 @@ pub struct Running {
     /// base_url 等价——就绪探测与 webview 首航必须走它：无 token 的 GET /
     /// 在 v0.1.2+ 是 401，token 交换（303 + Set-Cookie）才是进入主界面的正门。
     pub launch_url: String,
+    /// 启动期输出尾环（spawn_dsh 读线程持续写入，读端只读）：URL 解析成功后
+    /// 进程仍可能卡在 HTTP 就绪前（如 profile 依赖安装失败循环报错），
+    /// start_service_locked 的「服务未就绪」错误据此附带最近输出。
+    pub startup_tail: Arc<Mutex<VecDeque<String>>>,
 }
 
 /// URL 等待循环从读线程收到的信号：找到了监听地址，或读到了致命崩溃特征。
@@ -48,6 +104,69 @@ fn parse_web_url(line: &str) -> Option<(String, String)> {
         return None;
     }
     Some((format!("http://127.0.0.1:{digits}"), url.to_string()))
+}
+
+/// 就绪地址一致性（纯函数便于单测）：同一世代内首次解析出的 (origin, url) 是唯一
+/// 事实；后续行再解析出不同地址视为冲突——真服务不会中途改端口重报就绪行，冲突
+/// 输出不可信（对齐 studio host-supervisor 的 conflicting readiness URL 防御）。
+/// 首次命中返回 Ok(Some)；重复同一地址返回 Ok(None)；冲突返回 Err 并保留首次。
+fn accept_ready(
+    seen: &mut Option<(String, String)>,
+    line: &str,
+) -> Result<Option<(String, String)>, String> {
+    let Some(parsed) = parse_web_url(line) else {
+        return Ok(None);
+    };
+    match seen {
+        None => {
+            *seen = Some(parsed.clone());
+            Ok(Some(parsed))
+        }
+        Some(prev) if *prev == parsed => Ok(None),
+        Some(_) => Err(format!(
+            "服务报告了冲突的监听地址 {}（以首次 {} 为准）",
+            parsed.0,
+            seen.as_ref().unwrap().0
+        )),
+    }
+}
+
+/// 启动期输出尾环容量（行数）：失败时随错误信息附上，加载页错误态直接可读，
+/// 不必翻几百行日志。
+const TAIL_LINES: usize = 40;
+/// 尾部摘要单条上限（字符）：防极端长行撑爆加载页错误态。
+const TAIL_MAX_CHARS: usize = 2048;
+
+/// 启动期输出尾部环形缓冲（纯函数便于单测）：超容量丢最旧行。
+fn push_tail(tail: &mut VecDeque<String>, line: &str) {
+    if tail.len() == TAIL_LINES {
+        tail.pop_front();
+    }
+    tail.push_back(line.to_string());
+}
+
+/// 尾环格式化为可读摘要（纯函数）：按字符截断（字节切片会切进多字节 UTF-8 中间），
+/// 空尾环返回空串，由调用方决定是否拼接。
+fn tail_text(tail: &VecDeque<String>) -> String {
+    let joined = tail
+        .iter()
+        .map(|l| l.trim_end())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let total = joined.chars().count();
+    if total > TAIL_MAX_CHARS {
+        format!("…{}", joined.chars().skip(total - TAIL_MAX_CHARS).collect::<String>())
+    } else {
+        joined
+    }
+}
+
+/// 失败信息拼尾部摘要（纯函数）：空摘要原样返回，不产生空段落。
+fn with_tail(msg: &str, tail: &str) -> String {
+    if tail.is_empty() {
+        return msg.to_string();
+    }
+    format!("{msg}\n最近输出：\n{tail}")
 }
 
 /// 识别 Node.js 致命错误横幅（纯函数便于单测）。崩溃 stderr 以
@@ -231,6 +350,8 @@ pub fn spawn_dsh(app: &tauri::AppHandle, launch: Launch) -> Result<Running, Stri
     *state.child.lock().unwrap() = Some(child);
 
     let (tx, rx) = std::sync::mpsc::channel::<SpawnSignal>();
+    // 启动期输出尾环：stdout/stderr 双线程写入，失败路径读取附进错误信息（诊断留证）
+    let tail: Arc<Mutex<VecDeque<String>>> = Arc::new(Mutex::new(VecDeque::new()));
     let log_out = Arc::clone(&log);
     let tx_out = tx.clone();
     // 原始 tx 立即丢弃：发送端只剩两个读线程各自的 clone——stdout/stderr 双双 EOF
@@ -239,15 +360,29 @@ pub fn spawn_dsh(app: &tauri::AppHandle, launch: Launch) -> Result<Running, Stri
     // 「180 秒未报告监听地址」而非「服务提前退出」）。
     let tx_err = tx.clone();
     drop(tx);
+    let tail_out = Arc::clone(&tail);
     std::thread::spawn(move || {
         let reader = BufReader::new(stdout);
+        // 同世代就绪地址唯一事实：首次解析结果定格，冲突行忽略并留证日志
+        let mut seen: Option<(String, String)> = None;
         for line in reader.lines() {
             let Ok(line) = line else { break };
             if let Ok(mut f) = log_out.lock() {
                 let _ = writeln!(f, "[out] {line}");
             }
-            if let Some((origin, url)) = parse_web_url(&line) {
-                let _ = tx_out.send(SpawnSignal::Ready(origin, url));
+            if let Ok(mut t) = tail_out.lock() {
+                push_tail(&mut t, &line);
+            }
+            match accept_ready(&mut seen, &line) {
+                Ok(Some((origin, url))) => {
+                    let _ = tx_out.send(SpawnSignal::Ready(origin, url));
+                }
+                Ok(None) => {}
+                Err(conflict) => {
+                    if let Ok(mut f) = log_out.lock() {
+                        let _ = writeln!(f, "[warn] {conflict}");
+                    }
+                }
             }
         }
     });
@@ -255,6 +390,7 @@ pub fn spawn_dsh(app: &tauri::AppHandle, launch: Launch) -> Result<Running, Stri
     // 收尾行），并把横幅前最近一条 `Error:` 行记作摘要随信号发出——加载页错误
     // 态直接可读，无须用户翻几百行日志（典型：插件 API 不匹配导致启动即崩）。
     let log_err = Arc::clone(&log);
+    let tail_err = Arc::clone(&tail);
     std::thread::spawn(move || {
         let reader = BufReader::new(stderr);
         let mut last_error_line: Option<String> = None;
@@ -262,6 +398,9 @@ pub fn spawn_dsh(app: &tauri::AppHandle, launch: Launch) -> Result<Running, Stri
             let Ok(line) = line else { break };
             if let Ok(mut f) = log_err.lock() {
                 let _ = writeln!(f, "[err] {line}");
+            }
+            if let Ok(mut t) = tail_err.lock() {
+                push_tail(&mut t, &line);
             }
             let stripped = line.trim_start_matches("[err] ").trim();
             if stripped.starts_with("Error:") || stripped.starts_with("AggregateError:") {
@@ -287,9 +426,13 @@ pub fn spawn_dsh(app: &tauri::AppHandle, launch: Launch) -> Result<Running, Stri
                 kill_tree(child.id() as u32);
                 let _ = child.wait();
             }
-            return Err(format!(
-                "服务在 {URL_WAIT_SECS} 秒内未报告监听地址。请查看日志: {}",
-                runtime::log_file().display()
+            let tail = tail.lock().map(|t| tail_text(&t)).unwrap_or_default();
+            return Err(with_tail(
+                &format!(
+                    "服务在 {URL_WAIT_SECS} 秒内未报告监听地址。请查看日志: {}",
+                    runtime::log_file().display()
+                ),
+                &tail,
             ));
         }
         match rx.recv_timeout(Duration::from_millis(500)) {
@@ -319,20 +462,24 @@ pub fn spawn_dsh(app: &tauri::AppHandle, launch: Launch) -> Result<Running, Stri
                 let hint = crash_detail
                     .map(|d| format!("（{d}）"))
                     .unwrap_or_default();
-                return Err(format!(
-                    "服务提前退出，未报告监听地址{hint}。请查看日志: {}",
-                    runtime::log_file().display()
+                let tail = tail.lock().map(|t| tail_text(&t)).unwrap_or_default();
+                return Err(with_tail(
+                    &format!(
+                        "服务提前退出，未报告监听地址{hint}。请查看日志: {}",
+                        runtime::log_file().display()
+                    ),
+                    &tail,
                 ));
             }
         }
     };
     // 成功：把句柄从槽位取回装进 Running（start_service 随即重新登记）。
-    // 槽位空只可能是壳退出流程已收走句柄（watch_child 在 restarting 置位期间不碰槽位），
+    // 槽位空只可能是壳退出流程已收走句柄（watch_child 在流程在途期间不碰槽位），
     // 此时进程树归退出路径管，本次启动按失败收场。
     let Some(child) = state.child.lock().unwrap().take() else {
         return Err("服务启动被壳退出流程中断".into());
     };
-    Ok(Running { child, base_url, launch_url })
+    Ok(Running { child, base_url, launch_url, startup_tail: tail })
 }
 
 /// 读取已记录的启动方式；无记录时重新探测。
@@ -363,24 +510,8 @@ fn resolve_launch(app: &tauri::AppHandle) -> Result<Launch, String> {
     }
 }
 
-/// `restarting` 闸锁：流程原子化的关键。空闲时置位并返回 true；已有流程在途返回 false
-/// （调用方整段静默放弃，与既有「并发双拉防护」语义一致）。
-///
-/// 不变式（0.1.17 起）：一条流程（收尾 → 翻转 → 探活 → 启动）从头到尾只取放这一把锁
-/// 一次，中途不释放——否则托盘断开等并发流程可在流程中途插入 stop/mode 翻转，
-/// 造成 mode/origin/UI 短暂分叉。锁内主体一律以 `_locked` 后缀命名，禁止再取本锁。
-/// 死锁面评估：持锁期间调用的 tray::rebuild/status/webview 均在主线程派发且主线程
-/// 从不取本锁（所有触达本锁的命令/托盘路径都先另起线程）；watch_child 每 3s tick
-/// 见置位即跳过（守护在流程期间暂停，与旧版 start_service 探活期间暂停同形）；
-/// 其余 child/proxy 锁的获取顺序恒为 restarting → child/proxy，无环。
-fn acquire_restarting(state: &tauri::State<AppState>) -> bool {
-    let mut r = state.restarting.lock().unwrap();
-    if *r {
-        return false;
-    }
-    *r = true;
-    true
-}
+/// `restarting` 闸锁已升级为排队语义的 FlowGate（见 FlowGate 文档）：acquire 阻塞
+/// 排队，流程原子性不变式与死锁面评估移至该处。
 
 /// 完整启动序列（锁内主体，须持 `restarting` 闸锁调用）：自举 → spawn → URL 解析 →
 /// HTTP 就绪 → 放行导航 → 进 Harness UI。
@@ -426,9 +557,15 @@ fn start_service_locked(app: &tauri::AppHandle) -> Result<(), String> {
     *state.child.lock().unwrap() = Some(running.child);
     status::set(app, "等待服务就绪（首次启动约需 10~60 秒）…");
     if !crate::readiness::wait_http_ok(&running.launch_url, Duration::from_secs(HEALTH_WAIT_SECS)) {
-        return Err(format!(
-            "服务未就绪。请查看日志: {}",
-            runtime::log_file().display()
+        // URL 已到但 HTTP 未就绪：服务多半卡在启动后半程（profile 依赖安装失败等），
+        // 尾环里正是最近报错，附进错误信息免翻日志
+        let tail = running.startup_tail.lock().map(|t| tail_text(&t)).unwrap_or_default();
+        return Err(with_tail(
+            &format!(
+                "服务未就绪。请查看日志: {}",
+                runtime::log_file().display()
+            ),
+            &tail,
         ));
     }
     // 就绪后订阅事件流：回合完成/审批请求 → 原生通知与任务栏闪烁
@@ -439,15 +576,13 @@ fn start_service_locked(app: &tauri::AppHandle) -> Result<(), String> {
 }
 
 /// 完整启动序列：自举 → spawn → URL 解析 → HTTP 就绪 → 放行导航 → 进 Harness UI。
-/// 手动重启与守护自动重启共用；整个流程持 `restarting` 闸锁（见 acquire_restarting
-/// 的不变式注释），在途时其他流程调用至此静默返回 Ok(())。
+/// 手动重启与守护自动重启共用；整个流程持 `restarting` 闸锁，在途时本调用排队等待
+/// （FlowGate 排队语义）——守护线程检测到退出后的重启意图不再被静默丢弃。
 pub fn start_service(app: &tauri::AppHandle) -> Result<(), String> {
     let state: tauri::State<AppState> = app.state();
-    if !acquire_restarting(&state) {
-        return Ok(());
-    }
+    state.restarting.acquire();
     let result = start_service_locked(app);
-    *state.restarting.lock().unwrap() = false;
+    state.restarting.release();
     result
 }
 
@@ -459,29 +594,6 @@ pub fn stop_child(app: &tauri::AppHandle) {
     if let Some(mut child) = child {
         kill_tree(child.id() as u32);
         let _ = child.wait();
-    }
-}
-
-/// 重启服务（托盘菜单 / 守护触发本地分支）：杀整树 → 回加载页 → 重新走启动序列
-/// （端口会变化，导航锁随之更新）。整个流程持 `restarting` 闸锁：并发流程（在途的
-/// 重启/断开/连接）见置位即整段静默放弃——不再出现旧版「锁外收尾杀掉在途流程
-/// 刚登记的 child、随后启动又静默 no-op」的中途分叉。
-pub fn restart_service(app: &tauri::AppHandle) {
-    let state: tauri::State<AppState> = app.state();
-    if !acquire_restarting(&state) {
-        return;
-    }
-    let result = (|| -> Result<(), String> {
-        stop_child(app);
-        // 撤销旧 origin 放行，回到加载页
-        *state.origin.lock().unwrap() = None;
-        status::set(app, "正在重启服务…");
-        webview::navigate_to_loader(app);
-        start_service_locked(app)
-    })();
-    *state.restarting.lock().unwrap() = false;
-    if let Err(e) = result {
-        status::fail(app, &e);
     }
 }
 
@@ -499,16 +611,14 @@ pub fn stop_proxy(app: &tauri::AppHandle) {
 /// 事件流直连网关（带凭证）→ 导航（经 pair?token= 种 cookie）。
 /// 页面以 http://127.0.0.1:<port>（反代）加载：dsh 视为本机浏览器（模型/设置完整可用），
 /// 回环天然是安全上下文；代理自动注入 x-remote-token，探活无须手工带头。
-/// 与 start_service 共用同一把 `restarting` 互斥锁，防本地/远程并发双拉；远程模式不落
+/// 与 start_service 共用同一把 `restarting` 闸锁，防本地/远程并发双拉；远程模式不落
 /// child 句柄（子进程归远端管），守护线程因 child=None 自然失活，不会误拉本地服务。
-/// 整个流程持闸锁（锁内主体），在途时其他流程调用至此静默返回 Ok(())。
+/// 整个流程持闸锁，在途时本调用排队等待（FlowGate 排队语义）。
 pub fn connect_remote_flow(app: &tauri::AppHandle) -> Result<(), String> {
     let state: tauri::State<AppState> = app.state();
-    if !acquire_restarting(&state) {
-        return Ok(());
-    }
+    state.restarting.acquire();
     let result = connect_remote_flow_locked(app);
-    *state.restarting.lock().unwrap() = false;
+    state.restarting.release();
     result
 }
 
@@ -562,16 +672,12 @@ fn connect_remote_flow_locked(app: &tauri::AppHandle) -> Result<(), String> {
 }
 
 /// 切回本地模式（加载页 switch_to_local 命令与托盘「断开远程，回到本地」共用）：
-/// 整个流程持 `restarting` 闸锁（0.1.17 竞态加固）：收尾本地 child/反代 → 模式翻转并
-/// 落盘 → 托盘菜单重建 → 撤 origin 回加载页 → 重启序列（start_service_locked，
-/// 锁内主体不再重复取锁）。在途的其它流程使本流程整段静默放弃——流程原子后不再有
-/// 「锁外收尾 vs 在途启动」的中途分叉（旧版：探活在途时收到断开，模式已翻远程→本地、
-/// 页面已回加载页，而启动静默 no-op，mode/UI 短暂背离）。
+/// 整个流程持 `restarting` 闸锁：收尾本地 child/反代 → 模式翻转并落盘 → 托盘菜单
+/// 重建 → 撤 origin 回加载页 → 重启序列（start_service_locked，锁内主体不再重复取锁）。
+/// 并发流程排队等待，流程原子性保证不再有「锁外收尾 vs 在途启动」的中途分叉。
 pub fn switch_to_local_flow(app: &tauri::AppHandle) {
     let state: tauri::State<AppState> = app.state();
-    if !acquire_restarting(&state) {
-        return;
-    }
+    state.restarting.acquire();
     let result = (|| -> Result<(), String> {
         // 防御性收尾：正常远程模式 child 恒为 None，但升级运行时等路径可能在远程模式下
         // 留下本地 child——不清掉会让 start_service 双拉本地实例
@@ -588,36 +694,34 @@ pub fn switch_to_local_flow(app: &tauri::AppHandle) {
         webview::navigate_to_loader(app);
         start_service_locked(app)
     })();
-    *state.restarting.lock().unwrap() = false;
+    state.restarting.release();
     if let Err(err) = result {
         status::fail(app, &err);
     }
 }
 
-/// 托盘「重启服务」/ 重启命令的统一入口：按当前模式分派。
-/// 本地走 restart_service（杀树重启，整流程持闸锁）；远程分支整流程持同一把闸锁：
-/// 先收掉残留 child（如升级运行时等路径在远程模式下拉起过的本地服务）与旧反代、
-/// 撤 origin 回加载页，再走 connect_remote_flow_locked（锁内主体）。模式读取与
-/// 分派本身不持锁——闸锁护的是「收尾+连接」整段原子。
+/// 托盘「重启服务」/ 重启命令的统一入口：按当前模式分派。整个流程持同一把闸锁
+/// （排队 acquire），且**模式读取移入锁内**——排队等到的时点模式可能已被前一流程
+/// 翻转，锁外读是脏读。本地/远程分支共用收尾段（stop_child + stop_proxy；本地模式
+/// proxy 恒为 None，stop 是无害空转），再按模式进入对应启动序列。
 pub fn restart_by_mode(app: &tauri::AppHandle) {
     let state: tauri::State<AppState> = app.state();
-    if *state.mode.lock().unwrap() != "remote" {
-        restart_service(app);
-        return;
-    }
-    if !acquire_restarting(&state) {
-        return;
-    }
+    state.restarting.acquire();
     let result = (|| -> Result<(), String> {
         // 远程重连前先收掉残留 child 与旧反代（connect_remote_flow_locked 开头还会再兜一道）
         stop_child(app);
         stop_proxy(app);
         *state.origin.lock().unwrap() = None;
         webview::navigate_to_loader(app);
-        status::set(app, "正在重连远程实例…");
-        connect_remote_flow_locked(app)
+        if *state.mode.lock().unwrap() == "remote" {
+            status::set(app, "正在重连远程实例…");
+            connect_remote_flow_locked(app)
+        } else {
+            status::set(app, "正在重启服务…");
+            start_service_locked(app)
+        }
     })();
-    *state.restarting.lock().unwrap() = false;
+    state.restarting.release();
     if let Err(e) = result {
         status::fail(app, &e);
     }
@@ -628,7 +732,7 @@ pub fn watch_child(app: &tauri::AppHandle) {
     loop {
         std::thread::sleep(Duration::from_secs(3));
         let state: tauri::State<AppState> = app.state();
-        if *state.restarting.lock().unwrap() {
+        if state.restarting.is_held() {
             continue;
         }
         let exited = {
@@ -684,6 +788,52 @@ mod tests {
         assert!(parse_web_url("dsh web: http://192.168.1.5:8080/").is_none());
         assert!(parse_web_url("dsh web: opening the default browser; pass --no-open to disable").is_none());
         assert!(parse_web_url("listening on port 8080").is_none());
+    }
+
+    /* ── 就绪地址一致性（同世代唯一事实） ── */
+    #[test]
+    fn accept_ready_first_wins_repeat_ignored_conflict_rejected() {
+        let mut seen: Option<(String, String)> = None;
+        // 首次命中：返回地址并定格
+        let first = accept_ready(&mut seen, "dsh web: http://127.0.0.1:4418/?token=t1").unwrap();
+        assert_eq!(first, Some(("http://127.0.0.1:4418".into(), "http://127.0.0.1:4418/?token=t1".into())));
+        // 同地址重复报（正常日志重放/多行）：忽略，不冲突
+        assert_eq!(
+            accept_ready(&mut seen, "dsh web: http://127.0.0.1:4418/?token=t1").unwrap(),
+            None
+        );
+        // 不同地址：冲突错误，保留首次事实
+        let err = accept_ready(&mut seen, "dsh web: http://127.0.0.1:9999/").unwrap_err();
+        assert!(err.contains("4418") && err.contains("9999"), "{err}");
+        assert_eq!(seen.as_ref().unwrap().0, "http://127.0.0.1:4418");
+        // 非 URL 行：始终 Ok(None)
+        assert_eq!(accept_ready(&mut seen, "listening on 8080").unwrap(), None);
+    }
+
+    /* ── 启动期输出尾环（诊断留证） ── */
+    #[test]
+    fn tail_ring_keeps_last_lines_and_truncates_by_chars() {
+        let mut tail = VecDeque::new();
+        for i in 0..(TAIL_LINES + 10) {
+            push_tail(&mut tail, &format!("line-{i}"));
+        }
+        assert_eq!(tail.len(), TAIL_LINES);
+        let text = tail_text(&tail);
+        assert!(text.contains(&format!("line-{}", TAIL_LINES + 9)), "保留最新行");
+        assert!(!text.contains("line-0"), "最旧行应被挤出");
+
+        // 按字符截断：多字节 UTF-8 不切半
+        let mut long = VecDeque::new();
+        push_tail(&mut long, &"错".repeat(TAIL_MAX_CHARS + 100));
+        let t = tail_text(&long);
+        assert_eq!(t.chars().count(), TAIL_MAX_CHARS + 1); // 1 个省略号 + 截断正文
+        assert!(t.starts_with('…'));
+
+        // 空尾环 → 空摘要，with_tail 原样返回不拼空段
+        let empty = VecDeque::new();
+        assert_eq!(tail_text(&empty), "");
+        assert_eq!(with_tail("失败原因", &tail_text(&empty)), "失败原因");
+        assert!(with_tail("失败原因", &tail_text(&tail)).contains("最近输出"));
     }
 
     /* ── 进程登记（D3 冷启动孤儿缺口：登记内容与占位语义） ── */

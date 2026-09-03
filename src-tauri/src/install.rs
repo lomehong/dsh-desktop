@@ -478,17 +478,13 @@ pub fn refresh_profile_plugins_if_core_changed() {
 
 /// 安装便携运行时（幂等）：Node 缺则下载解压，dsh 缺则 npm -g 安装固定版本。
 /// 每步经 status 更新到加载页。供首启引导与托盘升级共用。
+/// 与 supervisor 流程共用同一把 FlowGate 闸锁：在途流程未结束时排队等待而非静默
+/// 放弃——用户在服务启动中途点「安装运行环境」，安装请求不再凭空消失。
 pub fn install_runtime(app: &tauri::AppHandle) -> Result<(), String> {
     let state: tauri::State<crate::AppState> = app.state();
-    {
-        let mut r = state.restarting.lock().unwrap();
-        if *r {
-            return Ok(());
-        }
-        *r = true;
-    }
+    state.restarting.acquire();
     let result = install_runtime_inner(app);
-    *state.restarting.lock().unwrap() = false;
+    state.restarting.release();
     result
 }
 

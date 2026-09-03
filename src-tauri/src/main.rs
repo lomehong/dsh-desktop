@@ -33,8 +33,9 @@ struct AppState {
     /// 当前放行的 Harness origin（如 http://127.0.0.1:4418）；重启换端口时更新。
     origin: Mutex<Option<String>>,
     /// 启动/重启流程闸锁：一条流程（收尾/翻转/探活/启动）从头到尾持锁，其他流程
-    /// 见置位即整段静默放弃；守护线程每 3s tick 见置位跳过。不变式见 supervisor.rs。
-    restarting: Mutex<bool>,
+    /// acquire 时**排队等待**（FlowGate，0.1.28 排队语义）——不再静默放弃并发请求；
+    /// 守护线程每 3s tick 用 is_held 探测跳过。不变式见 supervisor.rs 的 FlowGate 注释。
+    restarting: supervisor::FlowGate,
     /// 事件流订阅世代号：每次服务启动 +1，旧订阅线程自检出局。
     events_gen: std::sync::atomic::AtomicU64,
     status: Mutex<StartupStatus>,
@@ -243,7 +244,7 @@ fn main() {
             restarts: Mutex::new(0),
             launch: Mutex::new(None),
             origin: Mutex::new(None),
-            restarting: Mutex::new(false),
+            restarting: supervisor::FlowGate::new(),
             events_gen: std::sync::atomic::AtomicU64::new(0),
             status: Mutex::new(StartupStatus::default()),
             // manage 在 setup 前：load_mode 是纯文件读（无 Tauri 依赖），此处初始化安全
