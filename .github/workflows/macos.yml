@@ -55,13 +55,25 @@ jobs:
     runs-on: macos-latest
     permissions:
       contents: write
+    # 矩阵出两份 dmg：Apple Silicon + Intel 各一，放进同一个 Release。v0.1.30 曾尝试用
+    # --target universal-apple-darwin 一个 dmg 覆盖双芯片，tauri-action@v0 当前解析的版本
+    # 不支持该参数（在 action 输入校验阶段就失败，整个 release 跑成 0 jobs / failure）。
+    # 改用社区广泛验证的「aarch64 + x86_64 各打一份」模式（dev.to 官方实践文章推荐），
+    # updater 的 latest.json 由 tauri-action 自动覆盖双架构，Intel/Apple Silicon
+    # 自动更新同源。文件比 universal 大约小一半（无重复代码段），代价是 Release 多一个附件。
+    strategy:
+      fail-fast: false
+      matrix:
+        arch:
+          - aarch64-apple-darwin
+          - x86_64-apple-darwin
     steps:
       - uses: actions/checkout@v4
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: aarch64-apple-darwin,x86_64-apple-darwin
+          targets: ${{ matrix.arch }}
 
       - name: Rust cache
         uses: swatinem/rust-cache@v2
@@ -72,11 +84,7 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/v')
         run: python3 scripts/sync-version.py "${{ github.ref_name }}"
 
-      # Universal 双芯片包（lipo 合并 aarch64 + x86_64）：一个 dmg 同时覆盖 Apple Silicon
-      # 与 Intel Mac。此前只发 aarch64，Intel iMac 因架构不兼容无法运行（Rosetta 2 只能
-      # 反向转译 x86_64 → ARM，Intel 上没有 ARM 模拟层）。updater 的 latest.json 由
-      # tauri-action 按 universal-apple-darwin 目标生成，双芯片自动更新同源。
-      - name: Build dmg + updater artifacts (Universal: Apple Silicon + Intel)
+      - name: Build dmg + updater artifacts (${{ matrix.arch }})
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -87,4 +95,4 @@ jobs:
           releaseName: "DSH Desktop ${{ github.ref_name }}"
           releaseDraft: true
           prerelease: false
-          args: --target universal-apple-darwin --bundles app,dmg
+          args: --target ${{ matrix.arch }} --bundles app,dmg
