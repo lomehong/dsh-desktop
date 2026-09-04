@@ -149,11 +149,18 @@ fn compose_agent_yaml(std_text: &str, block: &str) -> Result<String, String> {
     Ok(out)
 }
 
+/// 分身技能目录：home 内的 `skills/`（正斜杠输出，YAML/Windows 路径两相宜）。
+/// 壳对 ~/.dsh 零依赖：技能与 profile/会话一样收进专属 home 随包走。
+fn skills_dir(home: &PathBuf) -> String {
+    home.join("skills").display().to_string().replace('\\', "/")
+}
+
 /// 生成 profile 的 cordis.patch.yml（人设 / 技能目录 / 默认预设）。
-fn build_cordis_patch(f: &WizardFields) -> String {
+fn build_cordis_patch(home: &PathBuf, f: &WizardFields) -> String {
     format!(
-        "# ── 数字分身 ──────────────────────────────────────────────────────\n- id: system-prompt\n  config:\n    persona: >-\n{}\n\n- id: skill-filesystem\n  config:\n    directories:\n      - ~/.dsh/skills\n\n- id: agent-presets\n  config:\n    default: digital-twin\n",
-        persona_block(f)
+        "# ── 数字分身 ──────────────────────────────────────────────────────\n- id: system-prompt\n  config:\n    persona: >-\n{}\n\n- id: skill-filesystem\n  config:\n    directories:\n      - {}\n\n- id: agent-presets\n  config:\n    default: digital-twin\n",
+        persona_block(f),
+        skills_dir(home)
     )
 }
 
@@ -192,7 +199,9 @@ fn apply_files_with(home: &PathBuf, f: &WizardFields, std_text: &str) -> Result<
         &home.join(".agent-presets").join("digital-twin").join("preset.yml"),
         &format!("name: 数字分身\ndescription: {}（{}）的专属数字分身。\n", f.owner, f.owner_title),
     )?;
-    write_utf8(&home.join("profiles").join("web").join("cordis.patch.yml"), &build_cordis_patch(f))?;
+    // 技能目录就地建好：cordis.patch 指向的是 home 内路径，不该依赖外部 ~/.dsh
+    let _ = std::fs::create_dir_all(home.join("skills"));
+    write_utf8(&home.join("profiles").join("web").join("cordis.patch.yml"), &build_cordis_patch(home, f))?;
 
     if let (Some(bot), Some(secret)) = (f.bot_id.as_deref(), f.secret.as_deref()) {
         if !bot.trim().is_empty() && !secret.trim().is_empty() {
@@ -297,11 +306,18 @@ mod tests {
 
     #[test]
     fn cordis_patch_shape() {
-        let p = build_cordis_patch(&fields());
+        let home = std::env::temp_dir().join("dsh-wizard-patch-test");
+        let p = build_cordis_patch(&home, &fields());
         assert!(p.contains("- id: system-prompt"));
         assert!(p.contains("    persona: >-"));
         assert!(p.contains("- id: skill-filesystem"));
-        assert!(p.contains("      - ~/.dsh/skills"));
+        // 技能目录指向专属 home 内部（正斜杠），绝不指向 ~/.dsh
+        let expected = format!(
+            "      - {}",
+            home.join("skills").display().to_string().replace('\\', "/")
+        );
+        assert!(p.contains(&expected), "{p}");
+        assert!(!p.contains("~/.dsh"));
         assert!(p.contains("    default: digital-twin"));
     }
 

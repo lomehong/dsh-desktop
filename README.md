@@ -12,7 +12,7 @@ DeepSeek Harness（dsh）的桌面应用：Tauri 2 原生窗口 + 受监督的 H
 - **运行时管理**：优先使用 `%LOCALAPPDATA%\dsh-desktop-app-data\node` 便携运行时（Node 24 + 固定版本 dsh；旧 `dsh-desktop` 目录自动迁移，避免与 NSIS 卸载目录冲突），否则回退系统 `node`/`dsh`；全新机器在加载页一键「安装运行环境」（npmmirror 镜像下载 Node → npm 装固定版 dsh → 自动启动）。托盘可「升级 DSH」。
 - **桌面语义**：关闭=最小化到托盘（IM 渠道/长任务不中断）、托盘菜单（显示/重启/升级 DSH/检查应用更新/日志/数据目录/开机自启/退出）、单实例二次启动聚焦。
 - **无边框窗口**：decorum 悬浮标题栏（Windows 去原生边框 + 扁平自绘最小化/最大化/关闭按钮，保留 Snap Layout；macOS Overlay 红绿灯）。Harness 页面经初始化脚本整体下移 40px 让出顶栏——用 `body transform` 而非 `html padding`，使 fixed/absolute 定位的插件 overlay（右侧按钮簇、机器人状态栏）一并下移；decorum 悬浮条反向平移回顶部。Harness 页面（本地回环或已配对远程 origin）经 `http://*:* ` 通配 capability 仅授予窗口控制最小权限集（无文件/系统访问；能加载的页面由导航守卫约束）。关闭按钮走 `CloseRequested` → 语义仍为最小化到托盘。
-- **DSH_HOME**：沿用应用进程环境（默认共享 `~/.dsh`，保留 im-bot 绑定/共享记忆等用户数据）。
+- **DSH_HOME 完全独立**：dsh 使用专属 home（安装版 `%LOCALAPPDATA%\dsh-desktop-app-data\home`，便携版包内 `Data\home`），profile/预设/技能/凭证/会话全在里面随包走，**与 `~/.dsh` 零依赖**——绝不读写系统 dsh/persona 的共享目录（多版本交叉污染是历史真实故障源；旧版的一次性自动迁移已删除）。分身技能目录也在 home 内（`home/skills`）。
 
 ## 远程连接
 

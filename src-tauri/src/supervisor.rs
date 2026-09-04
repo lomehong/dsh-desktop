@@ -181,6 +181,53 @@ fn crash_banner(line: &str) -> Option<String> {
     }
 }
 
+/// 崩溃/退出错误串是否为「profile bundle 无法解析」特征（dsh loadProfile 对失联
+/// bundle 硬失败，真实故障：迁移后 dsh-better-sidebar 启动即崩）。匹配整个错误串
+/// 而非单行：失败路径会把启动尾环（含原始 Error 行）拼进错误信息。
+fn is_profile_bundle_error(msg: &str) -> bool {
+    msg.contains("cannot resolve profile bundle")
+}
+
+/// 从 bundle 解析错误串提取受影响 profile 名（纯函数便于单测）。优先取错误自带
+/// 修复提示 `dsh plugin --profile <name> install` 中的名字，退回 `profiles<sep><name>`
+/// 路径段（Windows `\`、Unix `/` 都认）；定位失败返回 None，调用方兜底全量补装。
+fn profiles_from_bundle_error(msg: &str) -> Option<Vec<String>> {
+    let token_after = |prefix: &str, from: usize| -> Option<String> {
+        let rest = msg.get(from + prefix.len()..)?;
+        let token: String = rest
+            .chars()
+            .take_while(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+            .collect();
+        (!token.is_empty()).then_some(token)
+    };
+    // 1) 修复提示：`--profile <name>`（名字在提示里裸出现，无引号）
+    let mut search = 0;
+    while let Some(rel) = msg[search..].find("--profile ") {
+        let abs = search + rel;
+        if let Some(name) = token_after("--profile ", abs) {
+            return Some(vec![name]);
+        }
+        search = abs + "--profile ".len();
+    }
+    // 2) 路径段：profiles\<name> / profiles/<name>
+    let mut search = 0;
+    while let Some(rel) = msg[search..].find("profiles") {
+        let abs = search + rel;
+        let rest = &msg[abs + "profiles".len()..];
+        let mut chars = rest.chars();
+        if matches!(chars.next(), Some('\\') | Some('/')) {
+            let token: String = chars
+                .take_while(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+                .collect();
+            if !token.is_empty() {
+                return Some(vec![token]);
+            }
+        }
+        search = abs + "profiles".len();
+    }
+    None
+}
+
 /// 进程登记（JSON）：壳 pid + dsh 子进程 pid + 实际端口。
 #[derive(serde::Serialize, serde::Deserialize)]
 struct PidRecord {
@@ -553,15 +600,46 @@ fn start_service_locked(app: &tauri::AppHandle) -> Result<(), String> {
             status::set(app, "检测到运行时包不完整，切换官方源重装 DSH…");
             install::force_reinstall_official()?;
         }
-        // 专用 home 初始化：首次运行把旧 ~/.dsh 用户数据迁进专属 home（跳过 node_modules）。
-        install::migrate_legacy_home()?;
         // 核心版本变化自愈：清空 profile 插件目录强制按新核心重装，防版本错位崩溃。
-        install::refresh_profile_plugins_if_core_changed();
+        // dsh 启动 loadProfile 只解析 profile bundle 不安装（真实故障：cannot resolve
+        // profile bundle "dsh-better-sidebar" 启动即崩），清空后必须主动补装，
+        // 不能等 dsh 自己处理。
+        let cleared = install::refresh_profile_plugins_if_core_changed();
+        if !cleared.is_empty() {
+            status::set(app, "正在安装 profile 插件（核心更新后重新解析扩展）…");
+            // 失败不阻断启动：bundle 缺失时 spawn 崩溃会走下方响应式自愈再补一轮
+            if let Err(e) = install::install_profile_plugins(&cleared, "核心更新") {
+                if let Some(mut log) = runtime::open_log_append() {
+                    let _ = writeln!(log, "[warn] profile 插件主动补装失败: {e}");
+                }
+            }
+        }
     }
     status::set(app, "正在启动 DSH 服务…");
     // spawn_dsh 内部已把 child 挂入 state（冷启动孤儿修复）；此处拿回 Running 后
-    // 用真实端口覆盖占位 pid 记录并重新登记句柄
-    let running = spawn_dsh(app, launch)?;
+    // 用真实端口覆盖占位 pid 记录并重新登记句柄。
+    // 响应式自愈：崩溃特征为 profile bundle 失联（profile 配置在场而插件实体缺失：
+    // 外部带入的 home、上次安装被打断等）→ 补装后重试一次；仍失败则原样上报
+    // （插件与核心 API 代际错位等无自动修法，错误页附带的崩溃摘要可读）。
+    // 仅重试一次，配合外层守护重启上限有界。
+    let running = match spawn_dsh(app, launch) {
+        Ok(r) => r,
+        Err(e) if is_profile_bundle_error(&e) => {
+            let profiles = profiles_from_bundle_error(&e).unwrap_or_else(install::profile_names);
+            status::set(app, "检测到 profile 插件缺失，正在自动修复后重启服务…");
+            if let Some(mut log) = runtime::open_log_append() {
+                let _ = writeln!(
+                    log,
+                    "[自愈] 启动崩溃为 profile bundle 失联，补装后重试: {}",
+                    profiles.join(",")
+                );
+            }
+            install::install_profile_plugins(&profiles, "启动自愈")
+                .map_err(|e2| format!("{e}\n[自愈失败] {e2}"))?;
+            spawn_dsh(app, launch)?
+        }
+        Err(e) => return Err(e),
+    };
     *state.origin.lock().unwrap() = Some(running.base_url.clone());
     write_pid_record(running.child.id() as u32, base_url_port(&running.base_url));
     *state.child.lock().unwrap() = Some(running.child);
@@ -918,4 +996,30 @@ mod tests {
          assert_eq!(base_url_port("http://127.0.0.1:44182"), 44182);
          assert_eq!(base_url_port("http://127.0.0.1"), 0);
      }
+
+    /* ── profile bundle 失联的响应式自愈（真实故障 2026-09） ── */
+    #[test]
+    fn bundle_error_detection_matches_whole_message() {
+        assert!(is_profile_bundle_error(
+            "服务提前退出，未报告监听地址（Error: dsh: cannot resolve profile bundle \"dsh-better-sidebar\" …）（Node.js v24.19.0）"
+        ));
+        assert!(is_profile_bundle_error("Error: dsh: cannot resolve profile bundle \"x\""));
+        assert!(!is_profile_bundle_error("Error: ECONNREFUSED 127.0.0.1:443"));
+        assert!(!is_profile_bundle_error("服务在 180 秒内未报告监听地址"));
+    }
+
+    #[test]
+    fn bundle_error_extracts_profile_from_fix_hint_first() {
+        // 真实崩溃消息（Windows 路径 + 修复提示并存）：提示里的名字优先
+        let msg = "Error: dsh: cannot resolve profile bundle \"dsh-better-sidebar\" from the dsh installation or C:\\Users\\lome\\AppData\\Local\\dsh-desktop\\home\\profiles\\web; run 'dsh plugin --profile web install' if its dependency is not installed";
+        assert_eq!(profiles_from_bundle_error(msg), Some(vec!["web".to_string()]));
+        // Unix 路径无修复提示：从 profiles/<name> 路径段取
+        let unix = "Error: dsh: cannot resolve profile bundle \"x\" or /home/lome/Library/Application Support/dsh-desktop/home/profiles/web; dependency missing";
+        assert_eq!(profiles_from_bundle_error(unix), Some(vec!["web".to_string()]));
+        // 提示存在但紧跟非名字字符：跳过该处继续找路径段
+        let odd = "hint: run 'dsh plugin --profile  install'; profiles\\web is the dir";
+        assert_eq!(profiles_from_bundle_error(odd), Some(vec!["web".to_string()]));
+        // 无关消息：None（调用方兜底全量补装）
+        assert_eq!(profiles_from_bundle_error("Error: boom"), None);
+    }
 }
