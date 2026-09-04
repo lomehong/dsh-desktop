@@ -562,14 +562,17 @@ pub fn sso_login(endpoints: &AccountEndpoints, wait: Duration) -> Result<SsoSess
 }
 
 /// 拉起系统浏览器（Windows cmd start / macOS open / Linux xdg-open）。
+/// Windows 用 runtime::no_window 隐藏子进程控制台——裸 cmd /C start 会闪黑窗。
 fn open_browser(url: &str) -> Result<(), String> {
     #[cfg(windows)]
     {
         // start 的第一个引号参数是窗口标题占位；url 必须是第二个参数
-        let st = std::process::Command::new("cmd")
-            .args(["/C", "start", "", url])
-            .spawn();
-        return st.map(|_| ()).map_err(|e| format!("打开系统浏览器失败：{e}"));
+        let mut c = std::process::Command::new("cmd");
+        c.args(["/C", "start", "", url]);
+        return crate::runtime::no_window(&mut c)
+            .spawn()
+            .map(|_| ())
+            .map_err(|e| format!("打开系统浏览器失败：{e}"));
     }
     #[cfg(target_os = "macos")]
     {
