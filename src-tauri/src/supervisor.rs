@@ -181,6 +181,26 @@ fn crash_banner(line: &str) -> Option<String> {
     }
 }
 
+/// 识别「本地链接插件缺依赖」崩溃并生成可操作提示（纯函数便于单测）。
+/// cordis-plugin-loader 对 link: 到 profile 之外的插件不做裸导入重映射，按插件
+/// 真实路径解析依赖——dev 仓库没装依赖就 ERR_MODULE_NOT_FOUND（真实故障：digital-twin
+/// 套件 link: 安装后 Cannot find package '@deepseek-ai/schemastery'）。提示直接给出
+/// 修复动作，错误页不再只有堆栈。
+fn local_plugin_hint(line: &str) -> Option<String> {
+    const PKG_MARK: &str = "Cannot find package '";
+    const FROM_MARK: &str = "imported from ";
+    let pkg_i = line.find(PKG_MARK)? + PKG_MARK.len();
+    let pkg: String = line[pkg_i..].chars().take_while(|c| *c != '\'').collect();
+    let from_i = line.find(FROM_MARK)? + FROM_MARK.len();
+    let from = line[from_i..].trim();
+    if pkg.is_empty() || from.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "（本地链接插件缺依赖 {pkg}：在插件源码目录或其仓库根安装依赖后重启，例如 cd 所在仓库执行 pnpm install；插件源码位于 {from}）"
+    ))
+}
+
 /// 崩溃/退出错误串是否为「profile bundle 无法解析」特征（dsh loadProfile 对失联
 /// bundle 硬失败，真实故障：迁移后 dsh-better-sidebar 启动即崩）。匹配整个错误串
 /// 而非单行：失败路径会把启动尾环（含原始 Error 行）拼进错误信息。
@@ -461,7 +481,11 @@ pub fn spawn_dsh(app: &tauri::AppHandle, launch: Launch) -> Result<Running, Stri
             }
             let stripped = line.trim_start_matches("[err] ").trim();
             if stripped.starts_with("Error:") || stripped.starts_with("AggregateError:") {
-                last_error_line = Some(stripped.to_string());
+                let mut summary = stripped.to_string();
+                if let Some(hint) = local_plugin_hint(stripped) {
+                    summary.push_str(&hint);
+                }
+                last_error_line = Some(summary);
             }
             if let Some(banner) = crash_banner(&line) {
                 let _ = tx_err.send(SpawnSignal::Crashed(match &last_error_line {
@@ -996,6 +1020,18 @@ mod tests {
          assert_eq!(base_url_port("http://127.0.0.1:44182"), 44182);
          assert_eq!(base_url_port("http://127.0.0.1"), 0);
      }
+
+    #[test]
+    fn local_plugin_hint_extracts_pkg_and_source_dir() {
+        let line = "Error: failed to import loader entry redact (@dsh-extra/dsh-redact): Cannot find package '@deepseek-ai/schemastery' imported from E:\\Code\\digital-twin\\dsh-redact\\lib\\index.js";
+        let hint = local_plugin_hint(line).unwrap();
+        assert!(hint.contains("@deepseek-ai/schemastery"), "{hint}");
+        assert!(hint.contains("pnpm install"), "{hint}");
+        assert!(hint.contains("E:\\Code\\digital-twin\\dsh-redact\\lib\\index.js"), "{hint}");
+        // 非此类崩溃：不给提示
+        assert!(local_plugin_hint("Error: dsh: cannot resolve profile bundle \"x\"").is_none());
+        assert!(local_plugin_hint("Error: ECONNREFUSED").is_none());
+    }
 
     /* ── profile bundle 失联的响应式自愈（真实故障 2026-09） ── */
     #[test]
