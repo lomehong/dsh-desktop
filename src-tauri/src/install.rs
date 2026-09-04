@@ -134,18 +134,37 @@ pub fn installed_dsh_version() -> Option<String> {
         .map(String::from)
 }
 
+/// 构造一条运行 npm 的 Command。
+/// Windows：直接 node + npm-cli.js，避开 cmd.exe /C npm.cmd 的窗口闪烁（v0.1.28 修复）；
+/// 找不到 npm-cli.js 时回退到 cmd.exe /C npm.cmd 兼容路径。
+/// Unix：直接 bin/npm（已是真二进制）。
+fn npm_command() -> Result<Command, String> {
+    #[cfg(windows)]
+    {
+        let node = runtime::node_exe();
+        if let Some(cli) = runtime::portable_npm_cli_js().filter(|_| node.exists()) {
+            let mut c = Command::new(node);
+            c.arg(cli);
+            return Ok(c);
+        }
+        // 回退：cmd.exe /C npm.cmd
+        let npm = npm_tool().ok_or("便携运行时未安装，无法构造 npm 命令")?;
+        let mut c = Command::new("cmd.exe");
+        c.args(["/D", "/C"]).arg(&npm);
+        return Ok(c);
+    }
+    #[cfg(not(windows))]
+    {
+        let npm = npm_tool().ok_or("便携运行时未安装，无法构造 npm 命令")?;
+        Ok(Command::new(&npm))
+    }
+}
+
 /// 查询 npm registry 上 @deepseek-ai/dsh 指定 dist-tag 的版本。
 fn dist_tag_version(tag: &str) -> Result<String, String> {
-    let npm = npm_tool().ok_or("便携运行时未安装，无法查询版本")?;
     let mut last_err = String::new();
     for registry in npm_registry() {
-        let mut c = if cfg!(windows) {
-            let mut c = Command::new("cmd.exe");
-            c.args(["/C"]).arg(&npm);
-            c
-        } else {
-            Command::new(&npm)
-        };
+        let mut c = npm_command()?;
         c.args(["view", "@deepseek-ai/dsh", &format!("dist-tags.{tag}")]).arg(&registry);
         prepend_node_path(&mut c);
         match no_window(&mut c).output() {
@@ -226,15 +245,8 @@ pub fn force_reinstall_official() -> Result<(), String> {
 
 fn npm_install_dsh_once(version: &str, registry: &str) -> Result<(), String> {
     let node_dir = active_root().join("node");
-    let npm_cmd = npm_tool().ok_or("便携 Node 缺少 npm")?;
     let mut log = runtime::open_log_append();
-    let mut c = if cfg!(windows) {
-        let mut c = Command::new("cmd.exe");
-        c.args(["/C"]).arg(&npm_cmd);
-        c
-    } else {
-        Command::new(&npm_cmd)
-    };
+    let mut c = npm_command()?;
     c.args(["install", "-g", &format!("@deepseek-ai/dsh@{version}"), "--prefix"])
         .arg(&node_dir)
         .arg(registry);

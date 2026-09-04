@@ -973,8 +973,9 @@ dependencies = [
 
 [[package]]
 name = "dsh-desktop"
-version = "0.1.27"
+version = "0.1.29"
 dependencies = [
+ "objc2",
  "serde",
  "serde_json",
  "tauri",
@@ -986,6 +987,7 @@ dependencies = [
  "tauri-plugin-updater",
  "tokio",
  "tungstenite",
+ "windows 0.61.3",
 ]
 
 [[package]]

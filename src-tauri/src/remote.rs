@@ -89,6 +89,95 @@ pub fn save(cfg: &RemoteConfig) -> Result<(), String> {
     save_config_to(&config_path(), cfg, encrypt_enabled())
 }
 
+/* ── 多实例管理（v0.1.29+，D2）────────────────────────────────────────────
+ * remotes.json = Vec<StoredConfig>（与 remote.json 同形状、同加密规则）。
+ * 活动实例仍是 remote.json（向后兼容，supervisor/连接流程零改动）；
+ * 配对成功时 remember_saved 归档一份；托盘「已保存的远程实例」子菜单点击
+ * → load_saved 解密 token → save 为活动 → restart_by_mode 走既有远程序列。
+ * ──────────────────────────────────────────────────────────────────────── */
+
+/// 已保存实例列表条目（展示用，不含 token）。
+#[derive(Clone, serde::Serialize)]
+pub struct SavedRemote {
+    pub address: String,
+    pub origin: String,
+    pub paired_at: u64,
+}
+
+/// 列表上限：托盘子菜单滚屏可读性优先。
+const SAVED_CAP: usize = 8;
+
+fn saved_path() -> std::path::PathBuf {
+    crate::runtime::runtime_root().join("remotes.json")
+}
+
+/// 列出已保存实例（新→旧）。损坏文件按空列表处理（下次 remember_saved 覆写重建）。
+pub fn saved_list() -> Vec<SavedRemote> {
+    let Ok(text) = std::fs::read_to_string(saved_path()) else {
+        return vec![];
+    };
+    let Ok(list) = serde_json::from_str::<Vec<StoredConfig>>(&text) else {
+        return vec![];
+    };
+    list.into_iter()
+        .map(|s| SavedRemote { address: s.address, origin: s.origin, paired_at: s.paired_at })
+        .collect()
+}
+
+/// 读取某已保存实例的完整凭据（token 解密失败 → None，提示重新配对）。
+pub fn load_saved(address: &str) -> Option<RemoteConfig> {
+    let text = std::fs::read_to_string(saved_path()).ok()?;
+    let list = serde_json::from_str::<Vec<StoredConfig>>(&text).ok()?;
+    let stored = list.into_iter().find(|s| s.address == address)?;
+    let crypto = crypto_impl();
+    let token = match stored.token_enc {
+        Some(blob) => crypto(&blob, Direction::Unprotect).unwrap_or_default(),
+        None => stored.token,
+    };
+    if token.is_empty() {
+        return None;
+    }
+    Some(RemoteConfig {
+        address: stored.address,
+        origin: stored.origin,
+        token,
+        paired_at: stored.paired_at,
+    })
+}
+
+/// 归档一份已配对实例（去重按 address，最新在前，截断到 SAVED_CAP）。
+/// 尽力而为：失败静默——多实例列表缺失不影响单实例主流程。
+pub fn remember_saved(cfg: &RemoteConfig) {
+    let mut list: Vec<StoredConfig> = std::fs::read_to_string(saved_path())
+        .ok()
+        .and_then(|t| serde_json::from_str(&t).ok())
+        .unwrap_or_default();
+    list.retain(|s| s.address != cfg.address);
+    let crypto = crypto_impl();
+    let encrypt = encrypt_enabled();
+    let mut stored = StoredConfig {
+        address: cfg.address.clone(),
+        origin: cfg.origin.clone(),
+        token: cfg.token.clone(),
+        token_enc: None,
+        paired_at: cfg.paired_at,
+    };
+    if encrypt {
+        if let Some(blob) = crypto(&cfg.token, Direction::Protect) {
+            stored.token_enc = Some(blob);
+            stored.token.clear();
+        }
+    }
+    list.insert(0, stored);
+    list.truncate(SAVED_CAP);
+    let tmp = saved_path().with_extension("json.tmp");
+    if let Ok(text) = serde_json::to_string_pretty(&list) {
+        if std::fs::write(&tmp, text).is_ok() {
+            let _ = std::fs::rename(&tmp, saved_path());
+        }
+    }
+}
+
 /// 读配置并报告 token 是否来自旧明文形状（无 `tokenEnc` 字段）——`load()` 据此惰性迁移。
 /// crypto 为加解密 seam（测试注入假实现；真实现 = DPAPI）。
 fn load_config_detailed(
@@ -191,11 +280,13 @@ fn dpapi_script(input: &str, dir: Direction) -> String {
 
 /// Windows 真实现：PowerShell + DPAPI(CurrentUser)。stdout 起始 `ERR: ` / 空输出 / 超时
 /// / spawn 失败一律 None（调用方决定回退明文或置空 token）。
+/// v0.1.28+ 加 -WindowStyle Hidden：除 CREATE_NO_WINDOW 之外的第二道防线，
+/// 防止 PowerShell 加载时偶发弹窗闪烁（远程模式首次配对 / 凭据轮转路径）。
 #[cfg(windows)]
 fn dpapi_windows(input: &str, dir: Direction) -> Option<String> {
     let script = dpapi_script(input, dir);
     let mut command = Command::new("powershell");
-    command.args(["-NoProfile", "-Command", &script]);
+    command.args(["-NoProfile", "-WindowStyle", "Hidden", "-Command", &script]);
     let mut child = crate::runtime::no_window(&mut command)
         .stdout(Stdio::piped())
         .stderr(Stdio::null())

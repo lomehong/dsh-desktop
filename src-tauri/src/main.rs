@@ -4,8 +4,12 @@
 // 无条件 GUI 子系统（debug 也不弹控制台）；诊断输出全部走日志文件。
 #![windows_subsystem = "windows"]
 
+mod diagnostics;
 mod events;
+mod i18n;
 mod install;
+mod jumplist;
+mod notifications;
 mod persona;
 mod readiness;
 mod remote;
@@ -15,6 +19,7 @@ mod status;
 mod supervisor;
 mod tray;
 mod webview;
+mod window_state;
 
 use std::process::Child;
 use std::sync::Mutex;
@@ -141,13 +146,15 @@ fn connect_remote(
     // 配对请求（网络往返最长 ~16s）先在轮询通道可见，避免连接屏停在旧状态
     status::connect_screen(&app, "正在配对远程实例…");
     let token = remote::pair(&addr, &code)?;
-    let origin = format!("http://{addr}");
-    remote::save(&remote::RemoteConfig {
-        address: addr,
-        origin,
+    let cfg = remote::RemoteConfig {
+        address: addr.clone(),
+        origin: format!("http://{addr}"),
         token,
         paired_at: crate::runtime::unix_now() * 1000,
-    })?;
+    };
+    remote::save(&cfg)?;
+    // v0.1.29 D2：归档到多实例列表（去重、最新在前），供托盘「已保存的远程实例」直连
+    remote::remember_saved(&cfg);
     remote::save_mode("remote");
     let state: tauri::State<AppState> = app.state();
     *state.mode.lock().unwrap() = "remote";
@@ -222,13 +229,100 @@ fn restart_service_cmd(window: tauri::WebviewWindow, app: tauri::AppHandle) {
     std::thread::spawn(move || supervisor::restart_by_mode(&handle));
 }
 
+/* ── 通知中心（D1b）：IPC 只服务 mini 窗口（tauri.localhost 本地页，caller_is_local 天然放行） ── */
+
+/// 通知历史（最新在前，上限 50）。
+#[tauri::command]
+fn get_notifications(window: tauri::WebviewWindow) -> Vec<notifications::NoticeRecord> {
+    if !caller_is_local(&window) {
+        return vec![];
+    }
+    notifications::list()
+}
+
+/// 清空通知历史（通知中心「清空」按钮）。
+#[tauri::command]
+fn clear_notifications(window: tauri::WebviewWindow) {
+    if !caller_is_local(&window) {
+        return;
+    }
+    notifications::clear();
+}
+
+/// JumpList / 二次启动转发过来的动作分派（D3b）。
+/// 返回 true 表示 argv 命中了动作参数（调用方据此跳过默认的「聚焦窗口」逻辑——动作本身
+/// 已含正确的窗口行为）。
+fn handle_cli_action(app: &tauri::AppHandle, argv: &[String]) -> bool {
+    let mut handled = false;
+    for a in argv {
+        let matched = match a.as_str() {
+            "--open-main" => {
+                if let Some(w) = app.get_webview_window("main") {
+                    let _ = w.show();
+                    let _ = w.set_focus();
+                }
+                tray::clear_unread(app);
+                true
+            }
+            "--restart-service" => {
+                let handle = app.clone();
+                std::thread::spawn(move || supervisor::restart_by_mode(&handle));
+                true
+            }
+            "--connect-remote" => {
+                webview::navigate_to_loader(app);
+                status::connect_screen(app, "连接远程实例");
+                if let Some(w) = app.get_webview_window("main") {
+                    let _ = w.show();
+                    let _ = w.set_focus();
+                }
+                true
+            }
+            "--open-log" => {
+                webview::open_external(&runtime::log_file().display().to_string());
+                true
+            }
+            "--export-diagnostics" => {
+                let handle = app.clone();
+                std::thread::spawn(move || match diagnostics::export(&handle) {
+                    Ok(path) => {
+                        status::set(&handle, &format!("诊断包已导出：{}", path.display()));
+                        webview::open_external(&path.display().to_string());
+                    }
+                    Err(e) => status::fail(&handle, &e),
+                });
+                true
+            }
+            "--open-notifications" => {
+                tray::clear_unread(app);
+                if let Err(e) = notifications::open_window(app) {
+                    if let Some(mut log) = runtime::open_log_append() {
+                        use std::io::Write;
+                        let _ = writeln!(log, "[通知] 打开通知中心失败: {e}");
+                    }
+                }
+                true
+            }
+            _ => false,
+        };
+        handled |= matched;
+    }
+    handled
+}
+
 fn main() {
     tauri::Builder::default()
-        // 二次启动：聚焦已有窗口（须最先注册）
-        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
-            if let Some(w) = app.get_webview_window("main") {
-                let _ = w.show();
-                let _ = w.set_focus();
+        // 二次启动：聚焦已有窗口（须最先注册）。argv 若带 JumpList 动作参数则执行动作
+        // （D3b：任务栏右键「打开主页面/重启服务/连接远程实例/…」都经二次启动转发）。
+        .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
+            let args: Vec<String> = argv.iter().cloned().collect();
+            if !handle_cli_action(app, &args[1.min(args.len())..]) {
+                if let Some(w) = app.get_webview_window("main") {
+                    let _ = w.show();
+                    let _ = w.set_focus();
+                }
+                // 用户已看向主窗口：未读角标清零（D1）
+                tray::clear_unread(app);
             }
         }))
         .plugin(tauri_plugin_autostart::init(
@@ -261,12 +355,25 @@ fn main() {
             show_connect,
             get_remote_address,
             switch_to_local,
-            restart_service_cmd
+            restart_service_cmd,
+            get_notifications,
+            clear_notifications
         ])
         .setup(|app| {
             let handle = app.handle().clone();
             webview::create_main_window(&handle)?;
             tray::build_tray(&handle)?;
+            // D3b：Windows 任务栏右键任务列表（尽力而为，失败仅记日志）
+            jumplist::update(&handle);
+            // 冷启动动作参数（JumpList 任务在无实例时点击 = 冷启动带参）：延后到线程执行，
+            // 让 setup 先完成、加载页先起来
+            let cold_args: Vec<String> = std::env::args().skip(1).collect();
+            if !cold_args.is_empty() {
+                let h = handle.clone();
+                std::thread::spawn(move || {
+                    handle_cli_action(&h, &cold_args);
+                });
+            }
             // CI/脚本用：--upgrade-dsh 检查并升级 DSH 后直接退出（不启动服务）
             if upgrade_dsh_flag() {
                 let handle = app.handle().clone();
@@ -320,15 +427,28 @@ fn main() {
             // 关闭按钮 = 最小化到托盘；服务继续运行（IM 渠道/长任务不中断）
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 if window.label() == "main" {
+                    // v0.1.28+ 保存窗口状态：hide 之前快照（位置/尺寸/显示器/最大化）
+                    if let Some(state) = window_state::from_window(window) {
+                        window_state::save(&state);
+                    }
                     api.prevent_close();
                     let _ = window.hide();
                 }
             }
+            // Moved/Resized 也即时刷新状态（不落盘——避免拖拽期频繁 IO；
+            // 落盘集中在 CloseRequested 与 Exit，与启动回放的写盘分离）。
         })
         .build(tauri::generate_context!())
         .expect("初始化 DSH Desktop 失败")
         .run(|app, event| {
             if let tauri::RunEvent::Exit = event {
+                // v0.1.28+ 退出路径补存一次窗口状态（托盘「退出」不经 CloseRequested，
+                // 这里兜底——不然上次启动的位置记忆会丢）。
+                if let Some(w) = app.get_webview_window("main") {
+                    if let Some(state) = window_state::from_window(&w) {
+                        window_state::save(&state);
+                    }
+                }
                 // 真正退出：杀掉整个 dsh 进程树，不留孤儿 node；同时清掉进程登记
                 let state: tauri::State<AppState> = app.state();
                 let child = state.child.lock().unwrap().take();

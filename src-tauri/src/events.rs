@@ -444,6 +444,8 @@ pub struct Notice {
 
 fn present(app: &tauri::AppHandle, notice: &Notice) {
     use tauri_plugin_notification::NotificationExt;
+    // v0.1.29+ D1b：任何通知都进通知中心历史（含前台场景）；随后按需弹 OS 通知
+    crate::notifications::record(app, &notice.title, &notice.body);
     let Some(w) = app.get_webview_window("main") else { return };
     let focused = w.is_focused().unwrap_or(false);
     let visible = w.is_visible().unwrap_or(false);
@@ -457,6 +459,12 @@ fn present(app: &tauri::AppHandle, notice: &Notice) {
             .title(&notice.title)
             .body(&notice.body)
             .show();
+        // v0.1.29+ 未读计数：窗口不在前台时通知累计到托盘角标（D1），打开主窗口清零
+        let n = crate::tray::bump_unread(app);
+        if let Some(mut log) = crate::runtime::open_log_append() {
+            use std::io::Write;
+            let _ = writeln!(log, "[events] 通知未读计数 → {n}: {}", notice.title);
+        }
     }
 }
 

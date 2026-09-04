@@ -2,6 +2,8 @@
 //! 其余 http(s) 一律交给系统浏览器；Harness 页面不持有任何 Tauri IPC 权限。
 use tauri::Manager;
 
+use crate::runtime;
+
 /// 本地加载页 / Tauri 内部地址（Windows 默认 app origin 为 http://tauri.localhost）。
 pub fn is_local_url(u: &str) -> bool {
     u.starts_with("tauri://localhost")
@@ -195,6 +197,21 @@ pub fn create_main_window(app: &tauri::AppHandle) -> tauri::Result<()> {
         .build()?;
     use tauri_plugin_decorum::WebviewWindowExt;
     window.create_overlay_titlebar()?;
+    // v0.1.28+ 应用保存的窗口位置/尺寸/显示器。失败静默：状态文件损坏或显示器已拔出
+    // 等场景走默认（窗口构造器已设的 1280×800 center）；apply 已做显示器/越界夹紧。
+    if let Some(state) = crate::window_state::load() {
+        let outcome = crate::window_state::apply(&window, &state);
+        if outcome != crate::window_state::ApplyOutcome::Applied {
+            if let Some(mut log) = runtime::open_log_append() {
+                use std::io::Write;
+                let _ = writeln!(
+                    log,
+                    "[窗口] 状态回放降级: {:?}（保存的显示器可能已拔出或位置越界）",
+                    outcome
+                );
+            }
+        }
+    }
     Ok(())
 }
 
@@ -221,6 +238,8 @@ pub fn navigate_to_harness(app: &tauri::AppHandle, launch_url: &str) {
         let _ = w.show();
         let _ = w.set_focus();
     }
+    // 主窗口带到前台：未读角标清零（D1）
+    crate::tray::clear_unread(app);
 }
 
 /// 把主窗口导回本地加载页（重启期间显示进度）。
@@ -236,9 +255,41 @@ pub fn navigate_to_loader(app: &tauri::AppHandle) {
     }
 }
 
+/// 任务栏进度（D3）：由 status::push_frame 每帧调用。
+/// percent=None 且非就绪 → 保持当前；ready → 推满后隐藏；error → 错误红态。
+/// 跨平台语义（tauri 内建）：Windows=任务栏进度条，macOS=Dock 图标进度，Linux 按
+/// Normal 处理（Indeterminate/Paused/Error 在部分平台降级）——无需平台分支。
+pub fn taskbar_progress(app: &tauri::AppHandle, percent: Option<u8>, error: bool, ready: bool) {
+    // tauri::runtime 模块是私有的；ProgressBarStatus 经 tauri::window 再导出
+    use tauri::window::{ProgressBarState, ProgressBarStatus};
+    let Some(w) = app.get_webview_window("main") else { return };
+    let state = if ready {
+        // 就绪：推满一帧绿色，再隐藏（避免停留在任务栏上的残影）
+        let _ = w.set_progress_bar(ProgressBarState {
+            status: Some(ProgressBarStatus::Normal),
+            progress: Some(100),
+        });
+        ProgressBarState { status: Some(ProgressBarStatus::None), progress: None }
+    } else if error {
+        ProgressBarState {
+            status: Some(ProgressBarStatus::Error),
+            progress: Some(percent.unwrap_or(0) as u64),
+        }
+    } else {
+        match percent {
+            Some(p) => ProgressBarState {
+                status: Some(ProgressBarStatus::Normal),
+                progress: Some(p as u64),
+            },
+            // 未识别阶段：保持现状（None 状态会隐藏进度条，比闪烁更差）
+            None => return,
+        }
+    };
+    let _ = w.set_progress_bar(state);
+}
+
 /// 用系统默认程序打开 URL / 路径。
-pub fn open_external(target: &str) {
-    #[cfg(windows)]
+pub fn open_external(target: &str) {    #[cfg(windows)]
     let mut cmd = {
         let mut c = std::process::Command::new("cmd.exe");
         c.args(["/C", "start", "", target]);

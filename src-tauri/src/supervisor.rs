@@ -313,22 +313,32 @@ pub fn spawn_dsh(app: &tauri::AppHandle, launch: Launch) -> Result<Running, Stri
             c
         }
         Launch::System => {
-            // 系统 node + 全局 dsh 命令
-            #[cfg(windows)]
-            {
-                // 经 cmd 调用以解析 PATH 上的 dsh.cmd
-                let mut c = Command::new("cmd.exe");
-                c.args(["/C", "dsh", "web", "--no-open", "--port", "0"]);
-                c
+            // 系统 node + 全局 dsh 包：直接 node + bin.js，避免 cmd.exe /C dsh.cmd
+            // 启动期弹窗闪烁（v0.1.28 修复）。node / bin.js 路径由 runtime 探测并缓存。
+            let node = runtime::find_system_node().ok_or_else(|| {
+                "未在 PATH 上找到 node，请先安装 Node.js 后重试".to_string()
+            })?;
+            let bin = runtime::find_system_dsh_bin().ok_or_else(|| {
+                "未找到 @deepseek-ai/dsh 全局安装，请执行 npm install -g @deepseek-ai/dsh".to_string()
+            })?;
+            let mut c = Command::new(node);
+            c.arg(bin).arg("web");
+            // 容错：镜像旧包可能缺 --no-open，按实际能力决定是否传，避免「unknown option」崩溃
+            if install::web_supports_no_open() {
+                c.arg("--no-open");
             }
-            #[cfg(not(windows))]
-            {
-                let mut c = Command::new("dsh");
-                c.args(["web", "--no-open", "--port", "0"]);
-                c
-            }
+            c.args(["--port", "0"]);
+            c
         }
     };
+    // 多 Agent 设备消毒：opencode 安装器会把 opencode 的御符 agent token 写进
+    // 用户级环境变量 YUYI_TOKEN（HKCU\Environment）。凭证服务（dsh-credentials-local）
+    // 的解析层序里「继承的进程环境」优先级最高、压过 $DSH_HOME/.credentials.yaml，
+    // dsh 子进程一旦继承就会被 dsh-yuyi 等插件借 opencode 身份连 hub（hub 侧身份
+    // 错配、吊销联动失效）。dsh 适配器 token 的正确来源是 dsh 凭证库（设置 UI 录入）
+    // 或 ~/.yuyi/dsh-token（Yuyi 安装器 dsh 分支写入），绝不继承用户级 YUYI_TOKEN。
+    // YUYI_HUB / YUYI_DEVICE / YUYI_YUFU_URL 是设备级公共配置（安装器语义），保留继承。
+    cmd.env_remove("YUYI_TOKEN");
     cmd.stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -698,6 +708,26 @@ pub fn switch_to_local_flow(app: &tauri::AppHandle) {
     if let Err(err) = result {
         status::fail(app, &err);
     }
+}
+
+/// 连接已保存的远程实例（托盘「已保存的远程实例」子菜单，D2 多实例）：
+/// 解密该实例 token → 升为活动 remote.json → 翻模式 → 走既有 restart_by_mode
+/// 远程序列（FlowGate 排队/托盘重建/连接屏全复用）。token 解密失败给出重新配对文案。
+pub fn connect_saved(app: &tauri::AppHandle, address: &str) {
+    let Some(cfg) = crate::remote::load_saved(address) else {
+        crate::status::fail(app, "已保存实例的凭证无法读取，请在连接屏重新配对");
+        return;
+    };
+    if crate::remote::save(&cfg).is_err() {
+        crate::status::fail(app, "保存活动实例失败");
+        return;
+    }
+    crate::remote::save_mode("remote");
+    let state: tauri::State<AppState> = app.state();
+    *state.mode.lock().unwrap() = "remote";
+    crate::tray::rebuild(app);
+    crate::status::set(app, &format!("正在连接已保存的远程实例 {address}…"));
+    restart_by_mode(app);
 }
 
 /// 托盘「重启服务」/ 重启命令的统一入口：按当前模式分派。整个流程持同一把闸锁

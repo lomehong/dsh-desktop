@@ -26,6 +26,11 @@
     display: flex; align-items: center; justify-content: center;
     font-size: 38px; font-weight: 700;
     box-shadow: 0 10px 30px rgba(74, 108, 247, 0.35);
+    animation: breathe 3.2s ease-in-out infinite;
+  }
+  @keyframes breathe {
+    0%, 100% { box-shadow: 0 10px 30px rgba(74, 108, 247, 0.35); }
+    50% { box-shadow: 0 10px 42px rgba(123, 92, 240, 0.55); }
   }
   .title { font-size: 20px; font-weight: 600; letter-spacing: 1px; }
   .spinner {
@@ -36,6 +41,21 @@
   @keyframes spin { to { transform: rotate(360deg); } }
   #status { font-size: 13px; color: #aeb9c8; min-height: 20px; max-width: 560px; text-align: center; white-space: pre-wrap; }
   #status.error { color: #ff8f8f; }
+  /* v0.1.29+ C4：阶段进度条。宽度由 JS 按状态文案关键字映射（0~100），
+     就绪/错误态分别变色；未映射阶段保持当前宽度不回退。 */
+  #bar-wrap {
+    width: 340px; height: 4px; border-radius: 2px;
+    background: rgba(255,255,255,0.10); overflow: hidden; display: none;
+  }
+  #bar-wrap.show { display: block; }
+  #bar {
+    height: 100%; width: 0%;
+    background: linear-gradient(90deg, #4a6cf7, #7b5cf0);
+    border-radius: 2px;
+    transition: width .45s ease;
+  }
+  #bar-wrap.error #bar { background: #ff6b6b; }
+  #bar-wrap.ready #bar { background: linear-gradient(90deg, #46b98a, #4a6cf7); }
   .hint { font-size: 12px; color: #6d7a8a; }
   .actions, #remote-actions { display: none; gap: 12px; flex-wrap: wrap; justify-content: center; }
   .actions button, #remote-actions button {
@@ -78,6 +98,7 @@
     <div class="title">DSH Desktop</div>
     <div class="spinner" id="spinner"></div>
     <div id="status">正在启动运行时…</div>
+    <div id="bar-wrap"><div id="bar"></div></div>
     <div class="actions" id="actions">
       <button id="btn-install">安装运行环境</button>
       <button id="btn-log">打开日志</button>
@@ -140,11 +161,40 @@
     const remoteActions = document.getElementById('remote-actions');
     const wizard = document.getElementById('wizard');
     const connectForm = document.getElementById('connect');
+    const barWrap = document.getElementById('bar-wrap');
+    const bar = document.getElementById('bar');
     const invoke = window.__TAURI__ && window.__TAURI__.core && window.__TAURI__.core.invoke;
     const listen = window.__TAURI__ && window.__TAURI__.event && window.__TAURI__.event.listen;
     let stopped = false;
     let wizardMode = false;
     let connectMode = false;
+
+    // ── C4 阶段进度条：状态文案关键字 → 进度百分比。单调不回退（进行中阶段只前进）；
+    //    错误/就绪是终态（错误停在当前宽度并变红，就绪推满并变绿）。
+    let progress = 0;
+    function stagePercent(text) {
+      const t = text || '';
+      // 关键字顺序即阶段顺序；命中即返回该阶段的起点百分比
+      if (t.includes('下载') || t.includes('解压')) return 15;          // 安装：下载/解压 Node
+      if (t.includes('安装 DSH') || t.includes('正在安装')) return 45;  // 安装：npm 装 dsh
+      if (t.includes('自愈') || t.includes('修复') || t.includes('迁移')) return 30;
+      if (t.includes('重启服务') || t.includes('切换到本地') || t.includes('重连远程')) return 55;
+      if (t.includes('正在启动')) return 65;
+      if (t.includes('等待服务就绪') || t.includes('配对成功')) return 75;
+      if (t.includes('连接远程实例')) return 80;
+      return null; // 未识别：保持当前值
+    }
+    function setProgress(text, isErr, isReady) {
+      barWrap.classList.toggle('error', !!isErr);
+      barWrap.classList.toggle('ready', !!isReady);
+      if (isReady) progress = 100;
+      else if (!isErr) {
+        const p = stagePercent(text);
+        if (p !== null && p > progress) progress = p;
+      }
+      barWrap.classList.add('show');
+      bar.style.width = progress + '%';
+    }
 
     // 向导默认值：与 dsh-persona scripts/setup.ps1 的 $personaDefaults 保持一致
     const DEFAULTS = {
@@ -222,6 +272,7 @@
       if (s.error) {
         el.classList.add('error'); spinner.style.display = 'none';
         stopped = true;
+        setProgress(s.text, true, false);
         // 远程模式错误态：本地语义的「安装运行环境」不适用，换远程按钮组；
         // 打开日志/打开数据目录两种模式都保留
         actions.style.display = s.remote ? 'none' : 'flex';
@@ -230,8 +281,12 @@
         // 安装重试：回到进行中状态
         el.classList.remove('error'); spinner.style.display = '';
         actions.style.display = 'none'; remoteActions.style.display = 'none'; stopped = false;
+        progress = 0; // 新一轮流程：进度重新起步
+        setProgress(s.text, false, false);
+      } else {
+        setProgress(s.text, false, !!s.ready);
       }
-      if (s.ready) { stopped = true; }
+      if (s.ready) { stopped = true; spinner.style.display = 'none'; }
     }
 
     function collectFields() {

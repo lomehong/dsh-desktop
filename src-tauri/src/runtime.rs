@@ -195,8 +195,13 @@ const MIN_NODE_MAJOR: u32 = 24;
 pub const NEED_AUTO_REPAIR: &str = "[auto-repair]";
 
 /// 检测系统 node 的主版本号。返回 None 表示无法执行或解析失败。
+/// v0.1.28+ 加 no_window：之前漏写导致每次启动 bootstrap_runtime 都弹一次 cmd 窗口。
 fn system_node_major() -> Option<u32> {
-    let out = Command::new("node").arg("--version").output().ok()?;
+    let out = {
+        let mut c = Command::new("node");
+        c.arg("--version");
+        no_window(&mut c).output().ok()?
+    };
     if !out.status.success() {
         return None;
     }
@@ -205,6 +210,115 @@ fn system_node_major() -> Option<u32> {
     ver.strip_prefix('v')
         .and_then(|v| v.split('.').next())
         .and_then(|n| n.parse::<u32>().ok())
+}
+
+/// 在 PATH 上定位 `node` 可执行文件（首条结果）。System 模式拉起 dsh 用：
+/// 走 node + bin.js 路径，不再经 cmd.exe /C dsh.cmd（避免启动期弹窗闪烁）。
+/// 全会话缓存：找一次就够，进程重启后重新探测。
+pub fn find_system_node() -> Option<PathBuf> {
+    static CACHE: OnceLock<Option<PathBuf>> = OnceLock::new();
+    CACHE
+        .get_or_init(|| {
+            let probe = if cfg!(windows) {
+                let mut c = Command::new("where.exe");
+                c.arg("node");
+                no_window(&mut c).output().ok()
+            } else {
+                let mut c = Command::new("which");
+                c.arg("node");
+                c.output().ok()
+            };
+            let out = probe?;
+            if !out.status.success() {
+                return None;
+            }
+            String::from_utf8_lossy(&out.stdout)
+                .lines()
+                .map(str::trim)
+                .find(|l| !l.is_empty())
+                .map(PathBuf::from)
+        })
+        .clone()
+}
+
+/// 在 PATH 上定位 `dsh` 入口并反推出 bin.js 路径。System 模式拉起 dsh 用：
+/// - Windows：where dsh → C:\...\npm\dsh.cmd，bin.js 在同目录的 node_modules\@deepseek-ai\dsh\lib\bin.js
+/// - Unix：which dsh → /usr/local/bin/dsh，bin.js 在 /usr/local/lib/node_modules\@deepseek-ai\dsh\lib\bin.js
+/// 全会话缓存。
+pub fn find_system_dsh_bin() -> Option<PathBuf> {
+    static CACHE: OnceLock<Option<PathBuf>> = OnceLock::new();
+    CACHE
+        .get_or_init(|| {
+            let probe = if cfg!(windows) {
+                let mut c = Command::new("where.exe");
+                c.arg("dsh");
+                no_window(&mut c).output().ok()
+            } else {
+                let mut c = Command::new("which");
+                c.arg("dsh");
+                c.output().ok()
+            };
+            let out = probe?;
+            if !out.status.success() {
+                return None;
+            }
+            let dsh_path = String::from_utf8_lossy(&out.stdout)
+                .lines()
+                .map(str::trim)
+                .find(|l| !l.is_empty())?
+                .to_string();
+            let dsh_dir = PathBuf::from(dsh_path).parent()?.to_path_buf();
+            // dsh bin.js layout:
+            //   Windows (npm global): <prefix>/node_modules/@deepseek-ai/dsh/lib/bin.js
+            //   Unix (npm global): <prefix>/lib/node_modules/@deepseek-ai/dsh/lib/bin.js
+            //   prefix 在 Windows 是 dsh.cmd 所在目录；在 Unix 是 bin/dsh 的父目录（即 npm prefix）
+            let prefix = if cfg!(windows) {
+                dsh_dir
+            } else {
+                dsh_dir.parent()?.to_path_buf()
+            };
+            let bin_js = if cfg!(windows) {
+                prefix
+                    .join("node_modules")
+                    .join("@deepseek-ai")
+                    .join("dsh")
+                    .join("lib")
+                    .join("bin.js")
+            } else {
+                prefix
+                    .join("lib")
+                    .join("node_modules")
+                    .join("@deepseek-ai")
+                    .join("dsh")
+                    .join("lib")
+                    .join("bin.js")
+            };
+            bin_js.exists().then_some(bin_js)
+        })
+        .clone()
+}
+
+/// 便携运行时的 npm-cli.js 路径（用于直接 node + npm-cli.js 调 npm，
+/// 避开 cmd.exe /C npm.cmd 的窗口闪烁）。仅便携根有效；System 模式不走这条路径。
+/// 推导：npm.cmd 位于 <root>/node/，npm-cli.js 位于 <root>/node/node_modules/npm/bin/npm-cli.js
+/// 仅 Windows 使用（install.rs::npm_command 的非 Windows 分支直接调 bin/npm）。
+#[cfg(windows)]
+pub fn portable_npm_cli_js() -> Option<PathBuf> {
+    let npm_cmd = portable_npm_cmd_path()?;
+    let npm_dir = npm_cmd.parent()?;
+    let cli = npm_dir
+        .join("node_modules")
+        .join("npm")
+        .join("bin")
+        .join("npm-cli.js");
+    cli.exists().then_some(cli)
+}
+
+#[cfg(windows)]
+fn portable_npm_cmd_path() -> Option<PathBuf> {
+    let root = ready_root().unwrap_or_else(runtime_root);
+    let npm = root.join("node").join("npm.cmd");
+    npm.exists().then_some(npm)
 }
 
 /// 系统 node 是否满足 DSH 运行要求（版本 ≥ MIN_NODE_MAJOR）。

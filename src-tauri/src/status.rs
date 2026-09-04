@@ -30,11 +30,41 @@ fn remote_now(app: &tauri::AppHandle) -> bool {
 }
 
 /// 构造一帧并双通道分发：state 写入克隆，emit 走原值（字段永不漂移）。
+/// v0.1.28+ 同步刷新托盘 tooltip；v0.1.29+ 同步刷新托盘状态角标（C1）与
+/// Windows 任务栏进度（D3——加载页进度条的同源 Rust 镜像）。
 fn push_frame(app: &tauri::AppHandle, frame: StartupStatus) {
     if let Some(state) = app.try_state::<crate::AppState>() {
         *state.status.lock().unwrap() = frame.clone();
     }
-    let _ = app.emit("startup-status", frame);
+    let _ = app.emit("startup-status", frame.clone());
+    // 状态帧落盘后刷 tooltip / 图标角标 / 任务栏进度：
+    // 托盘未初始化（启动早期 / 退出路径）时三者均静默 no-op
+    crate::tray::refresh_tooltip(app);
+    crate::tray::refresh_tray_icon(app);
+    let percent = if frame.ready { Some(100) } else { stage_percent(&frame.text) };
+    crate::webview::taskbar_progress(app, percent, frame.error, frame.ready);
+}
+
+/// 状态文案关键字 → 任务栏进度百分比（0~100）。与加载页 stagePercent 同一映射；
+/// 未识别的阶段返回 None（保持当前进度）。纯函数便于单测。
+fn stage_percent(text: &str) -> Option<u8> {
+    if text.contains("下载") || text.contains("解压") {
+        Some(15)
+    } else if text.contains("安装 DSH") || text.contains("正在安装") {
+        Some(45)
+    } else if text.contains("自愈") || text.contains("修复") || text.contains("迁移") {
+        Some(30)
+    } else if text.contains("重启服务") || text.contains("切换到本地") || text.contains("重连远程") {
+        Some(55)
+    } else if text.contains("正在启动") {
+        Some(65)
+    } else if text.contains("等待服务就绪") || text.contains("配对成功") {
+        Some(75)
+    } else if text.contains("连接远程实例") {
+        Some(80)
+    } else {
+        None
+    }
 }
 
 pub fn update(app: &tauri::AppHandle, text: &str, error: bool, ready: bool) {
@@ -93,4 +123,25 @@ pub fn connect_screen(app: &tauri::AppHandle, text: &str) {
             connect: true,
         },
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// D3：阶段关键字 → 进度映射（与加载页 stagePercent 同表）。
+    #[test]
+    fn stage_percent_maps_known_keywords() {
+        assert_eq!(stage_percent("正在下载 Node v24（镜像加速）…"), Some(15));
+        assert_eq!(stage_percent("正在解压 Node…"), Some(15));
+        assert_eq!(stage_percent("正在安装 DSH v0.1.2-alpha.5（首次约 1~3 分钟）…"), Some(45));
+        assert_eq!(stage_percent("检测到运行时不兼容，正在自动修复…"), Some(30));
+        assert_eq!(stage_percent("正在重启服务…"), Some(55));
+        assert_eq!(stage_percent("正在启动 DSH 服务…"), Some(65));
+        assert_eq!(stage_percent("等待服务就绪（首次启动约需 10~60 秒）…"), Some(75));
+        assert_eq!(stage_percent("连接远程实例 192.168.1.146:3090…"), Some(80));
+        // 未识别：None（任务栏保持当前进度）
+        assert_eq!(stage_percent("服务已就绪"), None);
+        assert_eq!(stage_percent(""), None);
+    }
 }
