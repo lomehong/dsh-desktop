@@ -13,6 +13,7 @@ mod notifications;
 mod persona;
 mod readiness;
 mod remote;
+mod remote_account;
 mod remote_proxy;
 mod runtime;
 mod status;
@@ -47,6 +48,9 @@ struct AppState {
     /// 当前模式（"local"/"remote"）：manage 时从 mode.txt 读入初值，连接/切回命令
     /// 改写内存值并落盘；status::update 把它投影进 StartupStatus.remote 供加载页区分语境。
     mode: Mutex<&'static str>,
+    /// 御符账号登录态（远程实例连接·账号化）：SSO JWT **仅内存**（红队裁决：账号
+    /// 长期凭据不落盘），登出/进程退出即清空。None = 未登录。
+    sso: Mutex<Option<remote_account::SsoSession>>,
 }
 
 /// 自定义命令只服务本地加载页；Harness 远程页面调用一律拒绝（IPC 零授权边界在命令层再拦一道）。
@@ -208,6 +212,214 @@ fn get_remote_address(window: tauri::WebviewWindow, _app: tauri::AppHandle) -> S
     remote::load().map(|c| c.address).unwrap_or_default()
 }
 
+// ── 远程实例连接·账号化（御符登录 + 实例清单 + exchange；定案见 docs/plans/2026-09-04）──
+
+/// 打开远程实例独立控制窗（托盘「连接远程实例…」的新入口）。
+#[tauri::command]
+fn remote_open_window(app: tauri::AppHandle) {
+    if let Err(e) = remote_account::open_control_window(&app) {
+        if let Some(mut log) = crate::runtime::open_log_append() {
+            use std::io::Write;
+            let _ = writeln!(log, "[远程实例] 打开控制窗失败: {e}");
+        }
+    }
+}
+
+/// 登录态查询（控制窗首帧渲染用）。
+#[tauri::command]
+fn remote_login_state(state: tauri::State<AppState>) -> serde_json::Value {
+    let guard = state.sso.lock().unwrap();
+    serde_json::json!({ "loggedIn": guard.is_some() })
+}
+
+/// SSO 登录：系统浏览器走浑天 SSO → 回环回调（带 state/nonce）→ 返回 JWT（仅内存）。
+/// 登录器最长等 120s（用户在浏览器完成认证的窗口）；blocking 放线程池执行。
+#[tauri::command(async)]
+async fn remote_login(
+    state: tauri::State<'_, AppState>,
+) -> Result<serde_json::Value, String> {
+    let endpoints = remote_account::AccountEndpoints::from_env();
+    let session = tauri::async_runtime::spawn_blocking(move || {
+        remote_account::sso_login(&endpoints, std::time::Duration::from_secs(120))
+    })
+    .await
+    .map_err(|e| format!("登录线程失败: {e}"))??;
+    *state.sso.lock().unwrap() = Some(session);
+    Ok(serde_json::json!({ "loggedIn": true }))
+}
+
+/// 登出：清内存 JWT（浏览器侧浑天会话由控制窗文案引导用户自行登出）。
+#[tauri::command]
+fn remote_logout(state: tauri::State<AppState>) {
+    *state.sso.lock().unwrap() = None;
+}
+
+/// 双段清单：缓存实例（本机已有凭据，永远可连）+ 云端名下实例（未登录返回空云段）。
+#[tauri::command(async)]
+async fn remote_instances(
+    window: tauri::WebviewWindow,
+    state: tauri::State<'_, AppState>,
+) -> Result<serde_json::Value, String> {
+    if !caller_is_local(&window) {
+        return Err("拒绝非本地调用".into());
+    }
+    let mut cached: Vec<serde_json::Value> = Vec::new();
+    let current = remote::load();
+    if let Some(cfg) = &current {
+        cached.push(serde_json::json!({
+            "address": cfg.address, "origin": cfg.origin, "current": true,
+        }));
+    }
+    for s in remote::saved_list() {
+        if current.as_ref().map(|c| c.address.clone()) == Some(s.address.clone()) {
+            continue;
+        }
+        cached.push(serde_json::json!({ "address": s.address, "origin": s.origin, "current": false }));
+    }
+    let jwt = state.sso.lock().unwrap().as_ref().map(|s| s.jwt.clone());
+    match jwt {
+        None => Ok(serde_json::json!({ "cached": cached, "loggedIn": false, "cloud": [] })),
+        Some(jwt) => {
+            let endpoints = remote_account::AccountEndpoints::from_env();
+            let (list, alive_map) = tauri::async_runtime::spawn_blocking(move || {
+                let list = remote_account::instances(&endpoints, &jwt)?;
+                // 存活徽标：有 address 的实例逐个探活（401 也算可达）
+                let mut alive_map = std::collections::HashMap::new();
+                for inst in &list {
+                    if let Some(addr) = &inst.address {
+                        alive_map.insert(addr.clone(), remote_account::probe_alive(addr));
+                    }
+                }
+                Ok::<_, String>((list, alive_map))
+            })
+            .await
+            .map_err(|e| format!("清单线程失败: {e}"))??;
+            let cloud: Vec<serde_json::Value> = list
+                .iter()
+                .map(|inst| {
+                    let mut v = serde_json::to_value(inst).unwrap_or_default();
+                    if let Some(addr) = &inst.address {
+                        v.as_object_mut().map(|o| {
+                            o.insert("alive".into(), serde_json::json!(alive_map.get(addr).copied().unwrap_or(false)))
+                        });
+                    }
+                    v
+                })
+                .collect();
+            Ok(serde_json::json!({ "cached": cached, "loggedIn": true, "cloud": cloud }))
+        }
+    }
+}
+
+/// 点选实例连接：TOFU（未确认地址需 confirm_tofu=true）→ exchange 换实例 token
+/// → 落凭据（remote.json + saved）→ 切 remote 模式 → 走既有连接执行流
+/// （探活→反代→事件订阅→导航），连接进度经状态屏呈现。
+/// 返回 Err("TOFU_REQUIRED") 时 UI 弹首连确认框，用户批准后带 confirm_tofu 重发。
+#[tauri::command(async)]
+async fn remote_connect_instance(
+    window: tauri::WebviewWindow,
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    address: String,
+    confirm_tofu: Option<bool>,
+) -> Result<String, String> {
+    if !caller_is_local(&window) {
+        return Err("拒绝非本地调用".into());
+    }
+    let jwt = state
+        .sso
+        .lock()
+        .unwrap()
+        .as_ref()
+        .map(|s| s.jwt.clone())
+        .ok_or("尚未登录御符账号，请先登录")?;
+    if !remote_account::tofu_approved(&address) && confirm_tofu != Some(true) {
+        return Err("TOFU_REQUIRED".into());
+    }
+    remote_account::tofu_approve(&address)?;
+    // 本机已有凭据的实例（缓存段）：跳过 exchange 直接复用；云端新实例才走换票。
+    let already = remote::load_saved(&address)
+        .or_else(|| remote::load().filter(|c| c.address == address));
+    if let Some(cfg) = already {
+        remote::save(&cfg).map_err(|e| format!("凭据落盘失败: {e}"))?;
+        remote::save_mode("remote");
+        let handle = app.clone();
+        std::thread::spawn(move || {
+            crate::webview::navigate_to_loader(&handle);
+            if let Some(w) = handle.get_webview_window("main") {
+                let _ = w.set_focus();
+            }
+            if let Err(e) = crate::supervisor::connect_remote_flow(&handle) {
+                if let Some(mut log) = crate::runtime::open_log_append() {
+                    use std::io::Write;
+                    let _ = writeln!(log, "[远程实例] 缓存凭据连接失败: {e}");
+                }
+            }
+        });
+        return Ok("复用本机既有凭据，正在连接…".into());
+    }
+    let endpoints = remote_account::AccountEndpoints::from_env();
+    let addr_for_call = address.clone();
+    let res = tauri::async_runtime::spawn_blocking(move || {
+        remote_account::exchange(&endpoints, &jwt, &addr_for_call)
+    })
+    .await
+    .map_err(|e| format!("exchange 线程失败: {e}"))??;
+    let cfg = remote::RemoteConfig {
+        address: address.clone(),
+        origin: format!("http://{address}"),
+        token: res.token,
+        paired_at: remote_account::now_ms_pub(),
+    };
+    remote::save(&cfg).map_err(|e| format!("凭据落盘失败: {e}"))?;
+    remote::remember_saved(&cfg);
+    remote::save_mode("remote");
+    // 连接执行流放后台线程（探活数秒）；导航与状态反馈与托盘「连接」分派同款
+    let handle = app.clone();
+    std::thread::spawn(move || {
+        crate::webview::navigate_to_loader(&handle);
+        if let Some(w) = handle.get_webview_window("main") {
+            let _ = w.set_focus();
+        }
+        if let Err(e) = crate::supervisor::connect_remote_flow(&handle) {
+            if let Some(mut log) = crate::runtime::open_log_append() {
+                use std::io::Write;
+                let _ = writeln!(log, "[远程实例] 连接失败: {e}");
+            }
+        }
+    });
+    Ok(format!(
+        "已换取实例凭据（deviceId={} name={}），正在连接…",
+        res.device_id, res.name
+    ))
+}
+
+/// 清除远程凭据（remote.json；断开连接不清凭据，此命令是显式的「忘掉这台实例」）。
+#[tauri::command]
+fn remote_clear_credentials(window: tauri::WebviewWindow) -> Result<(), String> {
+    if !caller_is_local(&window) {
+        return Err("拒绝非本地调用".into());
+    }
+    let p = remote::config_path();
+    if p.exists() {
+        std::fs::remove_file(&p).map_err(|e| format!("清除凭据失败: {e}"))?;
+    }
+    Ok(())
+}
+
+/// 手动配对（兼容旧流程的豁免入口）：导航主窗口到既有连接屏。
+#[tauri::command]
+fn remote_show_legacy_connect(window: tauri::WebviewWindow, app: tauri::AppHandle) {
+    if !caller_is_local(&window) {
+        return;
+    }
+    crate::webview::navigate_to_loader(&app);
+    crate::status::connect_screen(&app, "手动配对（兼容旧流程）");
+    if let Some(w) = app.get_webview_window("main") {
+        let _ = w.set_focus();
+    }
+}
+
 /// 切回本地模式（加载页「取消」按钮 / 远程错误态「回到本地模式」按钮用）；
 /// 完整流程见 supervisor::switch_to_local_flow（托盘「断开远程，回到本地」走同一路径）。
 #[tauri::command]
@@ -343,6 +555,7 @@ fn main() {
             status: Mutex::new(StartupStatus::default()),
             // manage 在 setup 前：load_mode 是纯文件读（无 Tauri 依赖），此处初始化安全
             mode: Mutex::new(remote::load_mode()),
+            sso: Mutex::new(None),
         })
         .invoke_handler(tauri::generate_handler![
             get_status,
@@ -354,6 +567,14 @@ fn main() {
             retry_connect,
             show_connect,
             get_remote_address,
+            remote_open_window,
+            remote_login_state,
+            remote_login,
+            remote_logout,
+            remote_instances,
+            remote_connect_instance,
+            remote_clear_credentials,
+            remote_show_legacy_connect,
             switch_to_local,
             restart_service_cmd,
             get_notifications,

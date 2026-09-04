@@ -1,0 +1,221 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<title>远程实例 · 御符账号</title>
+<style>
+  :root { color-scheme: light; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 14px 16px 18px; font-family: system-ui, "Microsoft YaHei", sans-serif;
+    font-size: 13px; color: #1f2329; background: #f7f8fa; user-select: none;
+  }
+  h1 { font-size: 15px; margin: 0 0 4px; }
+  .sub { color: #86909c; font-size: 12px; margin-bottom: 12px; }
+  .card { background: #fff; border: 1px solid #e5e6eb; border-radius: 8px; padding: 12px; margin-bottom: 12px; }
+  .card h2 { font-size: 13px; margin: 0 0 8px; color: #4e5969; }
+  .row { display: flex; align-items: center; gap: 8px; padding: 7px 8px; border-radius: 6px; }
+  .row:hover { background: #f2f3f5; }
+  .row .meta { flex: 1; min-width: 0; }
+  .row .addr { font-weight: 600; }
+  .row .desc { color: #86909c; font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .row .current { color: #00b42a; font-size: 12px; margin-left: 6px; }
+  button {
+    font: inherit; border: 1px solid #e5e6eb; background: #fff; color: #1f2329;
+    border-radius: 6px; padding: 5px 12px; cursor: pointer;
+  }
+  button:hover { border-color: #4080ff; color: #4080ff; }
+  button.primary { background: #4080ff; border-color: #4080ff; color: #fff; }
+  button.primary:hover { background: #2a6ae9; }
+  button:disabled { opacity: .45; cursor: not-allowed; }
+  button.link { border: none; background: none; color: #4080ff; padding: 2px 4px; }
+  .muted { color: #86909c; font-size: 12px; }
+  .err { color: #f53f3f; font-size: 12px; margin-top: 8px; white-space: pre-wrap; }
+  .ok { color: #00b42a; font-size: 12px; margin-top: 8px; }
+  .spin { display: inline-block; width: 12px; height: 12px; border: 2px solid #c9cdd4;
+    border-top-color: #4080ff; border-radius: 50%; animation: r 0.8s linear infinite; vertical-align: -2px; }
+  @keyframes r { to { transform: rotate(360deg); } }
+  .actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+  .badge { font-size: 11px; border-radius: 4px; padding: 1px 6px; margin-left: 6px; }
+  .badge.gray { background: #f2f3f5; color: #86909c; }
+  .badge.blue { background: #e8f3ff; color: #4080ff; }
+  .badge.red { background: #ffece8; color: #f53f3f; }
+  dialog { border: 1px solid #e5e6eb; border-radius: 8px; padding: 16px; width: 92%; }
+  dialog::backdrop { background: rgba(0,0,0,.25); }
+  .dlg-btns { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px; }
+  code { background: #f2f3f5; padding: 1px 4px; border-radius: 4px; font-size: 12px; }
+</style>
+</head>
+<body>
+  <h1>远程实例</h1>
+  <div class="sub">御符账号登录后，展示并直连你名下的远程 dsh 实例。连接执行经本地回环代理，与配对流程一致。</div>
+
+  <div class="card" id="loginCard">
+    <h2>御符账号</h2>
+    <div id="loginArea" class="muted">加载中…</div>
+    <div class="actions" id="loginActions"></div>
+  </div>
+
+  <div class="card">
+    <h2>缓存实例 <span class="badge gray">本机已有凭据 · 离线可连</span></h2>
+    <div id="cachedList" class="muted">加载中…</div>
+  </div>
+
+  <div class="card">
+    <h2>云端名下实例 <span class="badge blue">御符 system_registry</span></h2>
+    <div id="cloudList" class="muted">登录后显示</div>
+  </div>
+
+  <div class="actions">
+    <button id="btnRefresh">刷新</button>
+    <button id="btnManual">手动配对（兼容旧流程）</button>
+    <button id="btnToLocal">切回本地</button>
+    <button id="btnClear">清除当前凭据</button>
+  </div>
+  <div id="msg" class="err"></div>
+
+  <dialog id="tofuDlg">
+    <div><b>首次连接确认（TOFU）</b></div>
+    <div class="muted" style="margin:8px 0" id="tofuAddr"></div>
+    <div class="muted">这是你第一次连接该地址。请确认它属于你的实例（继续后该地址将被记住，不再询问）。</div>
+    <div class="dlg-btns">
+      <button id="tofuCancel">取消</button>
+      <button id="tofuOk" class="primary">确认并连接</button>
+    </div>
+  </dialog>
+
+  <script>
+    const invoke = window.__TAURI__ && window.__TAURI__.core && window.__TAURI__.core.invoke;
+    const $ = (id) => document.getElementById(id);
+    const state = { pendingAddress: null, busy: false };
+
+    function msg(text, cls) { const el = $('msg'); el.className = cls || 'err'; el.textContent = text || ''; }
+    function setBusy(on, label) {
+      state.busy = on;
+      for (const b of document.querySelectorAll('button')) b.disabled = on;
+      if (!on) { for (const b of document.querySelectorAll('button')) b.disabled = false; }
+      if (on && label) msg(label, 'muted');
+    }
+
+    async function refresh() {
+      if (state.busy) return;
+      try {
+        const data = await invoke('remote_instances');
+        render(data);
+      } catch (e) { msg(String(e)); }
+    }
+
+    function render(data) {
+      // 登录态
+      const la = $('loginArea'); const lb = $('loginActions'); lb.innerHTML = '';
+      if (data.loggedIn) {
+        la.textContent = '已登录（SSO JWT 仅存在于本进程内存，登出/退出即失效）';
+        const out = document.createElement('button'); out.textContent = '登出';
+        out.onclick = async () => { try { await invoke('remote_logout'); await refresh(); } catch (e) { msg(String(e)); } };
+        lb.appendChild(out);
+      } else {
+        la.textContent = '未登录。登录后显示你名下的远程实例清单。';
+        const btn = document.createElement('button'); btn.className = 'primary'; btn.textContent = '使用御符账号登录';
+        btn.onclick = () => doLogin();
+        lb.appendChild(btn);
+      }
+      // 缓存段
+      const cl = $('cachedList'); cl.innerHTML = '';
+      if (!data.cached || data.cached.length === 0) cl.textContent = '（空）本机没有任何远程实例凭据';
+      for (const c of data.cached || []) {
+        const row = document.createElement('div'); row.className = 'row';
+        const meta = document.createElement('div'); meta.className = 'meta';
+        meta.innerHTML = `<div class="addr">${escapeHtml(c.address)}${c.current ? '<span class="current">当前已连接</span>' : ''}</div>`;
+        meta.innerHTML += `<div class="desc">${escapeHtml(c.origin)}</div>`;
+        row.appendChild(meta);
+        const sw = document.createElement('button');
+        sw.textContent = c.current ? '重连' : '连接';
+        sw.onclick = () => connectCached(c.address);
+        row.appendChild(sw);
+        cl.appendChild(row);
+      }
+      // 云端段
+      const ul = $('cloudList'); ul.innerHTML = '';
+      if (!data.loggedIn) { ul.textContent = '未登录——登录后展示御符账号名下的实例。'; return; }
+      if (!data.cloud || data.cloud.length === 0) { ul.textContent = '（空）你的账号下暂无已注册实例。可点「手动配对」走豁免流程。'; return; }
+      for (const inst of data.cloud) {
+        const row = document.createElement('div'); row.className = 'row';
+        const meta = document.createElement('div'); meta.className = 'meta';
+        const addr = inst.address || '';
+        const offline = !addr;
+        meta.innerHTML = `<div class="addr">${escapeHtml(inst.name || inst.hostname || inst.instanceId)}`
+          + `<span class="badge ${offline ? 'red' : 'blue'}">${offline ? '未开启远程访问' : (inst.role ? inst.role : '在线')}</span></div>`;
+        meta.innerHTML += `<div class="desc">${escapeHtml(inst.hostname || '')}${addr ? ' · ' + escapeHtml(addr) : ''} · agent×${inst.agentCount ?? '?'}</div>`;
+        row.appendChild(meta);
+        const btn = document.createElement('button');
+        if (offline) { btn.textContent = '不可连'; btn.disabled = true; }
+        else { btn.textContent = '连接'; btn.onclick = () => connectCloud(inst.address); }
+        row.appendChild(btn);
+        ul.appendChild(row);
+      }
+    }
+
+    async function doLogin() {
+      if (state.busy) return;
+      setBusy(true, '正在打开御符登录页…请在浏览器完成认证（最长等 120 秒）');
+      const spin = document.createElement('span'); spin.className = 'spin'; $('msg').appendChild(spin);
+      try {
+        await invoke('remote_login');
+        msg(''); await refresh();
+      } catch (e) { msg(String(e)); }
+      setBusy(false);
+      await refresh();
+    }
+
+    async function connectCached(address) {
+      // 缓存实例凭据已在本地：直接走既有连接流（不经历 exchange）
+      try {
+        await invoke('remote_connect_instance', { address, confirmTofu: true }); // 本机既有凭据视为已确认
+        msg('已发起连接，主窗口将跳转…', 'ok');
+      } catch (e) { msg(String(e)); }
+    }
+
+    async function connectCloud(address) {
+      if (state.busy) return;
+      state.pendingAddress = address;
+      try {
+        setBusy(true, '正在用账号身份换取实例凭据…');
+        const r = await invoke('remote_connect_instance', { address, confirmTofu: false });
+        msg(r + ' 主窗口将跳转远程实例页面。', 'ok');
+      } catch (e) {
+        const text = String(e);
+        if (text.includes('TOFU_REQUIRED')) {
+          $('tofuAddr').textContent = '地址：' + address;
+          $('tofuDlg').showModal();
+        } else msg(text);
+      } finally { setBusy(false); }
+    }
+
+    $('tofuOk').onclick = async () => {
+      $('tofuDlg').close();
+      const addr = state.pendingAddress; if (!addr) return;
+      try {
+        setBusy(true, '已确认地址，正在换取实例凭据…');
+        const r = await invoke('remote_connect_instance', { address: addr, confirmTofu: true });
+        msg(r + ' 主窗口将跳转远程实例页面。', 'ok');
+      } catch (e) { msg(String(e)); }
+      setBusy(false);
+    };
+    $('tofuCancel').onclick = () => { $('tofuDlg').close(); state.pendingAddress = null; };
+
+    $('btnRefresh').onclick = () => refresh();
+    $('btnManual').onclick = async () => { try { await invoke('remote_show_legacy_connect'); } catch (e) { msg(String(e)); } };
+    $('btnToLocal').onclick = async () => { try { await invoke('switch_to_local'); msg('已切回本地模式', 'ok'); await refresh(); } catch (e) { msg(String(e)); } };
+    $('btnClear').onclick = async () => {
+      if (!confirm('确定清除当前远程实例凭据？清除后需重新登录/配对才能连接。')) return;
+      try { await invoke('remote_clear_credentials'); msg('凭据已清除', 'ok'); await refresh(); } catch (e) { msg(String(e)); }
+    };
+
+    function escapeHtml(s) {
+      return String(s ?? '').replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
+    }
+
+    refresh();
+  </script>
+</body>
+</html>

@@ -874,12 +874,13 @@ pub fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
                 std::thread::spawn(move || crate::supervisor::restart_by_mode(&handle));
             }
             "connect" => {
-                // 连接远程实例：先把壳带回加载页（若正停在 harness 页，eval 导航回加载页），
-                // 再落一帧连接屏状态（新加载页轮询 get_status 首帧即渲染表单），最后窗口置前
-                crate::webview::navigate_to_loader(app);
-                crate::status::connect_screen(app, "连接远程实例");
-                if let Some(w) = app.get_webview_window("main") {
-                    let _ = w.set_focus();
+                // 连接远程实例（账号化）：弹独立控制窗——御符登录 → 名下实例清单 → 点选连接。
+                // 旧「地址+配对码」连接屏降级为控制窗内的「手动配对」豁免入口（remote_show_legacy_connect）。
+                if let Err(e) = crate::remote_account::open_control_window(app) {
+                    if let Some(mut log) = crate::runtime::open_log_append() {
+                        use std::io::Write;
+                        let _ = writeln!(log, "[远程实例] 托盘打开控制窗失败: {e}");
+                    }
                 }
             }
             "tolocal" => {
