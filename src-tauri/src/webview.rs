@@ -106,17 +106,20 @@ pub const SECURE_CONTEXT_SHIM_JS: &str = r##"
 })();
 "##;
 
-/// 模式角标：窗口左上角常驻小徽标（「本地」/「远程 · 地址」），让用户一眼分辨
+/// 模式角标：窗口顶部居中常驻小徽标（「本地」/「远程 · 地址」），让用户一眼分辨
 /// 当前连的是哪个实例。远程模式由代理本地应答 `/__remote/badge`（含展示地址）；
 /// 本地模式该路径在本地 dsh 上 404 → 保持「本地」。仅装饰，pointer-events 关闭。
+/// 居中定位的原因（2026-09-04）：macOS Overlay 红绿灯浮在窗口左上，角标原
+/// `top:0;left:0` 与其重叠拥挤；顶部居中与任何平台窗口装饰都不冲突（Windows
+/// decorum 按钮在右上，macOS 红绿灯在左上），因此不分平台统一居中 + 底部圆角。
 pub const MODE_BADGE_JS: &str = r##"
 (function () {
   if (location.protocol !== 'http:' || location.port === '') return;
   var apply = function () {
     var b = document.createElement('div');
     b.textContent = '本地';
-    b.style.cssText = 'position:fixed;top:0;left:0;height:18px;line-height:18px;' +
-      'font-size:11px;padding:0 8px;border-radius:0 0 6px 0;' +
+    b.style.cssText = 'position:fixed;top:0;left:50%;transform:translateX(-50%);height:18px;line-height:18px;' +
+      'font-size:11px;padding:0 10px;border-radius:0 0 6px 6px;' +
       'background:rgba(20,26,38,.55);color:#dfe6ef;z-index:2147483646;' +
       'pointer-events:none;font-family:system-ui,"Microsoft YaHei",sans-serif;user-select:none;';
     document.body.appendChild(b);
