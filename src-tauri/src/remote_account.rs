@@ -371,6 +371,15 @@ fn callback_html() -> String {
      .to_string()
 }
 
+/// 解析请求行（`METHOD SP path SP protocol`）。方法/路径分派全靠它，必须取对——
+/// 第一版误把协议串当方法（POST 永不命中，登录回调死循环），教训进测试。
+fn parse_request_line(line: &str) -> (String, String) {
+    let mut it = line.split_whitespace();
+    let method = it.next().unwrap_or("").to_string();
+    let path = it.next().unwrap_or("").to_string();
+    (method, path)
+}
+
 /// /cb/token 的 JSON body 里提取 JWT（sso.go 的 fragment 键是 `token`，
 /// 同时宽容 access_token/jwt 字段名，防未来形态切换）
 fn parse_token_body(body: &str) -> Option<String> {
@@ -472,27 +481,39 @@ pub fn sso_login(endpoints: &AccountEndpoints, wait: Duration) -> Result<SsoSess
                 let mut buf = Vec::new();
                 let mut chunk = [0u8; 1024];
                 let _ = stream.set_read_timeout(Some(Duration::from_secs(3)));
+                // 读满为止：head 以 \r\n\r\n 结尾；POST 再按 Content-Length 等 body 收齐
+                // （不再等 3s 超时——fetch 的 keep-alive 下不会主动半关连接）。
+                let mut want_body = 0usize;
                 loop {
                     match stream.read(&mut chunk) {
-                        Ok(0) | Err(_) => break,
+                        Ok(0) => break,
                         Ok(n) => {
                             buf.extend_from_slice(&chunk[..n]);
-                            if buf.windows(4).any(|w| w == b"\r\n\r\n") && buf.len() > 4 {
-                                // 读到头部后，POST body 可能未到；宽松处理：再给一小段
-                                if String::from_utf8_lossy(&buf).starts_with("POST ") {
-                                    continue;
+                            let Some(head_end) = buf.windows(4).position(|w| w == b"\r\n\r\n") else {
+                                continue;
+                            };
+                            let head = String::from_utf8_lossy(&buf[..head_end]).to_string();
+                            if head.starts_with("POST ") {
+                                if want_body == 0 {
+                                    for line in head.lines() {
+                                        let l = line.trim().to_ascii_lowercase();
+                                        if let Some(v) = l.strip_prefix("content-length:") {
+                                            want_body = v.trim().parse().unwrap_or(0);
+                                        }
+                                    }
                                 }
-                                break;
+                                if buf.len() - head_end - 4 >= want_body {
+                                    break;
+                                }
+                                continue;
                             }
+                            break;
                         }
+                        Err(_) => break,
                     }
                 }
                 let req = String::from_utf8_lossy(&buf).to_string();
-                let (path, method) = {
-                    let first = req.lines().next().unwrap_or("");
-                    let mut it = first.split_whitespace();
-                    (it.nth(1).unwrap_or("").to_string(), it.next().unwrap_or("").to_string())
-                };
+                let (method, path) = parse_request_line(req.lines().next().unwrap_or(""));
                 if path.starts_with("/cb/token") && method == "POST" {
                     // fragment 形态的回交端点：页面 JS 把 #token=<urlencoded> 解析后以 JSON POST 过来
                     let body = req.split("\r\n\r\n").nth(1).unwrap_or("").to_string();
@@ -597,6 +618,17 @@ mod tests {
     fn code_query_parse_extracts_code() {
         assert_eq!(parse_code_query("code=c1&state=s1").as_deref(), Some("c1"));
         assert_eq!(parse_code_query("state=only"), None);
+    }
+
+    #[test]
+    fn request_line_parse_takes_method_then_path() {
+        // 回归：第一版把协议串当方法（POST 永不命中，登录回调死循环）。
+        let (m1, p1) = parse_request_line("POST /cb/token HTTP/1.1");
+        assert_eq!(m1, "POST");
+        assert_eq!(p1, "/cb/token");
+        let (m2, p2) = parse_request_line("GET /cb?code=abc HTTP/1.1");
+        assert_eq!(m2, "GET");
+        assert_eq!(p2, "/cb?code=abc");
     }
 
     #[test]
