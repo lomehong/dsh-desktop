@@ -112,23 +112,40 @@ pub const SECURE_CONTEXT_SHIM_JS: &str = r##"
 /// 居中定位的原因（2026-09-04）：macOS Overlay 红绿灯浮在窗口左上，角标原
 /// `top:0;left:0` 与其重叠拥挤；顶部居中与任何平台窗口装饰都不冲突（Windows
 /// decorum 按钮在右上，macOS 红绿灯在左上），因此不分平台统一居中 + 底部圆角。
+/// 配色（2026-09-05）：深色主题下旧版 55% 透明深底几乎隐形（真实反馈），改为
+/// 高不透明深玻璃底 + 1px 亮边框 + 投影（深浅主题都有轮廓），并加模式色点——
+/// 本地绿点（本机实例）、远程蓝点 + 蓝底（网络实例），色彩语义不依赖文字。
 pub const MODE_BADGE_JS: &str = r##"
 (function () {
   if (location.protocol !== 'http:' || location.port === '') return;
+  var b = null, dot = null, label = null;
+  function render(text, remote) {
+    if (!b) {
+      b = document.createElement('div');
+      dot = document.createElement('span');
+      dot.style.cssText = 'display:inline-block;width:6px;height:6px;border-radius:50%;' +
+        'margin-right:5px;vertical-align:1px;';
+      label = document.createElement('span');
+      b.appendChild(dot);
+      b.appendChild(label);
+      b.style.cssText = 'position:fixed;top:0;left:50%;transform:translateX(-50%);' +
+        'height:20px;line-height:20px;font-size:11px;padding:0 10px;border-radius:0 0 8px 8px;' +
+        'border:1px solid rgba(255,255,255,.22);border-top:none;color:#eef3f8;' +
+        'box-shadow:0 2px 8px rgba(0,0,0,.35);z-index:2147483646;pointer-events:none;' +
+        'font-family:system-ui,"Microsoft YaHei",sans-serif;user-select:none;';
+      document.body.appendChild(b);
+    }
+    dot.style.background = remote ? '#8ab4ff' : '#3ddc97';
+    label.textContent = text;
+    b.style.background = remote ? 'rgba(43,84,227,.88)' : 'rgba(13,18,26,.85)';
+  }
   var apply = function () {
-    var b = document.createElement('div');
-    b.textContent = '本地';
-    b.style.cssText = 'position:fixed;top:0;left:50%;transform:translateX(-50%);height:18px;line-height:18px;' +
-      'font-size:11px;padding:0 10px;border-radius:0 0 6px 6px;' +
-      'background:rgba(20,26,38,.55);color:#dfe6ef;z-index:2147483646;' +
-      'pointer-events:none;font-family:system-ui,"Microsoft YaHei",sans-serif;user-select:none;';
-    document.body.appendChild(b);
+    render('本地', false);
     fetch('/__remote/badge').then(function (r) {
       return r.ok ? r.json() : null;
     }).then(function (j) {
       if (j && j.mode === 'remote') {
-        b.textContent = '远程 · ' + (j.address || '');
-        b.style.background = 'rgba(74,108,247,.6)';
+        render('远程 · ' + (j.address || ''), true);
       }
     }).catch(function () {});
   };
