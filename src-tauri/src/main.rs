@@ -232,15 +232,15 @@ fn remote_login_state(state: tauri::State<AppState>) -> serde_json::Value {
     serde_json::json!({ "loggedIn": guard.is_some() })
 }
 
-/// SSO 登录：系统浏览器走浑天 SSO → 回环回调（带 state/nonce）→ 返回 JWT（仅内存）。
-/// 登录器最长等 120s（用户在浏览器完成认证的窗口）；blocking 放线程池执行。
+/// SSO 登录：sso/start 取会话 → 系统浏览器完成浑天认证 → sso/poll 轮询拿 JWT（仅内存）。
+/// 会话 TTL 5 分钟（用户在浏览器完成认证的窗口）；blocking 放线程池执行。
 #[tauri::command(async)]
 async fn remote_login(
     state: tauri::State<'_, AppState>,
 ) -> Result<serde_json::Value, String> {
     let endpoints = remote_account::AccountEndpoints::from_env();
     let session = tauri::async_runtime::spawn_blocking(move || {
-        remote_account::sso_login(&endpoints, std::time::Duration::from_secs(120))
+        remote_account::sso_login(&endpoints, std::time::Duration::from_secs(300))
     })
     .await
     .map_err(|e| format!("登录线程失败: {e}"))??;

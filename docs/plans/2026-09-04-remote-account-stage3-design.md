@@ -84,3 +84,26 @@ M3 exchange+TOFU+DPAPI 入库+切换 → M4 项 5 落地后切 code 形态 → M
 2. /me/instances 鉴权头：**`Authorization: Bearer <SSO JWT>`**（对方端到端实测 200 `{instances:[...]}`）。
 3. sso-login redirect：**接受完整外部 URL**（isAllowedRedirect 按 host 对白名单精确匹配，scheme 限 http/https；`127.0.0.1:18499` 已在白名单），兼容站内相对路径。
 4. dsh-remote exchange 端点：M3 前置，本仓配合排期。
+
+## 联调定稿：SSO 改轮询通道（2026-09-04 真机验收通过）
+
+fragment/code 双形态回环回调**已被 RFC 8628 设备码风格轮询通道取代**（御符 commit
+2f3096f + 0d2437e），上文 SSO 入口/回调白名单/fragment 键名各行仅作历史参照：
+
+- `POST /api/v1/auth/sso/start` → `{session_id, login_url, expires_in:300}`；
+  login_url 指向 gateway 自身 sso-login（cookie 中转 poll_sid+redirect →
+  302 浑天，redirectUrl=纯路径 callback，与御衡前端基准完全一致）
+- 桌面拉起浏览器后 1.5s 轮询 `GET /api/v1/auth/sso/poll?session_id=` →
+  200 `{ok:false,status:pending|failed,reason?}` / 200 `{ok:true,token}`（单次消费）/
+  410 SESSION_EXPIRED
+- 桌面不再监听 127.0.0.1:18499、不再传回环 redirect 给浑天；IP 直连全链路成立
+- /me/instances 路径修正：**无前缀** `{gateway}/api/v1/me/instances`（/agent 前缀为老
+  路由概念，实测 ROUTE_NOT_FOUND）
+
+真机验收（2026-09-04，session eff93fc3…）：start → 浏览器自动跳「登录成功」→
+poll ok:true（token_len=227）→ Bearer 拉 /me/instances HTTP 200 返回 9 实例。
+
+历史根因链备查：白名单热加载覆盖（system_settings 权威 > yaml 基线）→ cookie 域不匹配
+（callback_base_url 置空跟随 Host）→ login_url 直连浑天绕过 gateway cookie 中转
+（0d2437e 修复）。浑天行为实测结论：对带额外 query/路径段的 redirectUrl 只跳不挂 token，
+纯注册路径才挂。
