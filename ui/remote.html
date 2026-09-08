@@ -5,7 +5,7 @@
 <title>远程实例 · 御符账号</title>
 <style>
   /* ── 设计令牌：浅色基线；深色经 data-theme=dark 与 prefers-color-scheme 叠加 ──
-     间距栅格 4px 基准；圆角两档（10 容器 / 8 控件 / 999 胶囊）；单主色 + 语义色 */
+     间距栅格 4px 基准；圆角两档（8 控件/行 / 12 对话框）；单主色 + 语义色 */
   :root {
     color-scheme: light;
     --bg: #f6f7f9;
@@ -74,36 +74,53 @@
 
   * { box-sizing: border-box; }
   html, body { height: 100%; }
+  /* decorum 窗控钮钉位（webapp TITLEBAR_INSET_CSS 的端口守卫对 tauri.localhost 页不生效，本页自补） */
+  [data-tauri-decorum-tb] { position: fixed !important; top: 0; right: 0; z-index: 2147483647; }
   body {
-    margin: 0; padding: 20px;
+    margin: 0;
+    display: flex; flex-direction: column;
     font-family: "Segoe UI", system-ui, "Microsoft YaHei", sans-serif;
     font-size: 13px; line-height: 1.5; color: var(--text-1);
     background: var(--bg);
     user-select: none;
-    transition: background .15s ease;
   }
   :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 6px; }
+  body.mac .titlebar { padding-left: 84px; } /* macOS 红绿灯在左，预留按钮区 */
 
-  /* ── 头部 ── */
-  .head { display: flex; align-items: center; gap: 12px; margin-bottom: 16px; }
-  .head h1 { font-size: 15px; font-weight: 650; margin: 0; }
-  .head .sub { color: var(--text-3); font-size: 12px; margin-top: 1px; }
-  .head .t { flex: 1; min-width: 0; }
-  .head .btns { display: flex; gap: 8px; }
+  /* ── 标题栏（无边框窗口：拖拽区 + 主题/刷新按钮；右上预留 decorum 窗控钮） ── */
+  .titlebar {
+    flex: none; display: flex; align-items: center; gap: 12px;
+    height: 46px; padding: 0 148px 0 16px;
+    border-bottom: 1px solid var(--border); background: var(--surface);
+    user-select: none;
+    -webkit-app-region: drag; /* Tauri 内核拖拽（配合 data-tauri-drag-region 属性双保险） */
+  }
+  .titlebar button { -webkit-app-region: no-drag; }
+  .titlebar .glyph {
+    width: 26px; height: 26px; border-radius: 8px; flex: none;
+    background: linear-gradient(135deg, #4d6fff, #7a5cff);
+    display: grid; place-items: center;
+  }
+  .titlebar .glyph svg { width: 14px; height: 14px; }
+  .titlebar .t { flex: 1; min-width: 0; }
+  .titlebar h1 { font-size: 13px; font-weight: 650; margin: 0; }
+  .titlebar .sub { color: var(--text-3); font-size: 11px; margin-top: 0; }
+  .titlebar .btns { display: flex; gap: 8px; }
   .icon-btn {
-    width: 32px; height: 32px; border-radius: 8px; cursor: pointer;
+    width: 28px; height: 28px; border-radius: 8px; cursor: pointer;
     border: 1px solid var(--border); background: var(--surface); color: var(--text-2);
     display: grid; place-items: center; transition: color .12s, border-color .12s;
   }
   .icon-btn:hover { color: var(--text-1); border-color: var(--border-strong); }
-  .icon-btn svg { width: 15px; height: 15px; }
+  .icon-btn svg { width: 14px; height: 14px; }
   .icon-btn.spin svg { animation: r .8s linear infinite; }
 
-  /* ── 区块 ── */
+  /* ── 内容滚动区 ── */
+  main { flex: 1; overflow-y: auto; padding: 16px 20px 8px; }
   section { margin-bottom: 16px; }
   .sec-h { display: flex; align-items: baseline; gap: 8px; margin-bottom: 8px; }
   .sec-h h2 { font-size: 12px; font-weight: 600; margin: 0; color: var(--text-2); letter-spacing: .4px; }
-  .sec-h .count { font-size: 12px; color: var(--text-3); }
+  .sec-h .muted { font-size: 11px; }
 
   /* ── 实例行 ── */
   ul.list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
@@ -131,7 +148,19 @@
     border: 1px solid var(--border); color: var(--text-3); background: var(--surface);
   }
   .pill.ok { border-color: var(--ok-border); color: var(--ok); background: var(--ok-soft); }
-  .pill.blue { border-color: var(--accent-soft); color: var(--accent); background: var(--accent-soft); }
+
+  /* ── 账号卡 ── */
+  .account { display: flex; align-items: center; gap: 12px; }
+  .account-chip {
+    display: inline-flex; align-items: center; gap: 8px;
+    border: 1px solid var(--ok-border); background: var(--ok-soft);
+    color: var(--ok); border-radius: 999px; padding: 4px 12px 4px 4px; font-weight: 600;
+  }
+  .account-chip .avatar {
+    width: 22px; height: 22px; border-radius: 50%; background: var(--ok);
+    color: #fff; display: grid; place-items: center; font-size: 12px;
+  }
+  .account-chip small { font-weight: 400; color: var(--text-3); }
 
   /* ── 按钮 ── */
   button {
@@ -147,25 +176,12 @@
   button.sm { padding: 4px 12px; font-size: 12px; }
   button:disabled { opacity: .45; cursor: not-allowed; }
 
-  /* ── 账号卡 ── */
-  .account { display: flex; align-items: center; gap: 12px; }
-  .account-chip {
-    display: inline-flex; align-items: center; gap: 8px;
-    border: 1px solid var(--ok-border); background: var(--ok-soft);
-    color: var(--ok); border-radius: 999px; padding: 4px 12px 4px 4px; font-weight: 600;
-  }
-  .account-chip .avatar {
-    width: 22px; height: 22px; border-radius: 50%; background: var(--ok);
-    color: #fff; display: grid; place-items: center; font-size: 12px;
-  }
-  .account-chip small { font-weight: 400; color: var(--text-3); }
-
   /* ── 状态与空态 ── */
   .muted { color: var(--text-3); font-size: 12px; }
   .empty { padding: 16px 12px; text-align: center; }
   .empty p { margin: 0 0 10px; color: var(--text-3); font-size: 12px; }
   .empty h3 { margin: 0 0 2px; font-size: 13px; font-weight: 600; color: var(--text-2); }
-  .msg { display: none; border-radius: 8px; padding: 8px 12px; font-size: 12px; margin-top: 12px; }
+  .msg { display: none; border-radius: 8px; padding: 8px 12px; font-size: 12px; margin: 8px 0; }
   .msg.show { display: block; }
   .msg.err { display: block; background: var(--danger-soft); border: 1px solid var(--danger-border); color: var(--danger); white-space: pre-wrap; }
   .msg.ok { display: block; background: var(--ok-soft); border: 1px solid var(--ok-border); color: var(--ok); }
@@ -176,13 +192,21 @@
     animation: r .8s linear infinite; vertical-align: -2px; margin-right: 6px;
   }
   @keyframes r { to { transform: rotate(360deg); } }
-  .skel { height: 44px; border-radius: 8px; background: var(--skeleton); animation: pulse 1.4s ease infinite; }
+  .skel { display: flex; align-items: center; gap: 12px; height: 48px; }
+  .skel .g { width: 32px; height: 32px; border-radius: 8px; background: var(--skeleton); animation: pulse 1.4s ease infinite; flex: none; }
+  .skel .bars { flex: 1; display: flex; flex-direction: column; gap: 6px; }
+  .skel .b { height: 10px; border-radius: 4px; background: var(--skeleton); animation: pulse 1.4s ease infinite; }
+  .skel .b.w1 { width: 58%; }
+  .skel .b.w2 { width: 82%; }
   .skel + .skel { margin-top: 6px; }
-  @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: .55; } }
+  @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: .5; } }
 
-  /* ── 底部操作 ── */
-  .foot { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 4px; }
-  .foot .spacer { flex: 1; }
+  /* ── 底部操作栏（钉底） ── */
+  .footbar {
+    flex: none; display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
+    padding: 10px 20px; border-top: 1px solid var(--border); background: var(--surface);
+  }
+  .footbar .spacer { flex: 1; }
 
   /* ── 对话框 ── */
   dialog {
@@ -197,10 +221,16 @@
 </style>
 </head>
 <body>
-  <div class="head">
-    <div class="t">
-      <h1>远程实例</h1>
-      <div class="sub">以御符账号身份，发现并直连你名下的 dsh 实例</div>
+  <header class="titlebar" data-tauri-drag-region>
+    <div class="glyph" data-tauri-drag-region aria-hidden="true">
+      <svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <rect x="2" y="3" width="20" height="6" rx="2"/><rect x="2" y="15" width="20" height="6" rx="2"/>
+        <circle cx="6" cy="6" r=".5" fill="#fff"/><circle cx="6" cy="18" r=".5" fill="#fff"/>
+      </svg>
+    </div>
+    <div class="t" data-tauri-drag-region>
+      <h1 data-tauri-drag-region>远程实例</h1>
+      <div class="sub" data-tauri-drag-region>御符账号 · 发现并直连名下 dsh 实例</div>
     </div>
     <div class="btns">
       <button class="icon-btn" id="btnTheme" aria-label="切换主题" title="主题：跟随系统">
@@ -220,38 +250,41 @@
         </svg>
       </button>
     </div>
-  </div>
+  </header>
 
-  <section aria-labelledby="hAccount">
-    <div class="sec-h"><h2 id="hAccount">账号</h2></div>
-    <ul class="list" role="list">
-      <li class="row" style="padding:12px">
-        <div class="glyph2" aria-hidden="true">符</div>
-        <div class="meta">
-          <div id="loginArea" class="muted">加载中…</div>
-        </div>
-        <div class="foot" id="loginActions" style="margin:0"></div>
-      </li>
-    </ul>
-  </section>
+  <main>
+    <section aria-labelledby="hAccount">
+      <div class="sec-h"><h2 id="hAccount">账号</h2></div>
+      <ul class="list" role="list">
+        <li class="row" style="padding:12px">
+          <div class="glyph2" aria-hidden="true">符</div>
+          <div class="meta">
+            <div id="loginArea" class="muted">加载中…</div>
+          </div>
+          <div class="foot" id="loginActions" style="margin:0"></div>
+        </li>
+      </ul>
+    </section>
 
-  <section aria-labelledby="hCached">
-    <div class="sec-h"><h2 id="hCached">本机凭据</h2><span class="muted">离线可连</span></div>
-    <ul class="list" id="cachedList" role="list" aria-label="本机凭据实例"></ul>
-  </section>
+    <section aria-labelledby="hCached">
+      <div class="sec-h"><h2 id="hCached">本机凭据</h2><span class="muted">离线可连</span></div>
+      <ul class="list" id="cachedList" role="list" aria-label="本机凭据实例"></ul>
+    </section>
 
-  <section aria-labelledby="hCloud">
-    <div class="sec-h"><h2 id="hCloud">云端实例</h2><span class="muted">御符账号名下 · 仅显示可连的 dsh 实例</span></div>
-    <ul class="list" id="cloudList" role="list" aria-label="云端实例"></ul>
-  </section>
+    <section aria-labelledby="hCloud">
+      <div class="sec-h"><h2 id="hCloud">云端实例</h2><span class="muted">御符账号名下 · 仅显示可连的 dsh 实例</span></div>
+      <ul class="list" id="cloudList" role="list" aria-label="云端实例"></ul>
+    </section>
 
-  <div class="foot">
+    <div id="msg" class="msg" role="status" aria-live="polite"></div>
+  </main>
+
+  <footer class="footbar">
     <button id="btnManual" class="sm">手动配对（兼容旧流程）</button>
     <button id="btnToLocal" class="sm">切回本地</button>
     <div class="spacer"></div>
     <button id="btnClear" class="sm ghost-danger">清除当前凭据</button>
-  </div>
-  <div id="msg" class="msg" role="status" aria-live="polite"></div>
+  </footer>
 
   <dialog id="tofuDlg">
     <h3>首次连接确认（TOFU）</h3>
@@ -267,6 +300,8 @@
     const invoke = window.__TAURI__ && window.__TAURI__.core && window.__TAURI__.core.invoke;
     const $ = (id) => document.getElementById(id);
     const state = { pendingAddress: null, busy: false };
+
+    if (/Mac/i.test(navigator.userAgent)) document.body.classList.add('mac');
 
     /* ── 主题：跟随系统 + 三态覆盖（auto/light/dark，localStorage 持久化） ── */
     const THEME_KEY = 'remote-theme';
@@ -302,7 +337,11 @@
     }
     function skeleton(count) {
       const wrap = document.createElement('div'); wrap.setAttribute('aria-busy', 'true');
-      for (let i = 0; i < count; i++) { const s = document.createElement('div'); s.className = 'skel'; wrap.appendChild(s); }
+      for (let i = 0; i < count; i++) {
+        const s = document.createElement('div'); s.className = 'skel';
+        s.innerHTML = `<div class="g"></div><div class="bars"><div class="b w1"></div><div class="b w2"></div></div>`;
+        wrap.appendChild(s);
+      }
       return wrap;
     }
     function emptyState(title, text, action) {
