@@ -4,239 +4,217 @@
 <meta charset="utf-8" />
 <title>远程实例 · 御符账号</title>
 <style>
-  /* ── 主题令牌：浅色为基线，深色经 [data-theme=dark] 与 OS prefers-color-scheme 叠加 ── */
+  /* ── 设计令牌：浅色基线；深色经 data-theme=dark 与 prefers-color-scheme 叠加 ──
+     间距栅格 4px 基准；圆角两档（10 容器 / 8 控件 / 999 胶囊）；单主色 + 语义色 */
   :root {
     color-scheme: light;
-    --bg: #f5f6f8;
-    --card: #ffffff;
-    --card-hover: #f2f4f8;
-    --border: #e4e7ec;
-    --border-strong: #d0d5dd;
-    --text-1: #1a1d24;
-    --text-2: #5a6472;
-    --text-3: #8a93a3;
-    --accent: #3b6ef5;
-    --accent-hover: #2f5cd8;
-    --accent-dim: rgba(59, 110, 245, .1);
-    --ok: #12946a;
-    --ok-dim: rgba(18, 148, 106, .1);
-    --ok-border: rgba(18, 148, 106, .3);
-    --danger: #d9484f;
-    --danger-dim: rgba(217, 72, 79, .08);
-    --danger-border: rgba(217, 72, 79, .3);
-    --shadow: 0 1px 2px rgba(16, 24, 40, .06);
-    --radius: 12px;
+    --bg: #f6f7f9;
+    --surface: #ffffff;
+    --surface-hover: #f1f3f6;
+    --border: #e3e6ea;
+    --border-strong: #c9cfd8;
+    --text-1: #171a20;
+    --text-2: #4c5560;
+    --text-3: #8b93a1;
+    --accent: #2563eb;
+    --accent-strong: #1d4fd8;
+    --accent-soft: rgba(37, 99, 235, .08);
+    --ok: #15803d;
+    --ok-soft: rgba(21, 128, 61, .07);
+    --ok-border: rgba(21, 128, 61, .28);
+    --danger: #dc2626;
+    --danger-soft: rgba(220, 38, 38, .07);
+    --danger-border: rgba(220, 38, 38, .28);
+    --skeleton: #e9ecf0;
   }
   @media (prefers-color-scheme: dark) {
     :root:not([data-theme="light"]) {
       color-scheme: dark;
-      --bg: #0e1014;
-      --card: #151922;
-      --card-hover: #1a1f2b;
-      --border: #242a36;
-      --border-strong: #303748;
-      --text-1: #e9ecf2;
-      --text-2: #9aa4b8;
-      --text-3: #667089;
-      --accent: #5b8cff;
-      --accent-hover: #7aa2ff;
-      --accent-dim: rgba(91, 140, 255, .14);
-      --ok: #34d399;
-      --ok-dim: rgba(52, 211, 153, .12);
-      --ok-border: rgba(52, 211, 153, .3);
-      --danger: #f8717a;
-      --danger-dim: rgba(248, 113, 122, .1);
-      --danger-border: rgba(248, 113, 122, .3);
-      --shadow: 0 1px 2px rgba(0, 0, 0, .25);
+      --bg: #0f1115;
+      --surface: #171a21;
+      --surface-hover: #1d222c;
+      --border: #262c37;
+      --border-strong: #363e4d;
+      --text-1: #e7eaf0;
+      --text-2: #9aa3b2;
+      --text-3: #687182;
+      --accent: #5d8bfd;
+      --accent-strong: #7ba1fc;
+      --accent-soft: rgba(93, 139, 253, .12);
+      --ok: #45c48a;
+      --ok-soft: rgba(69, 196, 138, .1);
+      --ok-border: rgba(69, 196, 138, .3);
+      --danger: #ef6b6b;
+      --danger-soft: rgba(239, 107, 107, .1);
+      --danger-border: rgba(239, 107, 107, .3);
+      --skeleton: #1d222c;
     }
   }
   :root[data-theme="dark"] {
     color-scheme: dark;
-    --bg: #0e1014;
-    --card: #151922;
-    --card-hover: #1a1f2b;
-    --border: #242a36;
-    --border-strong: #303748;
-    --text-1: #e9ecf2;
-    --text-2: #9aa4b8;
-    --text-3: #667089;
-    --accent: #5b8cff;
-    --accent-hover: #7aa2ff;
-    --accent-dim: rgba(91, 140, 255, .14);
-    --ok: #34d399;
-    --ok-dim: rgba(52, 211, 153, .12);
-    --ok-border: rgba(52, 211, 153, .3);
-    --danger: #f8717a;
-    --danger-dim: rgba(248, 113, 122, .1);
-    --danger-border: rgba(248, 113, 122, .3);
-    --shadow: 0 1px 2px rgba(0, 0, 0, .25);
+    --bg: #0f1115;
+    --surface: #171a21;
+    --surface-hover: #1d222c;
+    --border: #262c37;
+    --border-strong: #363e4d;
+    --text-1: #e7eaf0;
+    --text-2: #9aa3b2;
+    --text-3: #687182;
+    --accent: #5d8bfd;
+    --accent-strong: #7ba1fc;
+    --accent-soft: rgba(93, 139, 253, .12);
+    --ok: #45c48a;
+    --ok-soft: rgba(69, 196, 138, .1);
+    --ok-border: rgba(69, 196, 138, .3);
+    --danger: #ef6b6b;
+    --danger-soft: rgba(239, 107, 107, .1);
+    --danger-border: rgba(239, 107, 107, .3);
+    --skeleton: #1d222c;
   }
 
   * { box-sizing: border-box; }
   html, body { height: 100%; }
   body {
-    margin: 0; padding: 20px 22px 24px;
+    margin: 0; padding: 20px;
     font-family: "Segoe UI", system-ui, "Microsoft YaHei", sans-serif;
     font-size: 13px; line-height: 1.5; color: var(--text-1);
     background: var(--bg);
-    user-select: none; transition: background .2s;
+    user-select: none;
+    transition: background .15s ease;
   }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 6px; }
 
   /* ── 头部 ── */
-  .head { display: flex; align-items: flex-start; gap: 10px; margin-bottom: 18px; }
-  .head .glyph {
-    width: 34px; height: 34px; border-radius: 10px; flex: none;
-    background: linear-gradient(135deg, #4d6fff, #7a5cff);
-    display: grid; place-items: center; margin-top: 2px;
-    box-shadow: 0 4px 14px rgba(91, 140, 255, .35);
-  }
-  .head .glyph svg { width: 18px; height: 18px; }
+  .head { display: flex; align-items: center; gap: 12px; margin-bottom: 16px; }
+  .head h1 { font-size: 15px; font-weight: 650; margin: 0; }
+  .head .sub { color: var(--text-3); font-size: 12px; margin-top: 1px; }
   .head .t { flex: 1; min-width: 0; }
-  .head h1 { font-size: 16px; font-weight: 650; margin: 0; letter-spacing: .3px; }
-  .head .sub { color: var(--text-3); font-size: 12px; margin-top: 2px; }
+  .head .btns { display: flex; gap: 8px; }
   .icon-btn {
-    width: 32px; height: 32px; border-radius: 9px; flex: none; cursor: pointer;
-    border: 1px solid var(--border); background: var(--card); color: var(--text-2);
-    display: grid; place-items: center; transition: all .15s;
+    width: 32px; height: 32px; border-radius: 8px; cursor: pointer;
+    border: 1px solid var(--border); background: var(--surface); color: var(--text-2);
+    display: grid; place-items: center; transition: color .12s, border-color .12s;
   }
-  .icon-btn:hover { color: var(--accent-hover); border-color: var(--border-strong); background: var(--card-hover); }
+  .icon-btn:hover { color: var(--text-1); border-color: var(--border-strong); }
   .icon-btn svg { width: 15px; height: 15px; }
   .icon-btn.spin svg { animation: r .8s linear infinite; }
-  .head .btns { display: flex; gap: 8px; margin-top: 2px; }
 
-  /* ── 卡片 ── */
-  .card {
-    background: var(--card); border: 1px solid var(--border); border-radius: var(--radius);
-    padding: 14px 16px; margin-bottom: 14px;
-    box-shadow: var(--shadow);
-  }
-  .card-h { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
-  .card-h .bar { width: 3px; height: 13px; border-radius: 2px; background: var(--accent); opacity: .85; }
-  .card-h h2 { font-size: 13px; font-weight: 600; margin: 0; color: var(--text-1); letter-spacing: .2px; }
-  .card-h .tag {
-    font-size: 11px; color: var(--text-3); background: var(--bg);
-    border: 1px solid var(--border); border-radius: 99px; padding: 1px 9px; margin-left: auto;
-  }
-
-  /* ── 登录卡 ── */
-  .login-row { display: flex; align-items: center; gap: 12px; }
-  .account-chip {
-    display: inline-flex; align-items: center; gap: 8px;
-    background: var(--ok-dim); border: 1px solid var(--ok-border);
-    color: var(--ok); border-radius: 99px; padding: 5px 14px 5px 8px; font-weight: 600;
-  }
-  .account-chip .avatar {
-    width: 22px; height: 22px; border-radius: 50%; background: var(--ok);
-    color: #fff; display: grid; place-items: center;
-    font-size: 12px; font-weight: 700;
-  }
-  .account-chip small { font-weight: 400; color: var(--text-2); }
+  /* ── 区块 ── */
+  section { margin-bottom: 16px; }
+  .sec-h { display: flex; align-items: baseline; gap: 8px; margin-bottom: 8px; }
+  .sec-h h2 { font-size: 12px; font-weight: 600; margin: 0; color: var(--text-2); letter-spacing: .4px; }
+  .sec-h .count { font-size: 12px; color: var(--text-3); }
 
   /* ── 实例行 ── */
-  .list { display: flex; flex-direction: column; gap: 6px; }
-  .row {
-    display: flex; align-items: center; gap: 12px; padding: 10px 12px;
-    border: 1px solid var(--border); border-radius: 10px; background: var(--card);
-    transition: border-color .15s, background .15s;
+  ul.list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+  li.row {
+    display: flex; align-items: center; gap: 12px; padding: 8px 12px;
+    border: 1px solid var(--border); border-radius: 8px; background: var(--surface);
+    transition: border-color .12s, background .12s;
   }
-  .row:hover { border-color: var(--border-strong); background: var(--card-hover); }
-  .row.current { border-color: var(--ok-border); background: var(--ok-dim); }
-  .dot { width: 8px; height: 8px; border-radius: 50%; flex: none; background: var(--text-3); }
-  .dot.ok { background: var(--ok); box-shadow: 0 0 6px rgba(52, 211, 153, .5); }
-  .dot.dim { background: var(--text-3); }
-  .row .glyph2 {
-    width: 34px; height: 34px; border-radius: 9px; flex: none;
-    background: var(--accent-dim); color: var(--accent-hover);
-    display: grid; place-items: center; font-weight: 700; font-size: 14px;
+  li.row:hover { border-color: var(--border-strong); background: var(--surface-hover); }
+  li.row.current { border-color: var(--ok-border); background: var(--ok-soft); }
+  .dot { width: 7px; height: 7px; border-radius: 50%; flex: none; background: var(--text-3); }
+  .dot.ok { background: var(--ok); }
+  .dot.dim { background: var(--border-strong); }
+  .glyph2 {
+    width: 32px; height: 32px; border-radius: 8px; flex: none;
+    background: var(--accent-soft); color: var(--accent);
+    display: grid; place-items: center; font-weight: 650; font-size: 13px;
   }
-  .row .meta { flex: 1; min-width: 0; }
-  .row .name { font-weight: 600; display: flex; align-items: center; gap: 8px; }
-  .row .name .nm { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .row .desc { color: var(--text-3); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-top: 1px; }
+  .meta { flex: 1; min-width: 0; }
+  .meta .name { font-weight: 600; display: flex; align-items: center; gap: 8px; min-width: 0; }
+  .meta .name .nm { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .meta .desc { color: var(--text-3); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .pill {
-    font-size: 10.5px; border-radius: 99px; padding: 1px 8px; flex: none;
-    border: 1px solid transparent;
+    font-size: 11px; border-radius: 999px; padding: 0 8px; line-height: 18px; flex: none;
+    border: 1px solid var(--border); color: var(--text-3); background: var(--surface);
   }
-  .pill.ok { background: var(--ok-dim); color: var(--ok); border-color: var(--ok-border); }
-  .pill.gray { background: var(--bg); color: var(--text-3); border-color: var(--border); }
+  .pill.ok { border-color: var(--ok-border); color: var(--ok); background: var(--ok-soft); }
+  .pill.blue { border-color: var(--accent-soft); color: var(--accent); background: var(--accent-soft); }
 
   /* ── 按钮 ── */
   button {
-    font: inherit; border: 1px solid var(--border-strong); background: var(--card);
+    font: inherit; border: 1px solid var(--border-strong); background: var(--surface);
     color: var(--text-1); border-radius: 8px; padding: 5px 14px; cursor: pointer;
-    transition: all .15s; flex: none;
+    transition: color .12s, border-color .12s, background .12s; flex: none;
   }
-  button:hover { border-color: var(--accent); color: var(--accent-hover); }
-  button.primary {
-    background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600;
-    box-shadow: 0 2px 10px rgba(91, 140, 255, .28);
-  }
-  button.primary:hover { background: var(--accent-hover); border-color: var(--accent-hover); color: #fff; }
+  button:hover { border-color: var(--text-3); }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
+  button.primary:hover { background: var(--accent-strong); border-color: var(--accent-strong); color: #fff; }
   button.ghost-danger { border-color: transparent; background: none; color: var(--text-3); }
-  button.ghost-danger:hover { color: var(--danger); background: var(--danger-dim); border-color: transparent; }
-  button.link { border: none; background: none; color: var(--accent-hover); padding: 2px 4px; }
-  button.link:hover { color: var(--text-1); }
+  button.ghost-danger:hover { color: var(--danger); background: var(--danger-soft); }
   button.sm { padding: 4px 12px; font-size: 12px; }
-  button:disabled { opacity: .4; cursor: not-allowed; }
+  button:disabled { opacity: .45; cursor: not-allowed; }
 
-  /* ── 状态/空态 ── */
+  /* ── 账号卡 ── */
+  .account { display: flex; align-items: center; gap: 12px; }
+  .account-chip {
+    display: inline-flex; align-items: center; gap: 8px;
+    border: 1px solid var(--ok-border); background: var(--ok-soft);
+    color: var(--ok); border-radius: 999px; padding: 4px 12px 4px 4px; font-weight: 600;
+  }
+  .account-chip .avatar {
+    width: 22px; height: 22px; border-radius: 50%; background: var(--ok);
+    color: #fff; display: grid; place-items: center; font-size: 12px;
+  }
+  .account-chip small { font-weight: 400; color: var(--text-3); }
+
+  /* ── 状态与空态 ── */
   .muted { color: var(--text-3); font-size: 12px; }
-  .empty { text-align: center; padding: 18px 0 14px; color: var(--text-3); font-size: 12px; }
-  .empty .e-ico { font-size: 20px; margin-bottom: 6px; opacity: .6; }
-  .msg { border-radius: 9px; padding: 8px 12px; font-size: 12px; margin-top: 12px; display: none; }
+  .empty { padding: 16px 12px; text-align: center; }
+  .empty p { margin: 0 0 10px; color: var(--text-3); font-size: 12px; }
+  .empty h3 { margin: 0 0 2px; font-size: 13px; font-weight: 600; color: var(--text-2); }
+  .msg { display: none; border-radius: 8px; padding: 8px 12px; font-size: 12px; margin-top: 12px; }
   .msg.show { display: block; }
-  .msg.err { display: block; background: var(--danger-dim); border: 1px solid var(--danger-border); color: var(--danger); white-space: pre-wrap; }
-  .msg.ok { display: block; background: var(--ok-dim); border: 1px solid var(--ok-border); color: var(--ok); }
-  .msg.muted { display: block; background: var(--card); border: 1px solid var(--border); color: var(--text-2); }
+  .msg.err { display: block; background: var(--danger-soft); border: 1px solid var(--danger-border); color: var(--danger); white-space: pre-wrap; }
+  .msg.ok { display: block; background: var(--ok-soft); border: 1px solid var(--ok-border); color: var(--ok); }
+  .msg.muted { display: block; border: 1px solid var(--border); color: var(--text-2); background: var(--surface); }
   .spin {
-    display: inline-block; width: 13px; height: 13px; border: 2px solid var(--border-strong);
+    display: inline-block; width: 12px; height: 12px; border: 2px solid var(--border-strong);
     border-top-color: var(--accent); border-radius: 50%;
     animation: r .8s linear infinite; vertical-align: -2px; margin-right: 6px;
   }
   @keyframes r { to { transform: rotate(360deg); } }
+  .skel { height: 44px; border-radius: 8px; background: var(--skeleton); animation: pulse 1.4s ease infinite; }
+  .skel + .skel { margin-top: 6px; }
+  @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: .55; } }
 
-  /* ── 底部操作区 ── */
-  .foot { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 14px; align-items: center; }
+  /* ── 底部操作 ── */
+  .foot { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 4px; }
   .foot .spacer { flex: 1; }
 
   /* ── 对话框 ── */
   dialog {
-    background: var(--card); color: var(--text-1);
-    border: 1px solid var(--border-strong); border-radius: 14px; padding: 18px;
-    width: 92%; box-shadow: 0 20px 60px rgba(0, 0, 0, .35);
+    background: var(--surface); color: var(--text-1);
+    border: 1px solid var(--border-strong); border-radius: 12px; padding: 18px;
+    width: 92%; box-shadow: 0 16px 48px rgba(0, 0, 0, .3);
   }
-  dialog::backdrop { background: rgba(4, 6, 10, .45); backdrop-filter: blur(2px); }
-  dialog h3 { margin: 0 0 10px; font-size: 14px; }
+  dialog::backdrop { background: rgba(8, 10, 14, .45); }
+  dialog h3 { margin: 0 0 8px; font-size: 14px; }
   .dlg-btns { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
-  code { background: var(--bg); border: 1px solid var(--border); padding: 1px 5px; border-radius: 5px; font-size: 12px; }
-  .hint { color: var(--text-3); font-size: 12px; margin: 8px 0; }
+  .hint { color: var(--text-3); font-size: 12px; margin: 6px 0; }
 </style>
 </head>
 <body>
   <div class="head">
-    <div class="glyph">
-      <svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-        <rect x="2" y="3" width="20" height="6" rx="2"/><rect x="2" y="15" width="20" height="6" rx="2"/>
-        <circle cx="6" cy="6" r=".5" fill="#fff"/><circle cx="6" cy="18" r=".5" fill="#fff"/>
-      </svg>
-    </div>
     <div class="t">
       <h1>远程实例</h1>
-      <div class="sub">御符账号登录后，展示并直连你名下的远程 dsh 实例</div>
+      <div class="sub">以御符账号身份，发现并直连你名下的 dsh 实例</div>
     </div>
     <div class="btns">
-      <button class="icon-btn" id="btnTheme" title="主题：跟随系统">
+      <button class="icon-btn" id="btnTheme" aria-label="切换主题" title="主题：跟随系统">
         <svg id="icoThemeAuto" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
           <rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/>
         </svg>
         <svg id="icoThemeLight" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:none">
-          <circle cx="12" cy="12" r="4"/><path d="M12 2v2m0 16v2M4.9 4.9l1.4 1.4m11.4 11.4 1.4 1.4M2 12h2m16 0h2M4.9 19.1l1.4-1.4m11.4-11.4 1.4-1.4"/>
+          <circle cx="12" cy="12" r="4"/><line x1="12" y1="2" x2="12" y2="4"/><line x1="12" y1="20" x2="12" y2="22"/><line x1="4.9" y1="4.9" x2="6.3" y2="6.3"/><line x1="17.7" y1="17.7" x2="19.1" y2="19.1"/><line x1="2" y1="12" x2="4" y2="12"/><line x1="20" y1="12" x2="22" y2="12"/><line x1="4.9" y1="19.1" x2="6.3" y2="17.7"/><line x1="17.7" y1="6.3" x2="19.1" y2="4.9"/>
         </svg>
         <svg id="icoThemeDark" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:none">
           <path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/>
         </svg>
       </button>
-      <button class="icon-btn" id="btnRefresh" title="刷新清单">
+      <button class="icon-btn" id="btnRefresh" aria-label="刷新清单" title="刷新清单">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
           <polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>
         </svg>
@@ -244,21 +222,28 @@
     </div>
   </div>
 
-  <div class="card" id="loginCard">
-    <div class="card-h"><span class="bar"></span><h2>御符账号</h2></div>
-    <div id="loginArea" class="muted">加载中…</div>
-    <div class="foot" id="loginActions" style="margin-top:10px"></div>
-  </div>
+  <section aria-labelledby="hAccount">
+    <div class="sec-h"><h2 id="hAccount">账号</h2></div>
+    <ul class="list" role="list">
+      <li class="row" style="padding:12px">
+        <div class="glyph2" aria-hidden="true">符</div>
+        <div class="meta">
+          <div id="loginArea" class="muted">加载中…</div>
+        </div>
+        <div class="foot" id="loginActions" style="margin:0"></div>
+      </li>
+    </ul>
+  </section>
 
-  <div class="card">
-    <div class="card-h"><span class="bar" style="background:var(--ok)"></span><h2>本机凭据</h2><span class="tag">离线可连</span></div>
-    <div id="cachedList" class="muted">加载中…</div>
-  </div>
+  <section aria-labelledby="hCached">
+    <div class="sec-h"><h2 id="hCached">本机凭据</h2><span class="muted">离线可连</span></div>
+    <ul class="list" id="cachedList" role="list" aria-label="本机凭据实例"></ul>
+  </section>
 
-  <div class="card">
-    <div class="card-h"><span class="bar"></span><h2>云端名下实例</h2><span class="tag">御符 SSO</span></div>
-    <div id="cloudList" class="muted">登录后显示</div>
-  </div>
+  <section aria-labelledby="hCloud">
+    <div class="sec-h"><h2 id="hCloud">云端实例</h2><span class="muted">御符账号名下 · 仅显示可连的 dsh 实例</span></div>
+    <ul class="list" id="cloudList" role="list" aria-label="云端实例"></ul>
+  </section>
 
   <div class="foot">
     <button id="btnManual" class="sm">手动配对（兼容旧流程）</button>
@@ -266,15 +251,15 @@
     <div class="spacer"></div>
     <button id="btnClear" class="sm ghost-danger">清除当前凭据</button>
   </div>
-  <div id="msg" class="msg"></div>
+  <div id="msg" class="msg" role="status" aria-live="polite"></div>
 
   <dialog id="tofuDlg">
     <h3>首次连接确认（TOFU）</h3>
-    <div class="hint" id="tofuAddr"></div>
-    <div class="hint">这是你第一次连接该地址。请确认它属于你的实例（继续后该地址将被记住，不再询问）。</div>
+    <p class="hint" id="tofuAddr"></p>
+    <p class="hint">这是你第一次连接该地址。请确认它属于你的实例——继续后该地址将被记住，不再询问。</p>
     <div class="dlg-btns">
       <button id="tofuCancel">取消</button>
-      <button id="tofuOk" class="primary">确认并连接</button>
+      <button id="tofuOk" class="primary" autofocus>确认并连接</button>
     </div>
   </dialog>
 
@@ -283,7 +268,7 @@
     const $ = (id) => document.getElementById(id);
     const state = { pendingAddress: null, busy: false };
 
-    /* ── 主题：跟随系统 + 窗口内三态覆盖（auto/light/dark，localStorage 持久化） ── */
+    /* ── 主题：跟随系统 + 三态覆盖（auto/light/dark，localStorage 持久化） ── */
     const THEME_KEY = 'remote-theme';
     const THEME_TITLE = { auto: '主题：跟随系统', light: '主题：浅色', dark: '主题：深色' };
     const THEME_ICON = { auto: 'icoThemeAuto', light: 'icoThemeLight', dark: 'icoThemeDark' };
@@ -294,6 +279,7 @@
       for (const id of Object.values(THEME_ICON)) $(id).style.display = 'none';
       $(THEME_ICON[t]).style.display = '';
       $('btnTheme').title = THEME_TITLE[t];
+      $('btnTheme').setAttribute('aria-label', THEME_TITLE[t]);
     }
     $('btnTheme').onclick = () => {
       const order = ['auto', 'light', 'dark'];
@@ -314,12 +300,29 @@
       if (!on) { for (const b of document.querySelectorAll('button')) b.disabled = false; }
       if (on && label) msg(label, 'muted');
     }
-    function emptyBlock(icon, text) {
+    function skeleton(count) {
+      const wrap = document.createElement('div'); wrap.setAttribute('aria-busy', 'true');
+      for (let i = 0; i < count; i++) { const s = document.createElement('div'); s.className = 'skel'; wrap.appendChild(s); }
+      return wrap;
+    }
+    function emptyState(title, text, action) {
       const d = document.createElement('div'); d.className = 'empty';
-      d.innerHTML = `<div class="e-ico">${icon}</div><div>${text}</div>`;
+      d.innerHTML = `<h3></h3><p></p>`;
+      d.querySelector('h3').textContent = title;
+      d.querySelector('p').textContent = text;
+      if (action) d.appendChild(action);
       return d;
     }
     function hostInitial(name) { return (name || '·').trim().charAt(0).toUpperCase() || '·'; }
+    function rowShell(dotState, initial) {
+      const row = document.createElement('li'); row.className = 'row';
+      const dot = document.createElement('span'); dot.className = `dot ${dotState}`; dot.setAttribute('aria-hidden', 'true');
+      row.appendChild(dot);
+      const g = document.createElement('div'); g.className = 'glyph2'; g.setAttribute('aria-hidden', 'true');
+      g.textContent = initial; row.appendChild(g);
+      const meta = document.createElement('div'); meta.className = 'meta'; row.appendChild(meta);
+      return { row, meta };
+    }
 
     async function refresh() {
       if (state.busy) return;
@@ -332,29 +335,31 @@
     }
 
     function render(data) {
-      // ── 登录态 ──
+      // ── 账号 ──
       const la = $('loginArea'); const lb = $('loginActions'); lb.innerHTML = '';
       if (data.loggedIn) {
+        la.className = '';
         la.innerHTML = `<span class="account-chip"><span class="avatar">符</span>御符账号已登录 <small>· 凭证仅存于本进程内存</small></span>`;
         const out = document.createElement('button'); out.className = 'sm'; out.textContent = '登出';
         out.onclick = async () => { try { await invoke('remote_logout'); await refresh(); } catch (e) { msg(String(e)); } };
         lb.appendChild(out);
       } else {
-        la.innerHTML = `<span class="muted">未登录——登录后展示你名下的远程实例清单。</span>`;
-        const btn = document.createElement('button'); btn.className = 'primary'; btn.textContent = '使用御符账号登录';
+        la.className = 'muted';
+        la.textContent = '未登录';
+        const btn = document.createElement('button'); btn.className = 'primary sm'; btn.textContent = '使用御符账号登录';
         btn.onclick = () => doLogin();
         lb.appendChild(btn);
       }
       // ── 本机凭据段 ──
       const cl = $('cachedList'); cl.innerHTML = '';
-      if (!data.cached || data.cached.length === 0) { cl.appendChild(emptyBlock('🗂', '本机没有任何远程实例凭据')); }
+      if (!data.cached || data.cached.length === 0) {
+        cl.appendChild(emptyState('暂无本机凭据', '连接过的实例会出现在这里，离线也能重连。'));
+      }
       for (const c of data.cached || []) {
-        const row = document.createElement('div'); row.className = 'row' + (c.current ? ' current' : '');
-        row.innerHTML = `<span class="dot ${c.current ? 'ok' : 'dim'}"></span><div class="glyph2">⌂</div>`;
-        const meta = document.createElement('div'); meta.className = 'meta';
+        const { row, meta } = rowShell(c.current ? 'ok' : 'dim', '⌂');
+        row.classList.toggle('current', !!c.current);
         meta.innerHTML = `<div class="name"><span class="nm">${escapeHtml(c.address)}</span>${c.current ? '<span class="pill ok">已连接</span>' : ''}</div>`
           + `<div class="desc">${escapeHtml(c.origin)}</div>`;
-        row.appendChild(meta);
         const sw = document.createElement('button'); sw.className = 'sm';
         sw.textContent = c.current ? '重连' : '连接';
         sw.onclick = () => connectCached(c.address);
@@ -363,29 +368,33 @@
       }
       // ── 云端段 ──
       const ul = $('cloudList'); ul.innerHTML = '';
-      if (!data.loggedIn) { ul.appendChild(emptyBlock('☁', '未登录——登录后展示御符账号名下的实例。')); return; }
+      if (!data.loggedIn) {
+        const loginHere = document.createElement('button'); loginHere.className = 'primary sm';
+        loginHere.textContent = '使用御符账号登录';
+        loginHere.onclick = () => doLogin();
+        ul.appendChild(emptyState('未登录', '登录后展示御符账号名下可连的 dsh 实例。', loginHere));
+        return;
+      }
       if (!data.cloud || data.cloud.length === 0) {
-        ul.appendChild(emptyBlock('☁', '账号下暂无可连的 dsh 实例（仅显示已安装 dsh-remote 并开启远程访问的实例）。可点「手动配对」走豁免流程。'));
+        const manual = document.createElement('button'); manual.className = 'sm';
+        manual.textContent = '手动配对';
+        manual.onclick = () => { try { invoke('remote_show_legacy_connect'); } catch (e) { msg(String(e)); } };
+        ul.appendChild(emptyState('暂无可连实例', '仅显示已安装 dsh-remote 并开启远程访问的实例。', manual));
         return;
       }
       for (const inst of data.cloud) {
         const addr = inst.address || '';
         const offline = !addr;
         const alive = inst.alive === true;
-        const row = document.createElement('div'); row.className = 'row';
-        row.innerHTML = `<span class="dot ${offline ? 'dim' : (alive ? 'ok' : 'dim')}"></span>`;
-        const g = document.createElement('div'); g.className = 'glyph2';
-        g.textContent = hostInitial(inst.name || inst.hostname || inst.instanceId);
-        row.appendChild(g);
-        const meta = document.createElement('div'); meta.className = 'meta';
+        const name = inst.name || inst.hostname || inst.instanceId;
+        const { row, meta } = rowShell(offline ? 'dim' : (alive ? 'ok' : 'dim'), hostInitial(name));
         const statusPill = offline
-          ? '<span class="pill gray">未开启远程访问</span>'
-          : (alive ? '<span class="pill ok">在线</span>' : '<span class="pill gray">探活中</span>');
-        meta.innerHTML = `<div class="name"><span class="nm">${escapeHtml(inst.name || inst.hostname || inst.instanceId)}</span>${statusPill}</div>`
+          ? '<span class="pill">未开启远程访问</span>'
+          : (alive ? '<span class="pill ok">在线</span>' : '<span class="pill">探活中</span>');
+        meta.innerHTML = `<div class="name"><span class="nm">${escapeHtml(name)}</span>${statusPill}</div>`
           + `<div class="desc">${escapeHtml(inst.hostname || '')}${addr ? ' · ' + escapeHtml(addr) : ''} · agent×${inst.agentCount ?? '?'}</div>`;
-        row.appendChild(meta);
         const btn = document.createElement('button'); btn.className = 'sm primary';
-        if (offline) { btn.textContent = '不可连'; btn.disabled = true; }
+        if (offline) { btn.textContent = '不可连'; btn.disabled = true; btn.setAttribute('aria-disabled', 'true'); }
         else { btn.textContent = '连接'; btn.onclick = () => connectCloud(inst.address); }
         row.appendChild(btn);
         ul.appendChild(row);
@@ -453,6 +462,9 @@
       return String(s ?? '').replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
     }
 
+    // 首屏骨架屏（首次数据到达前占位）
+    $('cachedList').appendChild(skeleton(2));
+    $('cloudList').appendChild(skeleton(2));
     refresh();
   </script>
 </body>
