@@ -45,8 +45,9 @@ fn build_control_window(app: &tauri::AppHandle) -> tauri::Result<()> {
         let _ = w.set_focus();
         return Ok(());
     }
-    // 无边框 + decorum 覆盖式标题栏：与主窗口同一套自定义窗口外观
-    // （页面端 .titlebar 预留右上按钮区并作拖拽区，见 ui/remote.html）
+    // 无边框自定义标题栏（remote.html 自绘窗控按钮+拖拽区）。
+    // 不用 decorum 覆盖式标题栏：它的按钮注入依赖 page-load 事件竞态，
+    // 懒创建窗口里页面加载先于监听注册 → 按钮永不出现（真机实测）。
     let mut builder = tauri::WebviewWindowBuilder::new(
         app,
         "remote-control",
@@ -55,9 +56,7 @@ fn build_control_window(app: &tauri::AppHandle) -> tauri::Result<()> {
     .title("远程实例 · 御符账号")
     .inner_size(560.0, 680.0)
     .min_inner_size(460.0, 520.0)
-    .center()
-    .initialization_script(crate::webview::TITLEBAR_INSET_CSS)
-    .initialization_script(crate::webview::DECORUM_ICON_CSS);
+    .center();
     #[cfg(not(target_os = "macos"))]
     {
         builder = builder.decorations(false);
@@ -68,9 +67,7 @@ fn build_control_window(app: &tauri::AppHandle) -> tauri::Result<()> {
             .title_bar_style(tauri::TitleBarStyle::Overlay)
             .hidden_title(true);
     }
-    let window = builder.build()?;
-    use tauri_plugin_decorum::WebviewWindowExt;
-    window.create_overlay_titlebar()?;
+    let _window = builder.build()?;
     Ok(())
 }
 

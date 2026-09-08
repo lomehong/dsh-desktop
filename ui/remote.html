@@ -74,8 +74,6 @@
 
   * { box-sizing: border-box; }
   html, body { height: 100%; }
-  /* decorum 窗控钮钉位（webapp TITLEBAR_INSET_CSS 的端口守卫对 tauri.localhost 页不生效，本页自补） */
-  [data-tauri-decorum-tb] { position: fixed !important; top: 0; right: 0; z-index: 2147483647; }
   body {
     margin: 0;
     display: flex; flex-direction: column;
@@ -87,15 +85,28 @@
   :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 6px; }
   body.mac .titlebar { padding-left: 84px; } /* macOS 红绿灯在左，预留按钮区 */
 
-  /* ── 标题栏（无边框窗口：拖拽区 + 主题/刷新按钮；右上预留 decorum 窗控钮） ── */
+  /* ── 标题栏（无边框窗口：拖拽区 + 主题/刷新按钮 + 自绘窗控钮） ── */
   .titlebar {
     flex: none; display: flex; align-items: center; gap: 12px;
-    height: 46px; padding: 0 148px 0 16px;
+    height: 46px; padding: 0 0 0 16px;
     border-bottom: 1px solid var(--border); background: var(--surface);
     user-select: none;
     -webkit-app-region: drag; /* Tauri 内核拖拽（配合 data-tauri-drag-region 属性双保险） */
   }
   .titlebar button { -webkit-app-region: no-drag; }
+
+  /* ── 自绘窗控按钮（无边框窗口；不用 decorum——懒创建窗口里它的注入事件竞态丢失） ── */
+  .win-controls { display: flex; height: 46px; align-self: stretch; }
+  .win-btn {
+    width: 46px; height: 100%; border: none; border-radius: 0; background: none; cursor: pointer;
+    color: var(--text-2); display: grid; place-items: center;
+    -webkit-app-region: no-drag;
+    transition: background .1s, color .1s;
+    padding: 0;
+  }
+  .win-btn:hover { background: var(--surface-hover); color: var(--text-1); border: none; }
+  .win-btn.close:hover { background: #e81123; color: #fff; }
+  .win-btn svg { width: 12px; height: 12px; }
   .titlebar .glyph {
     width: 26px; height: 26px; border-radius: 8px; flex: none;
     background: linear-gradient(135deg, #4d6fff, #7a5cff);
@@ -250,6 +261,18 @@
         </svg>
       </button>
     </div>
+    <!-- 自绘窗控钮（不用 decorum——懒创建窗口里它的 page-load 注入事件竞态丢失） -->
+    <div class="win-controls">
+      <button class="win-btn" id="winMin" aria-label="最小化" title="最小化">
+        <svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.2"><line x1="1" y1="6" x2="11" y2="6"/></svg>
+      </button>
+      <button class="win-btn" id="winMax" aria-label="最大化/还原" title="最大化/还原">
+        <svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.2"><rect x="2" y="2" width="8" height="8" rx="1"/></svg>
+      </button>
+      <button class="win-btn close" id="winClose" aria-label="关闭" title="关闭">
+        <svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.2"><line x1="1" y1="1" x2="11" y2="11"/><line x1="11" y1="1" x2="1" y2="11"/></svg>
+      </button>
+    </div>
   </header>
 
   <main>
@@ -302,6 +325,15 @@
     const state = { pendingAddress: null, busy: false };
 
     if (/Mac/i.test(navigator.userAgent)) document.body.classList.add('mac');
+
+    /* ── 自绘窗控钮（无边框窗口；__TAURI__.window 全局可用） ── */
+    const selfWin = window.__TAURI__ && window.__TAURI__.window && window.__TAURI__.window.getCurrentWindow
+      ? window.__TAURI__.window.getCurrentWindow() : null;
+    if (selfWin) {
+      $('winMin').onclick = () => selfWin.minimize();
+      $('winMax').onclick = () => selfWin.toggleMaximize();
+      $('winClose').onclick = () => selfWin.close();
+    }
 
     /* ── 主题：跟随系统 + 三态覆盖（auto/light/dark，localStorage 持久化） ── */
     const THEME_KEY = 'remote-theme';
