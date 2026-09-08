@@ -1,0 +1,18 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "remote-control",
+  "description": "远程实例控制窗（remote.html）：自绘窗控钮 + 拖拽区所需的窗口控制权限；自定义命令（remote_*）不受 capabilities 约束，无需在此列出",
+  "local": true,
+  "windows": ["remote-control"],
+  "permissions": [
+    "core:default",
+    "core:window:allow-close",
+    "core:window:allow-minimize",
+    "core:window:allow-maximize",
+    "core:window:allow-unmaximize",
+    "core:window:allow-is-maximized",
+    "core:window:allow-toggle-maximize",
+    "core:window:allow-start-dragging",
+    "core:event:default"
+  ]
+}

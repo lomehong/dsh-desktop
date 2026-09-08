@@ -4,72 +4,61 @@
 <meta charset="utf-8" />
 <title>远程实例 · 御符账号</title>
 <style>
-  /* ── 设计令牌：浅色基线；深色经 data-theme=dark 与 prefers-color-scheme 叠加 ──
-     间距栅格 4px 基准；圆角两档（8 控件/行 / 12 对话框）；单主色 + 语义色 */
+  /* ── 设计令牌：跟随系统深浅色（与主窗口一致，窗口内不再提供主题切换）。
+     主色对齐主窗口品牌渐变 #4a6cf7 → #7b5cf0；间距 4px 栅格；
+     圆角两档（10 卡片/行、14 对话框）；边框弱化、以阴影分层 ── */
   :root {
     color-scheme: light;
-    --bg: #f6f7f9;
+    --bg: #f3f5f8;
     --surface: #ffffff;
-    --surface-hover: #f1f3f6;
-    --border: #e3e6ea;
-    --border-strong: #c9cfd8;
-    --text-1: #171a20;
-    --text-2: #4c5560;
-    --text-3: #8b93a1;
-    --accent: #2563eb;
-    --accent-strong: #1d4fd8;
-    --accent-soft: rgba(37, 99, 235, .08);
+    --surface-hover: #eef1f6;
+    --border: #e4e8ee;
+    --border-strong: #cdd4de;
+    --text-1: #131824;
+    --text-2: #4c5666;
+    --text-3: #8a93a5;
+    --accent: #4a6cf7;
+    --accent-strong: #3b5ce6;
+    --accent-soft: rgba(74, 108, 247, .09);
+    --accent-shadow: rgba(74, 108, 247, .28);
+    --grad: linear-gradient(135deg, #4a6cf7, #7b5cf0);
     --ok: #15803d;
-    --ok-soft: rgba(21, 128, 61, .07);
-    --ok-border: rgba(21, 128, 61, .28);
+    --ok-soft: rgba(21, 128, 61, .08);
+    --ok-border: rgba(21, 128, 61, .3);
     --danger: #dc2626;
     --danger-soft: rgba(220, 38, 38, .07);
     --danger-border: rgba(220, 38, 38, .28);
-    --skeleton: #e9ecf0;
+    --skeleton: #e9edf2;
+    --shadow-sm: 0 1px 2px rgba(16, 24, 40, .05);
+    --shadow-md: 0 8px 24px rgba(16, 24, 40, .1);
+    --shadow-lg: 0 24px 64px rgba(16, 24, 40, .22);
   }
   @media (prefers-color-scheme: dark) {
-    :root:not([data-theme="light"]) {
+    :root {
       color-scheme: dark;
-      --bg: #0f1115;
-      --surface: #171a21;
-      --surface-hover: #1d222c;
-      --border: #262c37;
-      --border-strong: #363e4d;
-      --text-1: #e7eaf0;
-      --text-2: #9aa3b2;
-      --text-3: #687182;
-      --accent: #5d8bfd;
-      --accent-strong: #7ba1fc;
-      --accent-soft: rgba(93, 139, 253, .12);
+      --bg: #0e1116;
+      --surface: #161a22;
+      --surface-hover: #1d232e;
+      --border: #262d3a;
+      --border-strong: #384152;
+      --text-1: #e8ebf2;
+      --text-2: #9aa4b5;
+      --text-3: #69738a;
+      --accent: #7b9bff;
+      --accent-strong: #93aeff;
+      --accent-soft: rgba(123, 155, 255, .12);
+      --accent-shadow: rgba(74, 108, 247, .4);
       --ok: #45c48a;
       --ok-soft: rgba(69, 196, 138, .1);
       --ok-border: rgba(69, 196, 138, .3);
       --danger: #ef6b6b;
       --danger-soft: rgba(239, 107, 107, .1);
       --danger-border: rgba(239, 107, 107, .3);
-      --skeleton: #1d222c;
+      --skeleton: #1d232e;
+      --shadow-sm: 0 1px 2px rgba(0, 0, 0, .3);
+      --shadow-md: 0 8px 24px rgba(0, 0, 0, .4);
+      --shadow-lg: 0 24px 64px rgba(0, 0, 0, .55);
     }
-  }
-  :root[data-theme="dark"] {
-    color-scheme: dark;
-    --bg: #0f1115;
-    --surface: #171a21;
-    --surface-hover: #1d222c;
-    --border: #262c37;
-    --border-strong: #363e4d;
-    --text-1: #e7eaf0;
-    --text-2: #9aa3b2;
-    --text-3: #687182;
-    --accent: #5d8bfd;
-    --accent-strong: #7ba1fc;
-    --accent-soft: rgba(93, 139, 253, .12);
-    --ok: #45c48a;
-    --ok-soft: rgba(69, 196, 138, .1);
-    --ok-border: rgba(69, 196, 138, .3);
-    --danger: #ef6b6b;
-    --danger-soft: rgba(239, 107, 107, .1);
-    --danger-border: rgba(239, 107, 107, .3);
-    --skeleton: #1d222c;
   }
 
   * { box-sizing: border-box; }
@@ -85,10 +74,10 @@
   :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 6px; }
   body.mac .titlebar { padding-left: 84px; } /* macOS 红绿灯在左，预留按钮区 */
 
-  /* ── 标题栏（无边框窗口：拖拽区 + 主题/刷新按钮 + 自绘窗控钮） ── */
+  /* ── 标题栏（无边框窗口：拖拽区 + 刷新钮 + 自绘窗控钮） ── */
   .titlebar {
     flex: none; display: flex; align-items: center; gap: 12px;
-    height: 46px; padding: 0 0 0 16px;
+    height: 48px; padding: 0 0 0 16px;
     border-bottom: 1px solid var(--border); background: var(--surface);
     user-select: none;
     -webkit-app-region: drag; /* Tauri 内核拖拽（配合 data-tauri-drag-region 属性双保险） */
@@ -96,7 +85,7 @@
   .titlebar button { -webkit-app-region: no-drag; }
 
   /* ── 自绘窗控按钮（无边框窗口；不用 decorum——懒创建窗口里它的注入事件竞态丢失） ── */
-  .win-controls { display: flex; height: 46px; align-self: stretch; }
+  .win-controls { display: flex; height: 48px; align-self: stretch; }
   .win-btn {
     width: 46px; height: 100%; border: none; border-radius: 0; background: none; cursor: pointer;
     color: var(--text-2); display: grid; place-items: center;
@@ -108,47 +97,64 @@
   .win-btn.close:hover { background: #e81123; color: #fff; }
   .win-btn svg { width: 12px; height: 12px; }
   .titlebar .glyph {
-    width: 26px; height: 26px; border-radius: 8px; flex: none;
-    background: linear-gradient(135deg, #4d6fff, #7a5cff);
+    width: 28px; height: 28px; border-radius: 8px; flex: none;
+    background: var(--grad);
+    box-shadow: 0 2px 8px var(--accent-shadow);
     display: grid; place-items: center;
   }
-  .titlebar .glyph svg { width: 14px; height: 14px; }
+  .titlebar .glyph svg { width: 15px; height: 15px; }
   .titlebar .t { flex: 1; min-width: 0; }
   .titlebar h1 { font-size: 13px; font-weight: 650; margin: 0; }
-  .titlebar .sub { color: var(--text-3); font-size: 11px; margin-top: 0; }
-  .titlebar .btns { display: flex; gap: 8px; }
+  .titlebar .sub { color: var(--text-3); font-size: 11px; margin-top: 1px; }
+  .titlebar .btns { display: flex; gap: 4px; }
+  /* 幽灵图标钮：无边框无底，悬停才浮现底色（与窗控钮同族） */
   .icon-btn {
-    width: 28px; height: 28px; border-radius: 8px; cursor: pointer;
-    border: 1px solid var(--border); background: var(--surface); color: var(--text-2);
-    display: grid; place-items: center; transition: color .12s, border-color .12s;
+    width: 30px; height: 30px; border-radius: 8px; cursor: pointer;
+    border: none; background: none; color: var(--text-2);
+    display: grid; place-items: center;
+    transition: background .12s, color .12s;
+    padding: 0;
   }
-  .icon-btn:hover { color: var(--text-1); border-color: var(--border-strong); }
-  .icon-btn svg { width: 14px; height: 14px; }
-  .icon-btn.spin svg { animation: r .8s linear infinite; }
+  .icon-btn:hover { background: var(--surface-hover); color: var(--text-1); border: none; }
+  .icon-btn svg { width: 15px; height: 15px; }
+  /* 刷新中只旋转箭头——类名须避开 .spin（圆形加载圈），否则按钮自身会被命中成圆圈 */
+  .icon-btn.spinning svg { animation: r .8s linear infinite; }
 
   /* ── 内容滚动区 ── */
-  main { flex: 1; overflow-y: auto; padding: 16px 20px 8px; }
-  section { margin-bottom: 16px; }
-  .sec-h { display: flex; align-items: baseline; gap: 8px; margin-bottom: 8px; }
-  .sec-h h2 { font-size: 12px; font-weight: 600; margin: 0; color: var(--text-2); letter-spacing: .4px; }
+  main { flex: 1; overflow-y: auto; padding: 18px 22px 10px; }
+  main::-webkit-scrollbar { width: 10px; }
+  main::-webkit-scrollbar-track { background: transparent; }
+  main::-webkit-scrollbar-thumb {
+    background: var(--border-strong); border-radius: 6px;
+    border: 3px solid var(--bg); background-clip: padding-box;
+  }
+  section { margin-bottom: 20px; }
+  .sec-h { display: flex; align-items: baseline; gap: 8px; margin: 0 2px 8px; }
+  .sec-h h2 { font-size: 12px; font-weight: 650; margin: 0; color: var(--text-2); letter-spacing: .3px; }
   .sec-h .muted { font-size: 11px; }
 
-  /* ── 实例行 ── */
-  ul.list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+  /* ── 实例行：弱边框 + 浅阴影分层，悬停微浮起 ── */
+  ul.list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
   li.row {
-    display: flex; align-items: center; gap: 12px; padding: 8px 12px;
-    border: 1px solid var(--border); border-radius: 8px; background: var(--surface);
-    transition: border-color .12s, background .12s;
+    display: flex; align-items: center; gap: 12px; padding: 10px 14px;
+    border: 1px solid var(--border); border-radius: 10px; background: var(--surface);
+    box-shadow: var(--shadow-sm);
+    transition: border-color .14s, background .14s, box-shadow .14s, transform .14s;
   }
-  li.row:hover { border-color: var(--border-strong); background: var(--surface-hover); }
+  li.row:hover {
+    border-color: var(--border-strong); background: var(--surface);
+    box-shadow: var(--shadow-md); transform: translateY(-1px);
+  }
   li.row.current { border-color: var(--ok-border); background: var(--ok-soft); }
+  li.row.current:hover { box-shadow: var(--shadow-sm); transform: none; }
   .dot { width: 7px; height: 7px; border-radius: 50%; flex: none; background: var(--text-3); }
-  .dot.ok { background: var(--ok); }
+  .dot.ok { background: var(--ok); box-shadow: 0 0 0 3px var(--ok-soft); }
   .dot.dim { background: var(--border-strong); }
+  /* 品牌渐变头像：与主窗口 logo 同源，跨窗口视觉一致 */
   .glyph2 {
-    width: 32px; height: 32px; border-radius: 8px; flex: none;
-    background: var(--accent-soft); color: var(--accent);
-    display: grid; place-items: center; font-weight: 650; font-size: 13px;
+    width: 34px; height: 34px; border-radius: 9px; flex: none;
+    background: var(--grad); color: #fff;
+    display: grid; place-items: center; font-weight: 650; font-size: 14px;
   }
   .meta { flex: 1; min-width: 0; }
   .meta .name { font-weight: 600; display: flex; align-items: center; gap: 8px; min-width: 0; }
@@ -176,12 +182,16 @@
   /* ── 按钮 ── */
   button {
     font: inherit; border: 1px solid var(--border-strong); background: var(--surface);
-    color: var(--text-1); border-radius: 8px; padding: 5px 14px; cursor: pointer;
-    transition: color .12s, border-color .12s, background .12s; flex: none;
+    color: var(--text-1); border-radius: 8px; padding: 6px 14px; cursor: pointer;
+    transition: color .12s, border-color .12s, background .12s, box-shadow .12s, filter .12s;
+    flex: none;
   }
-  button:hover { border-color: var(--text-3); }
-  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
-  button.primary:hover { background: var(--accent-strong); border-color: var(--accent-strong); color: #fff; }
+  button:hover { background: var(--surface-hover); }
+  button.primary {
+    background: var(--grad); border: none; color: #fff; font-weight: 600;
+    box-shadow: 0 3px 10px var(--accent-shadow);
+  }
+  button.primary:hover { background: var(--grad); filter: brightness(1.07); box-shadow: 0 5px 14px var(--accent-shadow); }
   button.ghost-danger { border-color: transparent; background: none; color: var(--text-3); }
   button.ghost-danger:hover { color: var(--danger); background: var(--danger-soft); }
   button.sm { padding: 4px 12px; font-size: 12px; }
@@ -189,10 +199,16 @@
 
   /* ── 状态与空态 ── */
   .muted { color: var(--text-3); font-size: 12px; }
-  .empty { padding: 16px 12px; text-align: center; }
-  .empty p { margin: 0 0 10px; color: var(--text-3); font-size: 12px; }
-  .empty h3 { margin: 0 0 2px; font-size: 13px; font-weight: 600; color: var(--text-2); }
-  .msg { display: none; border-radius: 8px; padding: 8px 12px; font-size: 12px; margin: 8px 0; }
+  .empty { padding: 26px 12px 22px; text-align: center; }
+  .empty-ico {
+    width: 44px; height: 44px; border-radius: 12px; margin: 0 auto 10px;
+    background: var(--accent-soft); color: var(--accent);
+    display: grid; place-items: center;
+  }
+  .empty-ico svg { width: 22px; height: 22px; }
+  .empty p { margin: 0 0 12px; color: var(--text-3); font-size: 12px; }
+  .empty h3 { margin: 0 0 3px; font-size: 13px; font-weight: 600; color: var(--text-2); }
+  .msg { display: none; border-radius: 10px; padding: 9px 12px; font-size: 12px; margin: 8px 0; }
   .msg.show { display: block; }
   .msg.err { display: block; background: var(--danger-soft); border: 1px solid var(--danger-border); color: var(--danger); white-space: pre-wrap; }
   .msg.ok { display: block; background: var(--ok-soft); border: 1px solid var(--ok-border); color: var(--ok); }
@@ -203,31 +219,31 @@
     animation: r .8s linear infinite; vertical-align: -2px; margin-right: 6px;
   }
   @keyframes r { to { transform: rotate(360deg); } }
-  .skel { display: flex; align-items: center; gap: 12px; height: 48px; }
-  .skel .g { width: 32px; height: 32px; border-radius: 8px; background: var(--skeleton); animation: pulse 1.4s ease infinite; flex: none; }
+  .skel { display: flex; align-items: center; gap: 12px; height: 54px; }
+  .skel .g { width: 34px; height: 34px; border-radius: 9px; background: var(--skeleton); animation: pulse 1.4s ease infinite; flex: none; }
   .skel .bars { flex: 1; display: flex; flex-direction: column; gap: 6px; }
   .skel .b { height: 10px; border-radius: 4px; background: var(--skeleton); animation: pulse 1.4s ease infinite; }
   .skel .b.w1 { width: 58%; }
   .skel .b.w2 { width: 82%; }
-  .skel + .skel { margin-top: 6px; }
+  .skel + .skel { margin-top: 8px; }
   @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: .5; } }
 
   /* ── 底部操作栏（钉底） ── */
   .footbar {
-    flex: none; display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
-    padding: 10px 20px; border-top: 1px solid var(--border); background: var(--surface);
+    flex: none; display: flex; flex-wrap: wrap; gap: 10px; align-items: center;
+    padding: 12px 22px; border-top: 1px solid var(--border); background: var(--surface);
   }
   .footbar .spacer { flex: 1; }
 
   /* ── 对话框 ── */
   dialog {
     background: var(--surface); color: var(--text-1);
-    border: 1px solid var(--border-strong); border-radius: 12px; padding: 18px;
-    width: 92%; box-shadow: 0 16px 48px rgba(0, 0, 0, .3);
+    border: 1px solid var(--border); border-radius: 14px; padding: 22px;
+    width: 92%; box-shadow: var(--shadow-lg);
   }
-  dialog::backdrop { background: rgba(8, 10, 14, .45); }
-  dialog h3 { margin: 0 0 8px; font-size: 14px; }
-  .dlg-btns { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
+  dialog::backdrop { background: rgba(8, 10, 14, .5); backdrop-filter: blur(3px); }
+  dialog h3 { margin: 0 0 10px; font-size: 14px; }
+  .dlg-btns { display: flex; justify-content: flex-end; gap: 10px; margin-top: 18px; }
   .hint { color: var(--text-3); font-size: 12px; margin: 6px 0; }
 </style>
 </head>
@@ -244,17 +260,6 @@
       <div class="sub" data-tauri-drag-region>御符账号 · 发现并直连名下 dsh 实例</div>
     </div>
     <div class="btns">
-      <button class="icon-btn" id="btnTheme" aria-label="切换主题" title="主题：跟随系统">
-        <svg id="icoThemeAuto" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-          <rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/>
-        </svg>
-        <svg id="icoThemeLight" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:none">
-          <circle cx="12" cy="12" r="4"/><line x1="12" y1="2" x2="12" y2="4"/><line x1="12" y1="20" x2="12" y2="22"/><line x1="4.9" y1="4.9" x2="6.3" y2="6.3"/><line x1="17.7" y1="17.7" x2="19.1" y2="19.1"/><line x1="2" y1="12" x2="4" y2="12"/><line x1="20" y1="12" x2="22" y2="12"/><line x1="4.9" y1="19.1" x2="6.3" y2="17.7"/><line x1="17.7" y1="6.3" x2="19.1" y2="4.9"/>
-        </svg>
-        <svg id="icoThemeDark" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:none">
-          <path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/>
-        </svg>
-      </button>
       <button class="icon-btn" id="btnRefresh" aria-label="刷新清单" title="刷新清单">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
           <polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>
@@ -279,7 +284,7 @@
     <section aria-labelledby="hAccount">
       <div class="sec-h"><h2 id="hAccount">账号</h2></div>
       <ul class="list" role="list">
-        <li class="row" style="padding:12px">
+        <li class="row" style="padding:12px 14px">
           <div class="glyph2" aria-hidden="true">符</div>
           <div class="meta">
             <div id="loginArea" class="muted">加载中…</div>
@@ -335,27 +340,6 @@
       $('winClose').onclick = () => selfWin.close();
     }
 
-    /* ── 主题：跟随系统 + 三态覆盖（auto/light/dark，localStorage 持久化） ── */
-    const THEME_KEY = 'remote-theme';
-    const THEME_TITLE = { auto: '主题：跟随系统', light: '主题：浅色', dark: '主题：深色' };
-    const THEME_ICON = { auto: 'icoThemeAuto', light: 'icoThemeLight', dark: 'icoThemeDark' };
-    function applyTheme() {
-      const t = localStorage.getItem(THEME_KEY) || 'auto';
-      if (t === 'light' || t === 'dark') document.documentElement.dataset.theme = t;
-      else delete document.documentElement.dataset.theme;
-      for (const id of Object.values(THEME_ICON)) $(id).style.display = 'none';
-      $(THEME_ICON[t]).style.display = '';
-      $('btnTheme').title = THEME_TITLE[t];
-      $('btnTheme').setAttribute('aria-label', THEME_TITLE[t]);
-    }
-    $('btnTheme').onclick = () => {
-      const order = ['auto', 'light', 'dark'];
-      const cur = localStorage.getItem(THEME_KEY) || 'auto';
-      localStorage.setItem(THEME_KEY, order[(order.indexOf(cur) + 1) % order.length]);
-      applyTheme();
-    };
-    applyTheme();
-
     function msg(text, cls) {
       const el = $('msg');
       el.className = text ? `msg show ${cls || 'err'}` : 'msg';
@@ -378,7 +362,7 @@
     }
     function emptyState(title, text, action) {
       const d = document.createElement('div'); d.className = 'empty';
-      d.innerHTML = `<h3></h3><p></p>`;
+      d.innerHTML = `<div class="empty-ico" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="6" rx="2"/><rect x="2" y="15" width="20" height="6" rx="2"/><circle cx="6" cy="6" r=".5" fill="currentColor"/><circle cx="6" cy="18" r=".5" fill="currentColor"/></svg></div><h3></h3><p></p>`;
       d.querySelector('h3').textContent = title;
       d.querySelector('p').textContent = text;
       if (action) d.appendChild(action);
@@ -397,12 +381,12 @@
 
     async function refresh() {
       if (state.busy) return;
-      $('btnRefresh').classList.add('spin');
+      $('btnRefresh').classList.add('spinning');
       try {
         const data = await invoke('remote_instances');
         render(data);
       } catch (e) { msg(String(e)); }
-      $('btnRefresh').classList.remove('spin');
+      $('btnRefresh').classList.remove('spinning');
     }
 
     function render(data) {
