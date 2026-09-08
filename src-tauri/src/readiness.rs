@@ -78,6 +78,76 @@ pub fn wait_http_ok(base: &str, timeout: Duration) -> bool {
     false
 }
 
+/// 对 url 发一次 GET，**任意** HTTP 状态行（1xx-5xx）都算可达。
+/// 用途：rc.1 起 dsh web 自带登录认证，代理后的 `/` 会以 401 登录墙应答——
+/// 这恰恰证明「网关认证 → 上游 web」整条代理链是通的，应放行导航，
+/// 由用户在 webview 内完成交互登录。
+pub fn http_reachable(url: &str) -> bool {
+    http_status(url, None).is_some()
+}
+
+/// 轮询直到任意应答或超时。
+pub fn wait_http_reachable(base: &str, timeout: Duration) -> bool {
+    let start = std::time::Instant::now();
+    while start.elapsed() < timeout {
+        if http_reachable(base) {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    }
+    false
+}
+
+/// 网关凭证有效性直查：GET {origin}/__remote/pair?token=<token> →
+/// 303（种 cookie 落 /）= 令牌有效；403 = 无效/已吊销。不经过本地反代，
+/// 直接问网关，作为连接前的快速失败检查。
+pub fn gateway_token_ok(origin: &str, token: &str) -> bool {
+    matches!(
+        http_status(&format!("{origin}/__remote/pair?token={token}"), None),
+        Some(code) if code.starts_with('3')
+    )
+}
+
+/// GET 一次，返回状态行中的状态码首字符（如 Some("2")）；连不上/非 HTTP → None。
+fn http_status(url: &str, extra_header: Option<(&str, &str)>) -> Option<String> {
+    let rest = url.strip_prefix("http://").unwrap_or(url);
+    let (authority, path) = match rest.split_once('/') {
+        Some((authority, tail)) => (authority, format!("/{tail}")),
+        None => (rest, "/".to_string()),
+    };
+    let Some((host, port)) = authority
+        .rsplit_once(':')
+        .and_then(|(h, p)| p.parse().ok().map(|p| (h, p)))
+    else {
+        return None;
+    };
+    let Ok(mut stream) = TcpStream::connect((host, port)) else {
+        return None;
+    };
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+    let extra_line = extra_header
+        .map(|(k, v)| format!("{k}: {v}\r\n"))
+        .unwrap_or_default();
+    let req = format!("GET {path} HTTP/1.1\r\nHost: {authority}\r\n{extra_line}Connection: close\r\n\r\n");
+    if stream.write_all(req.as_bytes()).is_err() {
+        return None;
+    }
+    let mut buf = [0u8; 128];
+    let Ok(n) = stream.read(&mut buf) else {
+        return None;
+    };
+    let head = String::from_utf8_lossy(&buf[..n]);
+    let status_line = head.lines().next().unwrap_or("");
+    Some(
+        status_line
+            .strip_prefix("HTTP/1.0 ")
+            .or_else(|| status_line.strip_prefix("HTTP/1.1 "))
+            .unwrap_or("")
+            .trim()
+            .to_string(),
+    )
+}
+
 /// 轮询直到就绪或超时，带网关凭证头（直连网关探活用；现役探活见 wait_http_ok +
 /// remote_proxy 的凭证注入）。生产暂无调用方，保留理由同 http_ok_hdr。
 #[allow(dead_code)]

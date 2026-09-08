@@ -760,8 +760,18 @@ fn connect_remote_flow_locked(app: &tauri::AppHandle) -> Result<(), String> {
     ))?;
     *state.proxy.lock().unwrap() = Some(proxy.clone());
     let proxy_origin = format!("http://127.0.0.1:{}", proxy.port);
-    // 探活走代理（全路径体检；代理自动注入凭证头，网关 401 这关照过——凭证失效早暴露）
-    if !crate::readiness::wait_http_ok(
+    // 链路就绪判定（两段式，rc.1 起 dsh web 自带登录认证，探活不再死等 2xx）：
+    // ① 网关凭证直查：pair?token= 303 = 令牌有效（403/超时 = 失效，快速失败并指引重连）
+    // ② 链路可达：代理 / 任意 HTTP 应答（含上游登录墙 401）= 网关→上游通——
+    //    放行导航，rc.1 登录墙由用户在 webview 内交互完成（webview 会话随后持续有效）
+    if !crate::readiness::gateway_token_ok(&cfg.origin, &cfg.token) {
+        stop_proxy(app);
+        return Err(format!(
+            "远程实例 {} 的凭证已失效（请退出御符重新登录后再连接）",
+            cfg.address
+        ));
+    }
+    if !crate::readiness::wait_http_reachable(
         &format!("{proxy_origin}/"),
         Duration::from_secs(HEALTH_WAIT_SECS),
     ) {

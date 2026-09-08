@@ -309,10 +309,13 @@ pub fn taskbar_progress(app: &tauri::AppHandle, percent: Option<u8>, error: bool
 }
 
 /// 用系统默认程序打开 URL / 路径。
+/// Windows 走 rundll32 FileProtocolHandler 而非 cmd /C start：URL 里的 & 裸传给
+/// cmd 会被当命令分隔符截断（Rust 只对含空白的参数加引号；remote_account.rs
+/// open_browser 同款教训——sso-login 的 &sid= 被截导致登录流程失败）。
 pub fn open_external(target: &str) {    #[cfg(windows)]
     let mut cmd = {
-        let mut c = std::process::Command::new("cmd.exe");
-        c.args(["/C", "start", "", target]);
+        let mut c = std::process::Command::new("rundll32");
+        c.args(["url.dll,FileProtocolHandler", target]);
         c
     };
     #[cfg(target_os = "macos")]

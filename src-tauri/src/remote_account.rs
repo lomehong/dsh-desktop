@@ -386,14 +386,19 @@ pub fn sso_login(endpoints: &AccountEndpoints, wait: Duration) -> Result<SsoSess
     }
 }
 
-/// 拉起系统浏览器（Windows cmd start / macOS open / Linux xdg-open）。
-/// Windows 用 runtime::no_window 隐藏子进程控制台——裸 cmd /C start 会闪黑窗。
+/// 拉起系统浏览器（Windows rundll32 / macOS open / Linux xdg-open）。
+/// Windows 用 runtime::no_window 隐藏子进程控制台。
+///
+/// 教训（2026-09-07 真机实测）：此前用 `cmd /C start "" <url>`——Rust 在 Windows
+/// 只对含空白的参数加引号，URL 里的 `&` 裸传给 cmd 被当成命令分隔符，
+/// `&sid=…` 整段被截掉（sso-login 丢 sid → 御符走旧 fragment 回退 →
+/// 浏览器被甩到无人监听的 127.0.0.1:18499）。旧流程截掉的只是无害的 &state=
+/// 所以长期未暴露。rundll32 FileProtocolHandler 不经 cmd，无 shell 解析问题。
 fn open_browser(url: &str) -> Result<(), String> {
     #[cfg(windows)]
     {
-        // start 的第一个引号参数是窗口标题占位；url 必须是第二个参数
-        let mut c = std::process::Command::new("cmd");
-        c.args(["/C", "start", "", url]);
+        let mut c = std::process::Command::new("rundll32");
+        c.args(["url.dll,FileProtocolHandler", url]);
         return crate::runtime::no_window(&mut c)
             .spawn()
             .map(|_| ())
