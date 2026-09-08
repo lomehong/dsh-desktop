@@ -283,7 +283,27 @@ async fn remote_instances(
             let endpoints = remote_account::AccountEndpoints::from_env();
             let (list, alive_map) = tauri::async_runtime::spawn_blocking(move || {
                 let list = remote_account::instances(&endpoints, &jwt)?;
-                // 存活徽标：有 address 的实例逐个探活（401 也算可达）
+                // 只保留可连的 dsh 宿主：address 非空 = 装了 dsh-remote 且开了远程访问。
+                // ai_agents 里的 omp/codex/opencode 类 agent 行没有网关，列出来也无法连接。
+                let mut list: Vec<_> = list
+                    .into_iter()
+                    .filter(|i| i.address.as_deref().is_some_and(|a| !a.trim().is_empty()))
+                    .collect();
+                // 同机多 agent 会带相同 address（gateway-state.json 按机器共享）：
+                // 按地址去重，优先保留 hostname 与地址主机名一致的条目
+                let mut seen = std::collections::HashSet::new();
+                list.sort_by(|a, b| {
+                    let host_match = |i: &remote_account::CloudInstance| {
+                        i.address
+                            .as_deref()
+                            .and_then(|a| a.split(':').next())
+                            .zip(Some(i.hostname.as_str()))
+                            .map_or(false, |(ip, h)| h.eq_ignore_ascii_case(ip))
+                    };
+                    host_match(b).cmp(&host_match(a)).then_with(|| a.name.cmp(&b.name))
+                });
+                list.retain(|i| seen.insert(i.address.clone().unwrap_or_default()));
+                // 存活徽标：逐个探活（401 也算可达）
                 let mut alive_map = std::collections::HashMap::new();
                 for inst in &list {
                     if let Some(addr) = &inst.address {
