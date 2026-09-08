@@ -4,80 +4,274 @@
 <meta charset="utf-8" />
 <title>远程实例 · 御符账号</title>
 <style>
-  :root { color-scheme: light; }
+  /* ── 主题令牌：浅色为基线，深色经 [data-theme=dark] 与 OS prefers-color-scheme 叠加 ── */
+  :root {
+    color-scheme: light;
+    --bg: #f5f6f8;
+    --card: #ffffff;
+    --card-hover: #f2f4f8;
+    --border: #e4e7ec;
+    --border-strong: #d0d5dd;
+    --text-1: #1a1d24;
+    --text-2: #5a6472;
+    --text-3: #8a93a3;
+    --accent: #3b6ef5;
+    --accent-hover: #2f5cd8;
+    --accent-dim: rgba(59, 110, 245, .1);
+    --ok: #12946a;
+    --ok-dim: rgba(18, 148, 106, .1);
+    --ok-border: rgba(18, 148, 106, .3);
+    --danger: #d9484f;
+    --danger-dim: rgba(217, 72, 79, .08);
+    --danger-border: rgba(217, 72, 79, .3);
+    --shadow: 0 1px 2px rgba(16, 24, 40, .06);
+    --radius: 12px;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      color-scheme: dark;
+      --bg: #0e1014;
+      --card: #151922;
+      --card-hover: #1a1f2b;
+      --border: #242a36;
+      --border-strong: #303748;
+      --text-1: #e9ecf2;
+      --text-2: #9aa4b8;
+      --text-3: #667089;
+      --accent: #5b8cff;
+      --accent-hover: #7aa2ff;
+      --accent-dim: rgba(91, 140, 255, .14);
+      --ok: #34d399;
+      --ok-dim: rgba(52, 211, 153, .12);
+      --ok-border: rgba(52, 211, 153, .3);
+      --danger: #f8717a;
+      --danger-dim: rgba(248, 113, 122, .1);
+      --danger-border: rgba(248, 113, 122, .3);
+      --shadow: 0 1px 2px rgba(0, 0, 0, .25);
+    }
+  }
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    --bg: #0e1014;
+    --card: #151922;
+    --card-hover: #1a1f2b;
+    --border: #242a36;
+    --border-strong: #303748;
+    --text-1: #e9ecf2;
+    --text-2: #9aa4b8;
+    --text-3: #667089;
+    --accent: #5b8cff;
+    --accent-hover: #7aa2ff;
+    --accent-dim: rgba(91, 140, 255, .14);
+    --ok: #34d399;
+    --ok-dim: rgba(52, 211, 153, .12);
+    --ok-border: rgba(52, 211, 153, .3);
+    --danger: #f8717a;
+    --danger-dim: rgba(248, 113, 122, .1);
+    --danger-border: rgba(248, 113, 122, .3);
+    --shadow: 0 1px 2px rgba(0, 0, 0, .25);
+  }
+
   * { box-sizing: border-box; }
+  html, body { height: 100%; }
   body {
-    margin: 0; padding: 14px 16px 18px; font-family: system-ui, "Microsoft YaHei", sans-serif;
-    font-size: 13px; color: #1f2329; background: #f7f8fa; user-select: none;
+    margin: 0; padding: 20px 22px 24px;
+    font-family: "Segoe UI", system-ui, "Microsoft YaHei", sans-serif;
+    font-size: 13px; line-height: 1.5; color: var(--text-1);
+    background: var(--bg);
+    user-select: none; transition: background .2s;
   }
-  h1 { font-size: 15px; margin: 0 0 4px; }
-  .sub { color: #86909c; font-size: 12px; margin-bottom: 12px; }
-  .card { background: #fff; border: 1px solid #e5e6eb; border-radius: 8px; padding: 12px; margin-bottom: 12px; }
-  .card h2 { font-size: 13px; margin: 0 0 8px; color: #4e5969; }
-  .row { display: flex; align-items: center; gap: 8px; padding: 7px 8px; border-radius: 6px; }
-  .row:hover { background: #f2f3f5; }
+
+  /* ── 头部 ── */
+  .head { display: flex; align-items: flex-start; gap: 10px; margin-bottom: 18px; }
+  .head .glyph {
+    width: 34px; height: 34px; border-radius: 10px; flex: none;
+    background: linear-gradient(135deg, #4d6fff, #7a5cff);
+    display: grid; place-items: center; margin-top: 2px;
+    box-shadow: 0 4px 14px rgba(91, 140, 255, .35);
+  }
+  .head .glyph svg { width: 18px; height: 18px; }
+  .head .t { flex: 1; min-width: 0; }
+  .head h1 { font-size: 16px; font-weight: 650; margin: 0; letter-spacing: .3px; }
+  .head .sub { color: var(--text-3); font-size: 12px; margin-top: 2px; }
+  .icon-btn {
+    width: 32px; height: 32px; border-radius: 9px; flex: none; cursor: pointer;
+    border: 1px solid var(--border); background: var(--card); color: var(--text-2);
+    display: grid; place-items: center; transition: all .15s;
+  }
+  .icon-btn:hover { color: var(--accent-hover); border-color: var(--border-strong); background: var(--card-hover); }
+  .icon-btn svg { width: 15px; height: 15px; }
+  .icon-btn.spin svg { animation: r .8s linear infinite; }
+  .head .btns { display: flex; gap: 8px; margin-top: 2px; }
+
+  /* ── 卡片 ── */
+  .card {
+    background: var(--card); border: 1px solid var(--border); border-radius: var(--radius);
+    padding: 14px 16px; margin-bottom: 14px;
+    box-shadow: var(--shadow);
+  }
+  .card-h { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
+  .card-h .bar { width: 3px; height: 13px; border-radius: 2px; background: var(--accent); opacity: .85; }
+  .card-h h2 { font-size: 13px; font-weight: 600; margin: 0; color: var(--text-1); letter-spacing: .2px; }
+  .card-h .tag {
+    font-size: 11px; color: var(--text-3); background: var(--bg);
+    border: 1px solid var(--border); border-radius: 99px; padding: 1px 9px; margin-left: auto;
+  }
+
+  /* ── 登录卡 ── */
+  .login-row { display: flex; align-items: center; gap: 12px; }
+  .account-chip {
+    display: inline-flex; align-items: center; gap: 8px;
+    background: var(--ok-dim); border: 1px solid var(--ok-border);
+    color: var(--ok); border-radius: 99px; padding: 5px 14px 5px 8px; font-weight: 600;
+  }
+  .account-chip .avatar {
+    width: 22px; height: 22px; border-radius: 50%; background: var(--ok);
+    color: #fff; display: grid; place-items: center;
+    font-size: 12px; font-weight: 700;
+  }
+  .account-chip small { font-weight: 400; color: var(--text-2); }
+
+  /* ── 实例行 ── */
+  .list { display: flex; flex-direction: column; gap: 6px; }
+  .row {
+    display: flex; align-items: center; gap: 12px; padding: 10px 12px;
+    border: 1px solid var(--border); border-radius: 10px; background: var(--card);
+    transition: border-color .15s, background .15s;
+  }
+  .row:hover { border-color: var(--border-strong); background: var(--card-hover); }
+  .row.current { border-color: var(--ok-border); background: var(--ok-dim); }
+  .dot { width: 8px; height: 8px; border-radius: 50%; flex: none; background: var(--text-3); }
+  .dot.ok { background: var(--ok); box-shadow: 0 0 6px rgba(52, 211, 153, .5); }
+  .dot.dim { background: var(--text-3); }
+  .row .glyph2 {
+    width: 34px; height: 34px; border-radius: 9px; flex: none;
+    background: var(--accent-dim); color: var(--accent-hover);
+    display: grid; place-items: center; font-weight: 700; font-size: 14px;
+  }
   .row .meta { flex: 1; min-width: 0; }
-  .row .addr { font-weight: 600; }
-  .row .desc { color: #86909c; font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .row .current { color: #00b42a; font-size: 12px; margin-left: 6px; }
-  button {
-    font: inherit; border: 1px solid #e5e6eb; background: #fff; color: #1f2329;
-    border-radius: 6px; padding: 5px 12px; cursor: pointer;
+  .row .name { font-weight: 600; display: flex; align-items: center; gap: 8px; }
+  .row .name .nm { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .row .desc { color: var(--text-3); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-top: 1px; }
+  .pill {
+    font-size: 10.5px; border-radius: 99px; padding: 1px 8px; flex: none;
+    border: 1px solid transparent;
   }
-  button:hover { border-color: #4080ff; color: #4080ff; }
-  button.primary { background: #4080ff; border-color: #4080ff; color: #fff; }
-  button.primary:hover { background: #2a6ae9; }
-  button:disabled { opacity: .45; cursor: not-allowed; }
-  button.link { border: none; background: none; color: #4080ff; padding: 2px 4px; }
-  .muted { color: #86909c; font-size: 12px; }
-  .err { color: #f53f3f; font-size: 12px; margin-top: 8px; white-space: pre-wrap; }
-  .ok { color: #00b42a; font-size: 12px; margin-top: 8px; }
-  .spin { display: inline-block; width: 12px; height: 12px; border: 2px solid #c9cdd4;
-    border-top-color: #4080ff; border-radius: 50%; animation: r 0.8s linear infinite; vertical-align: -2px; }
+  .pill.ok { background: var(--ok-dim); color: var(--ok); border-color: var(--ok-border); }
+  .pill.gray { background: var(--bg); color: var(--text-3); border-color: var(--border); }
+
+  /* ── 按钮 ── */
+  button {
+    font: inherit; border: 1px solid var(--border-strong); background: var(--card);
+    color: var(--text-1); border-radius: 8px; padding: 5px 14px; cursor: pointer;
+    transition: all .15s; flex: none;
+  }
+  button:hover { border-color: var(--accent); color: var(--accent-hover); }
+  button.primary {
+    background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600;
+    box-shadow: 0 2px 10px rgba(91, 140, 255, .28);
+  }
+  button.primary:hover { background: var(--accent-hover); border-color: var(--accent-hover); color: #fff; }
+  button.ghost-danger { border-color: transparent; background: none; color: var(--text-3); }
+  button.ghost-danger:hover { color: var(--danger); background: var(--danger-dim); border-color: transparent; }
+  button.link { border: none; background: none; color: var(--accent-hover); padding: 2px 4px; }
+  button.link:hover { color: var(--text-1); }
+  button.sm { padding: 4px 12px; font-size: 12px; }
+  button:disabled { opacity: .4; cursor: not-allowed; }
+
+  /* ── 状态/空态 ── */
+  .muted { color: var(--text-3); font-size: 12px; }
+  .empty { text-align: center; padding: 18px 0 14px; color: var(--text-3); font-size: 12px; }
+  .empty .e-ico { font-size: 20px; margin-bottom: 6px; opacity: .6; }
+  .msg { border-radius: 9px; padding: 8px 12px; font-size: 12px; margin-top: 12px; display: none; }
+  .msg.show { display: block; }
+  .msg.err { display: block; background: var(--danger-dim); border: 1px solid var(--danger-border); color: var(--danger); white-space: pre-wrap; }
+  .msg.ok { display: block; background: var(--ok-dim); border: 1px solid var(--ok-border); color: var(--ok); }
+  .msg.muted { display: block; background: var(--card); border: 1px solid var(--border); color: var(--text-2); }
+  .spin {
+    display: inline-block; width: 13px; height: 13px; border: 2px solid var(--border-strong);
+    border-top-color: var(--accent); border-radius: 50%;
+    animation: r .8s linear infinite; vertical-align: -2px; margin-right: 6px;
+  }
   @keyframes r { to { transform: rotate(360deg); } }
-  .actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
-  .badge { font-size: 11px; border-radius: 4px; padding: 1px 6px; margin-left: 6px; }
-  .badge.gray { background: #f2f3f5; color: #86909c; }
-  .badge.blue { background: #e8f3ff; color: #4080ff; }
-  .badge.red { background: #ffece8; color: #f53f3f; }
-  dialog { border: 1px solid #e5e6eb; border-radius: 8px; padding: 16px; width: 92%; }
-  dialog::backdrop { background: rgba(0,0,0,.25); }
-  .dlg-btns { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px; }
-  code { background: #f2f3f5; padding: 1px 4px; border-radius: 4px; font-size: 12px; }
+
+  /* ── 底部操作区 ── */
+  .foot { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 14px; align-items: center; }
+  .foot .spacer { flex: 1; }
+
+  /* ── 对话框 ── */
+  dialog {
+    background: var(--card); color: var(--text-1);
+    border: 1px solid var(--border-strong); border-radius: 14px; padding: 18px;
+    width: 92%; box-shadow: 0 20px 60px rgba(0, 0, 0, .35);
+  }
+  dialog::backdrop { background: rgba(4, 6, 10, .45); backdrop-filter: blur(2px); }
+  dialog h3 { margin: 0 0 10px; font-size: 14px; }
+  .dlg-btns { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
+  code { background: var(--bg); border: 1px solid var(--border); padding: 1px 5px; border-radius: 5px; font-size: 12px; }
+  .hint { color: var(--text-3); font-size: 12px; margin: 8px 0; }
 </style>
 </head>
 <body>
-  <h1>远程实例</h1>
-  <div class="sub">御符账号登录后，展示并直连你名下的远程 dsh 实例。连接执行经本地回环代理，与配对流程一致。</div>
+  <div class="head">
+    <div class="glyph">
+      <svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <rect x="2" y="3" width="20" height="6" rx="2"/><rect x="2" y="15" width="20" height="6" rx="2"/>
+        <circle cx="6" cy="6" r=".5" fill="#fff"/><circle cx="6" cy="18" r=".5" fill="#fff"/>
+      </svg>
+    </div>
+    <div class="t">
+      <h1>远程实例</h1>
+      <div class="sub">御符账号登录后，展示并直连你名下的远程 dsh 实例</div>
+    </div>
+    <div class="btns">
+      <button class="icon-btn" id="btnTheme" title="主题：跟随系统">
+        <svg id="icoThemeAuto" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/>
+        </svg>
+        <svg id="icoThemeLight" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:none">
+          <circle cx="12" cy="12" r="4"/><path d="M12 2v2m0 16v2M4.9 4.9l1.4 1.4m11.4 11.4 1.4 1.4M2 12h2m16 0h2M4.9 19.1l1.4-1.4m11.4-11.4 1.4-1.4"/>
+        </svg>
+        <svg id="icoThemeDark" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:none">
+          <path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/>
+        </svg>
+      </button>
+      <button class="icon-btn" id="btnRefresh" title="刷新清单">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>
+        </svg>
+      </button>
+    </div>
+  </div>
 
   <div class="card" id="loginCard">
-    <h2>御符账号</h2>
+    <div class="card-h"><span class="bar"></span><h2>御符账号</h2></div>
     <div id="loginArea" class="muted">加载中…</div>
-    <div class="actions" id="loginActions"></div>
+    <div class="foot" id="loginActions" style="margin-top:10px"></div>
   </div>
 
   <div class="card">
-    <h2>缓存实例 <span class="badge gray">本机已有凭据 · 离线可连</span></h2>
+    <div class="card-h"><span class="bar" style="background:var(--ok)"></span><h2>本机凭据</h2><span class="tag">离线可连</span></div>
     <div id="cachedList" class="muted">加载中…</div>
   </div>
 
   <div class="card">
-    <h2>云端名下实例 <span class="badge blue">御符 system_registry</span></h2>
+    <div class="card-h"><span class="bar"></span><h2>云端名下实例</h2><span class="tag">御符 SSO</span></div>
     <div id="cloudList" class="muted">登录后显示</div>
   </div>
 
-  <div class="actions">
-    <button id="btnRefresh">刷新</button>
-    <button id="btnManual">手动配对（兼容旧流程）</button>
-    <button id="btnToLocal">切回本地</button>
-    <button id="btnClear">清除当前凭据</button>
+  <div class="foot">
+    <button id="btnManual" class="sm">手动配对（兼容旧流程）</button>
+    <button id="btnToLocal" class="sm">切回本地</button>
+    <div class="spacer"></div>
+    <button id="btnClear" class="sm ghost-danger">清除当前凭据</button>
   </div>
-  <div id="msg" class="err"></div>
+  <div id="msg" class="msg"></div>
 
   <dialog id="tofuDlg">
-    <div><b>首次连接确认（TOFU）</b></div>
-    <div class="muted" style="margin:8px 0" id="tofuAddr"></div>
-    <div class="muted">这是你第一次连接该地址。请确认它属于你的实例（继续后该地址将被记住，不再询问）。</div>
+    <h3>首次连接确认（TOFU）</h3>
+    <div class="hint" id="tofuAddr"></div>
+    <div class="hint">这是你第一次连接该地址。请确认它属于你的实例（继续后该地址将被记住，不再询问）。</div>
     <div class="dlg-btns">
       <button id="tofuCancel">取消</button>
       <button id="tofuOk" class="primary">确认并连接</button>
@@ -89,65 +283,108 @@
     const $ = (id) => document.getElementById(id);
     const state = { pendingAddress: null, busy: false };
 
-    function msg(text, cls) { const el = $('msg'); el.className = cls || 'err'; el.textContent = text || ''; }
+    /* ── 主题：跟随系统 + 窗口内三态覆盖（auto/light/dark，localStorage 持久化） ── */
+    const THEME_KEY = 'remote-theme';
+    const THEME_TITLE = { auto: '主题：跟随系统', light: '主题：浅色', dark: '主题：深色' };
+    const THEME_ICON = { auto: 'icoThemeAuto', light: 'icoThemeLight', dark: 'icoThemeDark' };
+    function applyTheme() {
+      const t = localStorage.getItem(THEME_KEY) || 'auto';
+      if (t === 'light' || t === 'dark') document.documentElement.dataset.theme = t;
+      else delete document.documentElement.dataset.theme;
+      for (const id of Object.values(THEME_ICON)) $(id).style.display = 'none';
+      $(THEME_ICON[t]).style.display = '';
+      $('btnTheme').title = THEME_TITLE[t];
+    }
+    $('btnTheme').onclick = () => {
+      const order = ['auto', 'light', 'dark'];
+      const cur = localStorage.getItem(THEME_KEY) || 'auto';
+      localStorage.setItem(THEME_KEY, order[(order.indexOf(cur) + 1) % order.length]);
+      applyTheme();
+    };
+    applyTheme();
+
+    function msg(text, cls) {
+      const el = $('msg');
+      el.className = text ? `msg show ${cls || 'err'}` : 'msg';
+      el.textContent = text || '';
+    }
     function setBusy(on, label) {
       state.busy = on;
       for (const b of document.querySelectorAll('button')) b.disabled = on;
       if (!on) { for (const b of document.querySelectorAll('button')) b.disabled = false; }
       if (on && label) msg(label, 'muted');
     }
+    function emptyBlock(icon, text) {
+      const d = document.createElement('div'); d.className = 'empty';
+      d.innerHTML = `<div class="e-ico">${icon}</div><div>${text}</div>`;
+      return d;
+    }
+    function hostInitial(name) { return (name || '·').trim().charAt(0).toUpperCase() || '·'; }
 
     async function refresh() {
       if (state.busy) return;
+      $('btnRefresh').classList.add('spin');
       try {
         const data = await invoke('remote_instances');
         render(data);
       } catch (e) { msg(String(e)); }
+      $('btnRefresh').classList.remove('spin');
     }
 
     function render(data) {
-      // 登录态
+      // ── 登录态 ──
       const la = $('loginArea'); const lb = $('loginActions'); lb.innerHTML = '';
       if (data.loggedIn) {
-        la.textContent = '已登录（SSO JWT 仅存在于本进程内存，登出/退出即失效）';
-        const out = document.createElement('button'); out.textContent = '登出';
+        la.innerHTML = `<span class="account-chip"><span class="avatar">符</span>御符账号已登录 <small>· 凭证仅存于本进程内存</small></span>`;
+        const out = document.createElement('button'); out.className = 'sm'; out.textContent = '登出';
         out.onclick = async () => { try { await invoke('remote_logout'); await refresh(); } catch (e) { msg(String(e)); } };
         lb.appendChild(out);
       } else {
-        la.textContent = '未登录。登录后显示你名下的远程实例清单。';
+        la.innerHTML = `<span class="muted">未登录——登录后展示你名下的远程实例清单。</span>`;
         const btn = document.createElement('button'); btn.className = 'primary'; btn.textContent = '使用御符账号登录';
         btn.onclick = () => doLogin();
         lb.appendChild(btn);
       }
-      // 缓存段
+      // ── 本机凭据段 ──
       const cl = $('cachedList'); cl.innerHTML = '';
-      if (!data.cached || data.cached.length === 0) cl.textContent = '（空）本机没有任何远程实例凭据';
+      if (!data.cached || data.cached.length === 0) { cl.appendChild(emptyBlock('🗂', '本机没有任何远程实例凭据')); }
       for (const c of data.cached || []) {
-        const row = document.createElement('div'); row.className = 'row';
+        const row = document.createElement('div'); row.className = 'row' + (c.current ? ' current' : '');
+        row.innerHTML = `<span class="dot ${c.current ? 'ok' : 'dim'}"></span><div class="glyph2">⌂</div>`;
         const meta = document.createElement('div'); meta.className = 'meta';
-        meta.innerHTML = `<div class="addr">${escapeHtml(c.address)}${c.current ? '<span class="current">当前已连接</span>' : ''}</div>`;
-        meta.innerHTML += `<div class="desc">${escapeHtml(c.origin)}</div>`;
+        meta.innerHTML = `<div class="name"><span class="nm">${escapeHtml(c.address)}</span>${c.current ? '<span class="pill ok">已连接</span>' : ''}</div>`
+          + `<div class="desc">${escapeHtml(c.origin)}</div>`;
         row.appendChild(meta);
-        const sw = document.createElement('button');
+        const sw = document.createElement('button'); sw.className = 'sm';
         sw.textContent = c.current ? '重连' : '连接';
         sw.onclick = () => connectCached(c.address);
         row.appendChild(sw);
         cl.appendChild(row);
       }
-      // 云端段
+      // ── 云端段 ──
       const ul = $('cloudList'); ul.innerHTML = '';
-      if (!data.loggedIn) { ul.textContent = '未登录——登录后展示御符账号名下的实例。'; return; }
-      if (!data.cloud || data.cloud.length === 0) { ul.textContent = '（空）你的账号下暂无已注册实例。可点「手动配对」走豁免流程。'; return; }
+      if (!data.loggedIn) { ul.appendChild(emptyBlock('☁', '未登录——登录后展示御符账号名下的实例。')); return; }
+      if (!data.cloud || data.cloud.length === 0) {
+        ul.appendChild(emptyBlock('☁', '账号下暂无可连的 dsh 实例（仅显示已安装 dsh-remote 并开启远程访问的实例）。可点「手动配对」走豁免流程。'));
+        return;
+      }
       for (const inst of data.cloud) {
-        const row = document.createElement('div'); row.className = 'row';
-        const meta = document.createElement('div'); meta.className = 'meta';
         const addr = inst.address || '';
         const offline = !addr;
-        meta.innerHTML = `<div class="addr">${escapeHtml(inst.name || inst.hostname || inst.instanceId)}`
-          + `<span class="badge ${offline ? 'red' : 'blue'}">${offline ? '未开启远程访问' : (inst.role ? inst.role : '在线')}</span></div>`;
-        meta.innerHTML += `<div class="desc">${escapeHtml(inst.hostname || '')}${addr ? ' · ' + escapeHtml(addr) : ''} · agent×${inst.agentCount ?? '?'}</div>`;
+        const alive = inst.alive === true;
+        const row = document.createElement('div'); row.className = 'row';
+        row.innerHTML = `<span class="dot ${offline ? 'dim' : (alive ? 'ok' : 'dim')}"></span>`;
+        const g = document.createElement('div'); g.className = 'glyph2';
+        g.textContent = hostInitial(inst.name || inst.hostname || inst.instanceId);
+        row.appendChild(g);
+        const meta = document.createElement('div'); meta.className = 'meta';
+        const statusPill = offline
+          ? '<span class="pill gray">未开启远程访问</span>'
+          : (alive ? '<span class="pill ok">在线</span>' : '<span class="pill gray">探活中</span>');
+        meta.innerHTML = `<div class="name"><span class="nm">${escapeHtml(inst.name || inst.hostname || inst.instanceId)}</span>${statusPill}</div>`
+          + `<div class="desc">${escapeHtml(inst.hostname || '')}${addr ? ' · ' + escapeHtml(addr) : ''} · agent×${inst.agentCount ?? '?'}</div>`;
         row.appendChild(meta);
-        const btn = document.createElement('button');
+        const btn = document.createElement('button'); btn.className = 'sm primary';
         if (offline) { btn.textContent = '不可连'; btn.disabled = true; }
         else { btn.textContent = '连接'; btn.onclick = () => connectCloud(inst.address); }
         row.appendChild(btn);
@@ -157,7 +394,8 @@
 
     async function doLogin() {
       if (state.busy) return;
-      setBusy(true, '正在打开御符登录页…请在浏览器完成认证（最长等 120 秒）');
+      setBusy(true, '');
+      msg('正在打开御符登录页…请在浏览器完成认证（最长等 300 秒）', 'muted');
       const spin = document.createElement('span'); spin.className = 'spin'; $('msg').appendChild(spin);
       try {
         await invoke('remote_login');
