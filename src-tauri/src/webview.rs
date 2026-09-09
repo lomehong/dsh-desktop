@@ -293,6 +293,9 @@ pub fn navigate_to_harness(app: &tauri::AppHandle, launch_url: &str, auth_cookie
                             use std::io::Write;
                             let _ = writeln!(log, "[warn] auth cookie 注入失败: {e}");
                         }
+                    } else if let Some(mut log) = crate::runtime::open_log_append() {
+                        use std::io::Write;
+                        let _ = writeln!(log, "[info] auth cookie 已注入（壳侧换证，pair 长度={}）", pair.len());
                     }
                 }
                 None => {
@@ -306,6 +309,9 @@ pub fn navigate_to_harness(app: &tauri::AppHandle, launch_url: &str, auth_cookie
                     }
                 }
             }
+        } else if let Some(mut log) = crate::runtime::open_log_append() {
+            use std::io::Write;
+            let _ = writeln!(log, "[info] 未取到 Set-Cookie，跳过 cookie 注入（旧版 dsh 或换证请求失败）");
         }
         match launch_url.parse() {
             Ok(url) => {
@@ -319,9 +325,34 @@ pub fn navigate_to_harness(app: &tauri::AppHandle, launch_url: &str, auth_cookie
         }
         let _ = w.show();
         let _ = w.set_focus();
+        // JS 兜底自愈：若 2 秒后页面仍是 401 裸文本页（cookie 未按预期生效），
+        // 用 document.cookie 直种同名 cookie（jar 里无同名 HttpOnly cookie 时浏览器
+        // 允许——恰好覆盖 set_cookie 未生效的全部路径）并刷新一次。正常加载 html
+        // 的页面 contentType 为 text/html，零打扰；每轮导航至多布防一次，无循环风险。
+        if let Some(pair) = auth_cookie {
+            let w2 = w.clone();
+            let escaped = serde_json_string(&format!("{pair}; path=/"));
+            let url_owned = launch_url.to_string();
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(2_000));
+                let script = format!(
+                    "(function(){{if(document.contentType==='text/plain'){{document.cookie={escaped};location.replace('/');}}}})()"
+                );
+                let _ = w2.eval(&script);
+                if let Some(mut log) = crate::runtime::open_log_append() {
+                    use std::io::Write;
+                    let _ = writeln!(log, "[info] JS cookie 兜底已布防（url={url_owned}）");
+                }
+            });
+        }
     }
     // 主窗口带到前台：未读角标清零（D1）
     crate::tray::clear_unread(app);
+}
+
+/// 字符串转 JSON 字符串字面量（eval 内嵌转义）。
+fn serde_json_string(s: &str) -> String {
+    serde_json::to_string(s).unwrap_or_else(|_| "\"\"".to_string())
 }
 
 /// 把主窗口导回本地加载页（重启期间显示进度）。
