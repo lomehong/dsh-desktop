@@ -11,7 +11,7 @@ DeepSeek Harness（dsh）的桌面应用：Tauri 2 原生窗口 + 受监督的 H
 - **原生集成（服务端→壳单向）**：壳以非浏览器客户端身份订阅 `<base>/api/events.mux` WebSocket 下行流（世代号防止重启后重复通知），`turn/end` / `approval/requested` / `question/requested` → OS 原生通知 + 任务栏闪烁（窗口未聚焦时弹通知）。
 - **运行时管理**：优先使用 `%LOCALAPPDATA%\dsh-desktop-app-data\node` 便携运行时（Node 24 + 固定版本 dsh；旧 `dsh-desktop` 目录自动迁移，避免与 NSIS 卸载目录冲突），否则回退系统 `node`/`dsh`；全新机器在加载页一键「安装运行环境」（npmmirror 镜像下载 Node → npm 装固定版 dsh → 自动启动）。托盘可「升级 DSH」。
 - **桌面语义**：关闭=最小化到托盘（IM 渠道/长任务不中断）、托盘菜单（显示/重启/升级 DSH/检查应用更新/日志/数据目录/开机自启/退出）、单实例二次启动聚焦。
-- **无边框窗口**：decorum 悬浮标题栏（Windows 去原生边框 + 扁平自绘最小化/最大化/关闭按钮，保留 Snap Layout；macOS Overlay 红绿灯）。Harness 页面经初始化脚本整体下移 40px 让出顶栏——用 `body transform` 而非 `html padding`，使 fixed/absolute 定位的插件 overlay（右侧按钮簇、机器人状态栏）一并下移；decorum 悬浮条反向平移回顶部。Harness 页面（本地回环或已配对远程 origin）经 `http://*:* ` 通配 capability 仅授予窗口控制最小权限集（无文件/系统访问；能加载的页面由导航守卫约束）。关闭按钮走 `CloseRequested` → 语义仍为最小化到托盘。
+- **无边框窗口**：decorum 保留式顶栏带（Windows 去原生边框 + 扁平自绘最小化/最大化/关闭按钮，保留 Snap Layout；macOS Overlay 红绿灯）。Harness 页面经初始化脚本让出顶部 40px 独占带：`html/body` 高度收缩 + `body transform` 平移（fixed/absolute 定位的 overlay——模式角标、dockkit 浮窗——一并下移；dsh 前端是 `html,body,#root{height:100%}` 链，收缩后正好铺满带下，底部零裁切），decorum 条带反向平移回窗口顶、整带为拖拽区、底色继承 app `--dsw-alias-bg-base` 随深浅主题。2026-09-09 由 overlay 改回让位：dsh 0.1.5+ 右侧栏 dockkit 条带专职占据窗口右上角，overlay 窗控钮与其结构性重叠（视觉上两套 ✕ 叠加，点击被劫持——点「开始」tab=最小化窗口、点侧栏收起=关窗口）。设计文档：`docs/plans/2026-09-09-titlebar-right-sidebar-collision-design.md`。Harness 页面（本地回环或已配对远程 origin）经 `http://*:* ` 通配 capability 仅授予窗口控制最小权限集（无文件/系统访问；能加载的页面由导航守卫约束）。关闭按钮走 `CloseRequested` → 语义仍为最小化到托盘。
 - **DSH_HOME 完全独立**：dsh 使用专属 home（安装版 `%LOCALAPPDATA%\dsh-desktop-app-data\home`，便携版包内 `Data\home`），profile/预设/技能/凭证/会话全在里面随包走，**与 `~/.dsh` 零依赖**——绝不读写系统 dsh/persona 的共享目录（多版本交叉污染是历史真实故障源；旧版的一次性自动迁移已删除）。分身技能目录也在 home 内（`home/skills`）。
 
 ## 远程连接
@@ -35,7 +35,7 @@ curl -X POST http://127.0.0.1:3080/dsh-remote/api/pairing
 **安全边界（简述）**：webview 只受导航守卫约束（仅放行已配对 origin）；capability 仅窗口控制；自定义命令对 harness 页面零开放；凭据明文存 `remote.json`（与 dsh 会话密钥同威胁模型）；仅支持 http（网关不带 TLS）；一次只连一个远程实例。
 
 **已知限制**：远端 dsh ≥ 0.1.2 的 remote.mux-over-gateway 暂不支持（上游发布后适配）；远端 dsh 当前应为 0.1.1-rc.x（旧 events.mux 协议）。
-**模式角标**：窗口左上角常驻小徽标显示「本地」或「远程 · 地址」，托盘提示同样带实例地址，一眼分清当前连接。代理对本机应答 `/__remote/badge` 供角标查询。
+**模式角标**：窗口顶部居中常驻小徽标（住在壳的顶栏带内）显示「本地」或「远程 · 地址」，托盘提示同样带实例地址，一眼分清当前连接。代理对本机应答 `/__remote/badge` 供角标查询。
 
 **安全上下文**：页面经壳内本地回环反向代理加载（origin 为 `127.0.0.1:<随机端口>`）——dsh 视为本机浏览器（模型/设置完整可用），回环天然是安全上下文；代理仅绑回环、自动注入凭证。
 

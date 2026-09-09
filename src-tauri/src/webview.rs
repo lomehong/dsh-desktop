@@ -23,10 +23,34 @@ fn same_origin(u: &str, origin: &str) -> bool {
     rest.is_empty() || rest.starts_with('/') || rest.starts_with('?') || rest.starts_with('#')
 }
 
-/// 无边框窗口：decorum 顶栏三个按钮（最小化/最大化/关闭）作为 floating 覆盖
-/// 层悬浮在窗口最顶端——不挤压、不偏移 harness 内容。
-/// harness 主界面（左侧栏、中间工作区、右侧插件按钮簇）从窗口 y=0 开始铺满，
-/// 装饰按钮区域与 dsh 内容完全独立（z-index 上按钮在最上）。
+/// 无边框窗口：保留式顶栏带（v2，2026-09-09）。decorum 顶栏（全宽拖拽层 +
+/// 三个 58×32 窗控钮）独占窗口顶部 40px，harness 页面整体让位到带下。
+///
+/// 为什么从 overlay 改回让位：0.1.11 曾以「主界面顶到 y=0」为由移除让位，当时
+/// dsh 顶部两角没有功能 UI，overlay 相安无事；dsh 0.1.5+ 右侧栏的 dockkit 条带
+/// 专职占据窗口右上角（「开始」tab、tab 关闭点、全屏/收起钮都在 y<40），overlay
+/// 的窗控钮与全宽拖拽层和它结构性重叠——两套 ✕ 叠在一起，且点击被劫持（点
+/// 「开始」tab = 最小化窗口，点侧栏收起 = 关窗口；decorum 容器 z 序最大，页面
+/// 收不到事件）。只要页面顶部两角有功能 UI，带就是唯一让「拖拽区」与「页面
+/// UI」不竞争的格局。设计文档：docs/plans/2026-09-09-titlebar-right-sidebar-collision-design.md
+///
+/// 实现要点（v0.1.9 transform 方案的硬化版）：
+/// 1. 注入带 id 的 stylesheet 而非 inline style——对页面运行时 DOM 操作免疫；
+/// 2. 带高单一来源 `--dsh-titlebar-h`：html 高度收缩、body 平移、decorum 反向
+///    平移、模式角标回移共用，改带高只动一处；
+/// 3. `html` 高度收缩到 `100% - 带` + `overflow:hidden`——dsh 前端是
+///    `html,body,#root{height:100%}` 链（实测无 100vh 根），收缩后正好铺满带下
+///    区域，底部状态栏零裁切；transform 的 40px 视觉溢出由 overflow:hidden
+///    消除（v0.1.9 同款教训）；
+/// 4. `body transform` 而非 padding：fixed 定位 overlay（模式角标、dockkit
+///    floatHost `fixed inset:0` 浮窗）随之让位——浮窗标题不会藏进带里点不到；
+///    body 成为 fixed 后代的包含块，`bottom:0` 仍贴窗口底；
+/// 5. decorum 容器反向平移回窗口顶、高度抬到整带（拖拽区=整带）、按钮
+///    flex-start 贴顶（decorum inline 是 end）；带底色继承 app 的
+///    `--dsw-alias-bg-base`（定义在 body 上，随 dsh 深浅主题自动切换）；
+///    底部 1px hairline（继承 `--dsw-alias-border-l1`）把顶带与页面分开——
+///    用户草图指定：没有分隔线时顶带与页面连成一片，读不出标题栏。
+///
 /// 脚本自带端口守卫（协议 http 且带端口即生效，本地回环与远程网关一视同仁）：
 /// 能加载进壳的页面只有导航守卫放行的已配对 origin，因此无需再校验具体 hostname；
 /// tauri.localhost 加载页（非 http 协议）仍是空操作。
@@ -37,11 +61,25 @@ pub const TITLEBAR_INSET_CSS: &str = r##"
   // 加载页 tauri.localhost 非 http 协议，天然空操作。
   if (location.protocol !== 'http:' || location.port === '') return;
   var apply = function () {
-    // harness 不让位、不偏移：铺满整个窗口，让 decorum 浮动按钮独占顶部 ~40px 区域
-    document.body.style.margin = '0';
-    // decorum 顶栏元素 pinned 到窗口最顶端右侧
     var s = document.createElement('style');
-    s.textContent = '[data-tauri-decorum-tb]{position:fixed;top:0;right:0;z-index:2147483647}';
+    s.id = 'dsh-desktop-titlebar-inset';
+    s.textContent =
+      ':root{--dsh-titlebar-h:40px}' +
+      // 100% 链收缩 + overflow:hidden：页面正好铺满带下区域，无底部裁切、无溢出滚动条
+      'html{height:calc(100% - var(--dsh-titlebar-h)) !important;overflow:hidden !important}' +
+      // body transform：fixed/absolute overlay（模式角标、dockkit 浮窗）一并让位；
+      // body 成为 fixed 后代的包含块，bottom:0 仍贴窗口底
+      'body{margin:0 !important;height:100% !important;transform:translateY(var(--dsh-titlebar-h))}' +
+      // decorum 容器随 body 平移了 +带，须反向平移回窗口顶；高度抬到整带（拖拽区=整带），
+      // 按钮 flex-start 贴顶（decorum inline 是 end）；底色继承 app 的 bg-base token；
+      // 底部 hairline（2026-09-09 用户草图）：让顶带读作独立标题栏而非页面空白，
+      // box-sizing 使 1px 线画在 40px 带内（y=39..40），颜色继承 app 边框 token 随主题
+      '[data-tauri-decorum-tb]{position:fixed !important;top:0 !important;left:0 !important;' +
+      'width:100% !important;height:var(--dsh-titlebar-h) !important;box-sizing:border-box !important;' +
+      'align-items:flex-start !important;' +
+      'border-bottom:1px solid var(--dsw-alias-border-l1,rgba(0,0,0,.08)) !important;' +
+      'transform:translateY(calc(0px - var(--dsh-titlebar-h)));' +
+      'background:var(--dsw-alias-bg-base,#fff);z-index:2147483647 !important}';
     (document.head || document.documentElement).appendChild(s);
   };
   if (document.readyState === 'loading') {
@@ -115,6 +153,9 @@ pub const SECURE_CONTEXT_SHIM_JS: &str = r##"
 /// 配色（2026-09-05）：深色主题下旧版 55% 透明深底几乎隐形（真实反馈），改为
 /// 高不透明深玻璃底 + 1px 亮边框 + 投影（深浅主题都有轮廓），并加模式色点——
 /// 本地绿点（本机实例）、远程蓝点 + 蓝底（网络实例），色彩语义不依赖文字。
+/// 住进顶栏带（2026-09-09）：顶栏让位后 body 整体下移，角标挂在 body 下会随之
+/// 落到页面首行上；cssText 用 `--dsh-titlebar-h` 反向平移回窗口顶，正好独居带内
+/// （与 TITLEBAR_INSET_CSS 共用同一变量，见该常量文档）。
 pub const MODE_BADGE_JS: &str = r##"
 (function () {
   if (location.protocol !== 'http:' || location.port === '') return;
@@ -128,7 +169,9 @@ pub const MODE_BADGE_JS: &str = r##"
       label = document.createElement('span');
       b.appendChild(dot);
       b.appendChild(label);
-      b.style.cssText = 'position:fixed;top:0;left:50%;transform:translateX(-50%);' +
+      // body 让位平移了 +带：角标须反向平移回窗口顶——住进顶栏带，不与页面首行同层
+      b.style.cssText = 'position:fixed;top:0;left:50%;' +
+        'transform:translate(-50%,calc(0px - var(--dsh-titlebar-h,0px)));' +
         'height:20px;line-height:20px;font-size:11px;padding:0 10px;border-radius:0 0 8px 8px;' +
         'border:1px solid rgba(255,255,255,.22);border-top:none;color:#eef3f8;' +
         'box-shadow:0 2px 8px rgba(0,0,0,.35);z-index:2147483646;pointer-events:none;' +
@@ -472,5 +515,65 @@ mod tests {
         // 空段/缺等号 → None（不注入，走 webview 自行换证兜底）
         assert!(build_auth_cookie(url, "novalue").is_none());
         assert!(build_auth_cookie(url, "=v1.x").is_none());
+    }
+
+    /// 顶栏带 v2 契约：页面让位（100% 链收缩 + body transform）、decorum 容器反向
+    /// 平移回窗口顶并保持最高层。任一断言失败都会让 dsh 右侧栏 dockkit 条带
+    /// （0.1.5+ 专职占据窗口右上角）重新与窗控钮/拖拽层重叠——点「开始」tab 会
+    /// 最小化窗口、点侧栏收起会关窗口。设计文档：
+    /// docs/plans/2026-09-09-titlebar-right-sidebar-collision-design.md
+    #[test]
+    fn titlebar_inset_css_reserves_titlebar_band() {
+        let s = TITLEBAR_INSET_CSS;
+        // 端口守卫必须保留：加载页（tauri.localhost，非 http 或无端口）是空操作
+        assert!(
+            s.contains("location.protocol !== 'http:' || location.port === ''"),
+            "缺少端口守卫"
+        );
+        // 带高单一来源 + 页面让位：100% 链收缩（不收缩则底部裁切 40px）+ body 下移
+        assert!(s.contains("--dsh-titlebar-h:40px"), "缺少带高变量（单一来源）");
+        assert!(
+            s.contains("html{height:calc(100% - var(--dsh-titlebar-h))"),
+            "html 高度未收缩（dsh 是 height:100% 链，不收缩底部会被裁 40px）"
+        );
+        assert!(
+            s.contains("body{margin:0 !important;height:100% !important;transform:translateY(var(--dsh-titlebar-h))}"),
+            "body 未整体下移让位"
+        );
+        // decorum 容器：反向平移回窗口顶 + 最高层 + 按钮贴顶 + app 底色随主题
+        assert!(
+            s.contains("transform:translateY(calc(0px - var(--dsh-titlebar-h)))"),
+            "decorum 容器未反向平移回窗口顶"
+        );
+        assert!(s.contains("z-index:2147483647"), "decorum 容器未钉在最高层");
+        assert!(s.contains("align-items:flex-start !important"), "窗控钮未贴顶（decorum inline 是 end）");
+        assert!(
+            s.contains("background:var(--dsw-alias-bg-base,#fff)"),
+            "顶栏带未垫 app 底色（深浅主题下会是异色空条）"
+        );
+        // 底部 hairline 分隔线（用户草图）：无分隔线时顶带与页面连成一片，读不出标题栏
+        assert!(
+            s.contains("border-bottom:1px solid var(--dsw-alias-border-l1,rgba(0,0,0,.08))"),
+            "顶栏带缺少底部 hairline 分隔线"
+        );
+        assert!(
+            s.contains("box-sizing:border-box"),
+            "分隔线会画到带外（应含在 40px 带内）"
+        );
+    }
+
+    /// 模式角标挂在 body 下，body 让位后必须反向平移回窗口顶——否则角标叠在
+    /// harness 页首行上；与顶栏带契约共用同一变量。
+    #[test]
+    fn mode_badge_counter_shifts_with_titlebar_band() {
+        let s = MODE_BADGE_JS;
+        assert!(
+            s.contains("translate(-50%,calc(0px - var(--dsh-titlebar-h,0px)))"),
+            "角标未随顶栏带反向平移回窗口顶"
+        );
+        assert!(
+            s.contains("location.protocol !== 'http:' || location.port === ''"),
+            "缺少端口守卫"
+        );
     }
 }
