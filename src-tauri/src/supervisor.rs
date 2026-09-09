@@ -344,6 +344,24 @@ pub fn kill_tree(pid: u32) {
 pub fn spawn_dsh(app: &tauri::AppHandle, launch: Launch) -> Result<Running, String> {
     let log = runtime::open_log_append().ok_or_else(|| "无法写入日志文件".to_string())?;
     let log = Arc::new(Mutex::new(log));
+    // 服务端口决策（settings.html 配置，launcher.json 持久化）：默认随机（--port 0，
+    // OS 分配零冲突）；配置了固定端口且空闲则用之，被占自动回退随机并留证——
+    // 绝不因端口冲突起不来。实际监听地址仍以 stdout 报告为准（parse_web_url）。
+    let spawn_port = {
+        let fixed = crate::settings::fixed_port();
+        let busy = fixed.is_some() && !crate::settings::port_free(fixed.unwrap());
+        let chosen = crate::settings::decide_spawn_port(fixed, busy);
+        if chosen != 0 {
+            if let Some(mut log) = runtime::open_log_append() {
+                let _ = writeln!(log, "[端口] 使用固定端口 {chosen}（launcher.json）");
+            }
+        } else if let Some(p) = fixed {
+            if let Some(mut log) = runtime::open_log_append() {
+                let _ = writeln!(log, "[端口] 固定端口 {p} 被占用，本次回退随机端口");
+            }
+        }
+        chosen
+    };
     let mut cmd = match launch {
         Launch::Portable => {
             let node = runtime::node_exe();
@@ -360,7 +378,7 @@ pub fn spawn_dsh(app: &tauri::AppHandle, launch: Launch) -> Result<Running, Stri
             if install::web_supports_no_open() {
                 c.arg("--no-open");
             }
-            c.args(["--port", "0"])
+            c.args(["--port", &spawn_port.to_string()])
                 .env("PATH", format!("{}{}{}", node_dir.display(), sep, sys))
                 .current_dir(node_dir);
             // dsh-desktop 专属 DSH home（便携=包内 home，安装版=数据目录 home）：
@@ -394,7 +412,7 @@ pub fn spawn_dsh(app: &tauri::AppHandle, launch: Launch) -> Result<Running, Stri
             if install::web_supports_no_open() {
                 c.arg("--no-open");
             }
-            c.args(["--port", "0"]);
+            c.args(["--port", &spawn_port.to_string()]);
             c
         }
     };

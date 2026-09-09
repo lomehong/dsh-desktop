@@ -451,6 +451,10 @@ fn spec_for_remote(ctx: &MenuContext) -> MenuSpec {
                     id: "settings",
                     label: t("menu.settings").into(),
                     items: vec![
+                        MenuEntry::Item {
+                            id: "settings-window",
+                            label: t("menu.open_settings").into(),
+                        },
                         MenuEntry::Check {
                             id: "autostart",
                             label: t("menu.autostart").into(),
@@ -573,6 +577,10 @@ fn spec_for_local(ctx: &MenuContext) -> MenuSpec {
                     id: "settings",
                     label: t("menu.settings").into(),
                     items: vec![
+                        MenuEntry::Item {
+                            id: "settings-window",
+                            label: t("menu.open_settings").into(),
+                        },
                         MenuEntry::Check {
                             id: "autostart",
                             label: t("menu.autostart").into(),
@@ -872,6 +880,15 @@ pub fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
                 let handle = app.clone();
                 // 按模式分派（本地 restart_service / 远程 connect_remote_flow）；文案随菜单变化，id 复用
                 std::thread::spawn(move || crate::supervisor::restart_by_mode(&handle));
+            }
+            "settings-window" => {
+                // 独立配置窗（无边框自绘标题栏）：端口等启动配置，保存后下次启动服务生效
+                if let Err(e) = crate::settings::open_settings_window(app) {
+                    if let Some(mut log) = crate::runtime::open_log_append() {
+                        use std::io::Write;
+                        let _ = writeln!(log, "[设置] 打开配置窗失败: {e}");
+                    }
+                }
             }
             "connect" => {
                 // 连接远程实例（账号化）：弹独立控制窗——御符登录 → 名下实例清单 → 点选连接。

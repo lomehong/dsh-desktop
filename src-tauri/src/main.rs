@@ -16,6 +16,7 @@ mod remote;
 mod remote_account;
 mod remote_proxy;
 mod runtime;
+mod settings;
 mod status;
 mod supervisor;
 mod tray;
@@ -598,7 +599,9 @@ fn main() {
             switch_to_local,
             restart_service_cmd,
             get_notifications,
-            clear_notifications
+            clear_notifications,
+            settings::settings_load,
+            settings::settings_save
         ])
         .setup(|app| {
             let handle = app.handle().clone();
