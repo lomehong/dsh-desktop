@@ -325,20 +325,24 @@ pub fn navigate_to_harness(app: &tauri::AppHandle, launch_url: &str, auth_cookie
         }
         let _ = w.show();
         let _ = w.set_focus();
-        // JS 兜底自愈：若 2 秒后页面仍是 401 裸文本页（cookie 未按预期生效），
-        // 用 document.cookie 直种同名 cookie（jar 里无同名 HttpOnly cookie 时浏览器
-        // 允许——恰好覆盖 set_cookie 未生效的全部路径）并刷新一次。正常加载 html
-        // 的页面 contentType 为 text/html，零打扰；每轮导航至多布防一次，无循环风险。
+        // JS 兜底自愈：macOS 实测 WebKit 对「303 重定向 Set-Cookie」与 store 注入的
+        // cookie 都不用于后续请求（v0.1.36/37 实机定案），页面会短暂落在 401 裸文本页。
+        // 兜底用 document.cookie 直种同名 cookie（jar 里无同名 HttpOnly cookie 时浏览器
+        // 允许）并 location.replace('/') 自愈。分 150ms/500ms/1200ms/2500ms 四次递进
+        // 检查（各次幂等：命中一次即跳转，后续检查看到 text/html 零打扰），把 401 闪屏
+        // 压到 ~150ms 量级；Windows 上 cookie 正常生效，页面是 html，检查全部空转。
         if let Some(pair) = auth_cookie {
             let w2 = w.clone();
             let escaped = serde_json_string(&format!("{pair}; path=/"));
             let url_owned = launch_url.to_string();
             std::thread::spawn(move || {
-                std::thread::sleep(std::time::Duration::from_millis(2_000));
-                let script = format!(
-                    "(function(){{if(document.contentType==='text/plain'){{document.cookie={escaped};location.replace('/');}}}})()"
-                );
-                let _ = w2.eval(&script);
+                for delay_ms in [150u64, 500, 1200, 2500] {
+                    std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+                    let script = format!(
+                        "(function(){{if(document.contentType==='text/plain'){{document.cookie={escaped};location.replace('/');}}}})()"
+                    );
+                    let _ = w2.eval(&script);
+                }
                 if let Some(mut log) = crate::runtime::open_log_append() {
                     use std::io::Write;
                     let _ = writeln!(log, "[info] JS cookie 兜底已布防（url={url_owned}）");
