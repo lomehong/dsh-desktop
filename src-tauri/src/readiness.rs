@@ -148,6 +148,67 @@ fn http_status(url: &str, extra_header: Option<(&str, &str)>) -> Option<String> 
     )
 }
 
+/// 从响应头块解析首个 set-cookie 的 `name=value` 对（属性丢弃）。纯函数便于单测。
+fn parse_set_cookie_pair(head: &str) -> Option<String> {
+    for line in head.lines() {
+        let Some((name, value)) = line.split_once(':') else {
+            continue;
+        };
+        if !name.trim().eq_ignore_ascii_case("set-cookie") {
+            continue;
+        }
+        let pair = value.trim().split(';').next()?.trim();
+        return if pair.is_empty() { None } else { Some(pair.to_string()) };
+    }
+    None
+}
+
+/// 壳侧完成 v0.1.2+ 的 token 换证：GET launch_url（token 可重复使用，进程级有效），
+/// 从 303 响应头解析 `dsh-auth-<hash>=v1.…` 的 name=value 对。
+/// 用途：把 cookie 直接种进 webview 的 cookie store（navigate 前置注入）——
+/// macOS WKWebView 对「303 重定向响应携带的 Set-Cookie」落盘不可靠（实机故障：
+/// 装后首启 401 裸文本页「authentication required; reopen URL…」，Windows 正常），
+/// 与其赌 webview 的存储行为，不如壳自己换好证再导航。
+pub fn exchange_cookie(url: &str) -> Option<String> {
+    let rest = url.strip_prefix("http://").unwrap_or(url);
+    let (authority, path) = match rest.split_once('/') {
+        Some((authority, tail)) => (authority, format!("/{tail}")),
+        None => (rest, "/".to_string()),
+    };
+    let Some((host, port)) = authority
+        .rsplit_once(':')
+        .and_then(|(h, p)| p.parse().ok().map(|p| (h, p)))
+    else {
+        return None;
+    };
+    let Ok(mut stream) = TcpStream::connect((host, port)) else {
+        return None;
+    };
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+    let req = format!("GET {path} HTTP/1.1\r\nHost: {authority}\r\nConnection: close\r\n\r\n");
+    if stream.write_all(req.as_bytes()).is_err() {
+        return None;
+    }
+    // 读完整头块（有界）：set-cookie 在 303 的响应头里，128 字节读不满
+    let mut buf = Vec::new();
+    let mut chunk = [0u8; 1024];
+    loop {
+        match stream.read(&mut chunk) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => {
+                buf.extend_from_slice(&chunk[..n]);
+                let head_end = buf.windows(4).any(|w| w == b"\r\n\r\n");
+                if head_end || buf.len() > 64 * 1024 {
+                    break;
+                }
+            }
+        }
+    }
+    let head = String::from_utf8_lossy(&buf);
+    let head_end = head.find("\r\n\r\n").unwrap_or(head.len());
+    parse_set_cookie_pair(&head[..head_end])
+}
+
 /// 轮询直到就绪或超时，带网关凭证头（直连网关探活用；现役探活见 wait_http_ok +
 /// remote_proxy 的凭证注入）。生产暂无调用方，保留理由同 http_ok_hdr。
 #[allow(dead_code)]
@@ -264,6 +325,39 @@ mod tests {
             Some("t"),
             Duration::from_millis(200)
         ));
+    }
+
+    #[test]
+    fn parse_set_cookie_pair_extracts_name_value_and_drops_attributes() {
+        let head = "HTTP/1.1 303 See Other\r\nlocation: /\r\nSet-Cookie: dsh-auth-abc=v1.x.y; Max-Age=2592000; Path=/; HttpOnly; SameSite=Strict\r\ncontent-length: 0\r\n\r\n";
+        assert_eq!(
+            parse_set_cookie_pair(head).as_deref(),
+            Some("dsh-auth-abc=v1.x.y")
+        );
+        // 非 set-cookie 头不命中；无头返回 None
+        assert_eq!(parse_set_cookie_pair("HTTP/1.1 200 OK\r\n\r\n"), None);
+        assert_eq!(
+            parse_set_cookie_pair("HTTP/1.1 303\r\nLocation: /\r\n\r\n"),
+            None
+        );
+    }
+
+    #[test]
+    fn exchange_cookie_picks_cookie_from_real_exchange() {
+        // 一次性服务：校验请求行带了 token 路径，回 303 + Set-Cookie
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut buf = [0u8; 1024];
+                let _ = std::io::Read::read(&mut stream, &mut buf);
+                let _ = stream.write_all(
+                    b"HTTP/1.1 303 See Other\r\nlocation: /\r\nset-cookie: dsh-auth-t=v1.a.b; Max-Age=1; Path=/\r\ncontent-length: 0\r\n\r\n",
+                );
+            }
+        });
+        let pair = exchange_cookie(&format!("http://127.0.0.1:{port}/?token=tok"));
+        assert_eq!(pair.as_deref(), Some("dsh-auth-t=v1.a.b"));
     }
 
     #[test]

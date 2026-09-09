@@ -683,7 +683,10 @@ fn start_service_locked(app: &tauri::AppHandle) -> Result<(), String> {
     // 就绪后订阅事件流：回合完成/审批请求 → 原生通知与任务栏闪烁
     // （launch_url 供 ≥0.1.2 的 token→cookie 交换；≤0.1.1 用不到也无害）
     crate::events::spawn(app, &running.base_url, &running.launch_url);
-    webview::navigate_to_harness(app, &running.launch_url);
+    // 壳侧换证：GET launch_url 拿 Set-Cookie，导航前置注入 webview——
+    // macOS WKWebView 对 303 重定向响应 Set-Cookie 的落盘不可靠（实机 401 故障）
+    let auth_cookie = crate::readiness::exchange_cookie(&running.launch_url);
+    webview::navigate_to_harness(app, &running.launch_url, auth_cookie.as_deref());
     Ok(())
 }
 
@@ -786,9 +789,11 @@ fn connect_remote_flow_locked(app: &tauri::AppHandle) -> Result<(), String> {
     // （同 dsh 一次性 token 心智；必须原生导航——跨站发起的页面导航不带
     // SameSite=Strict 的 cookie，理由同 navigate_to_harness 注释）。
     // 303 的相对 Location 落回代理 origin，cookie 即种在页面 origin（127.0.0.1:port）。
+    // 远程模式不壳侧换证（auth_cookie=None）：网关凭证走 webview 自己的 pair?token 流程。
     webview::navigate_to_harness(
         app,
         &format!("{proxy_origin}/__remote/pair?token={}", cfg.token),
+        None,
     );
     Ok(())
 }

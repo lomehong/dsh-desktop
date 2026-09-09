@@ -235,6 +235,39 @@ pub fn create_main_window(app: &tauri::AppHandle) -> tauri::Result<()> {
     Ok(())
 }
 
+/// 从 launch_url 提取 cookie 的 domain（纯函数便于单测）：剥 scheme/path，端口不属于
+/// cookie domain（dsh 的 authority 绑定体现在 cookie 名的 sha256 里，domain 只需命中主机）。
+/// 仅认 http（auth cookie 只属于 http 的 harness origin）。
+fn cookie_domain_of(url: &str) -> Option<String> {
+    let rest = url.strip_prefix("http://")?;
+    let authority = rest.split('/').next()?;
+    let host = authority.rsplit_once(':').map_or(authority, |(h, _)| h);
+    if host.is_empty() {
+        None
+    } else {
+        Some(host.to_string())
+    }
+}
+
+/// 由壳侧换证得到的 `name=value` 对构造 auth cookie（纯函数便于单测）。
+/// domain 用裸主机名（host-only），Path=/；SameSite 对齐服务端签发（Strict）。
+fn build_auth_cookie(launch_url: &str, pair: &str) -> Option<tauri::webview::Cookie<'static>> {
+    let domain = cookie_domain_of(launch_url)?;
+    let (name, value) = pair.split_once('=')?;
+    if name.is_empty() || value.is_empty() {
+        return None;
+    }
+    use tauri::webview::cookie::SameSite;
+    Some(
+        tauri::webview::Cookie::build((name.to_string(), value.to_string()))
+            .domain(domain)
+            .path("/")
+            .same_site(SameSite::Strict)
+            .http_only(true)
+            .build(),
+    )
+}
+
 /// 把主窗口导航到就绪的 Harness 服务。v0.1.2+ 的 launch_url 带一次性 token：
 /// webview 跟随 303 → 服务端种下 HttpOnly cookie（默认 30 天，密钥存 DSH_HOME，
 /// 跨重启有效）→ 落到干净的主界面；导航守卫按 origin 放行，`?token=` 属于
@@ -242,9 +275,38 @@ pub fn create_main_window(app: &tauri::AppHandle) -> tauri::Result<()> {
 /// 必须用原生 `navigate` 而非页面内 location.replace：后者是从 tauri.localhost
 /// 发起的跨站导航，浏览器对跨站发起的请求不携带 SameSite=Strict 的 cookie，
 /// 303 跟随会 401；原生导航等价于地址栏打开（无发起方），Strict 放行。
-pub fn navigate_to_harness(app: &tauri::AppHandle, launch_url: &str) {
+///
+/// `auth_cookie`（本地模式）：壳侧换证得到的 `name=value` 对（readiness::exchange_cookie）。
+/// 导航前 set_cookie 直接种进 webview 的 cookie store——macOS WKWebView 对「303 重定向
+/// 响应携带的 Set-Cookie」落盘不可靠（实机故障：装后首启 401 裸文本页「authentication
+/// required; reopen URL…」，Windows 正常），与其赌存储行为，壳自己换好证再导航；
+/// Windows 上幂等无害（同值 cookie 覆盖）。远程模式传 None（网关凭证走自己的 pair?token 流程）。
+pub fn navigate_to_harness(app: &tauri::AppHandle, launch_url: &str, auth_cookie: Option<&str>) {
     crate::status::update(app, "服务已就绪", false, true);
     if let Some(w) = app.get_webview_window("main") {
+        if let Some(pair) = auth_cookie {
+            match build_auth_cookie(launch_url, pair) {
+                Some(cookie) => {
+                    if let Err(e) = w.set_cookie(cookie) {
+                        // 注入失败不阻断：webview 自行换证兜底（Windows 路径本来就能自愈）
+                        if let Some(mut log) = crate::runtime::open_log_append() {
+                            use std::io::Write;
+                            let _ = writeln!(log, "[warn] auth cookie 注入失败: {e}");
+                        }
+                    }
+                }
+                None => {
+                    if let Some(mut log) = crate::runtime::open_log_append() {
+                        use std::io::Write;
+                        let _ = writeln!(
+                            log,
+                            "[warn] auth cookie 解析失败，跳过注入（url={launch_url} pair 长度={}）",
+                            pair.len()
+                        );
+                    }
+                }
+            }
+        }
         match launch_url.parse() {
             Ok(url) => {
                 if w.navigate(url).is_err() {
@@ -349,5 +411,31 @@ mod tests {
         // 整体 try/catch 包裹：极端环境不抛错
         assert!(s.trim_start().starts_with("(function () {"));
         assert!(s.contains("} catch (e)"));
+    }
+
+    #[test]
+    fn cookie_domain_of_strips_scheme_path_and_port() {
+        assert_eq!(
+            cookie_domain_of("http://127.0.0.1:4418/?token=t1").as_deref(),
+            Some("127.0.0.1")
+        );
+        assert_eq!(cookie_domain_of("http://localhost:3080/").as_deref(), Some("localhost"));
+        // 端口缺失（异常形态）也不误吞主机名
+        assert_eq!(cookie_domain_of("http://127.0.0.1/").as_deref(), Some("127.0.0.1"));
+        assert_eq!(cookie_domain_of("tauri://localhost/index.html"), None);
+    }
+
+    #[test]
+    fn build_auth_cookie_parses_pair_and_sets_strict_host_only() {
+        let url = "http://127.0.0.1:4418/?token=tok";
+        let c = build_auth_cookie(url, "dsh-auth-abc=v1.x.y").expect("合法 pair 应构造成功");
+        assert_eq!(c.name(), "dsh-auth-abc");
+        assert_eq!(c.value(), "v1.x.y");
+        assert_eq!(c.path().map(|p| p.to_string()).as_deref(), Some("/"));
+        assert_eq!(c.domain().map(|d| d.to_string()).as_deref(), Some("127.0.0.1"));
+        assert_eq!(c.http_only(), Some(true));
+        // 空段/缺等号 → None（不注入，走 webview 自行换证兜底）
+        assert!(build_auth_cookie(url, "novalue").is_none());
+        assert!(build_auth_cookie(url, "=v1.x").is_none());
     }
 }
