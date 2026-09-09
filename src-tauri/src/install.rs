@@ -478,6 +478,80 @@ pub fn enforce_credentials_owner_mode() {
     enforce_owner_mode(&runtime::app_home().join(".credentials.yaml"));
 }
 
+/* ── webserver keep-alive 补丁 ─────────────────────────────────────────── */
+
+/// 注入的 keep-alive 参数：65s 覆盖 WebKit 连接池的保留时长，消除「停顿后
+/// 首个请求撞陈旧连接」的竞态窗口；headersTimeout 须 > keepAliveTimeout（Node 约束）。
+const KEEPALIVE_PATCH: &str = "this.server.keepAliveTimeout = 65000;\n\t\t\tthis.server.headersTimeout = 66000;\n\t\t\t";
+/// 注入锚点：已装包为未压缩 tsc 产物，该串在 dsh-host-webserver/lib/index.js 内唯一。
+const KEEPALIVE_ANCHOR: &str = "this.server.listen(this.config.port";
+
+/// webserver keep-alive 自愈补丁：dsh 用 Node 默认 keepAliveTimeout=5s，空闲连接
+/// 5 秒即被服务端关闭；WebKit(macOS) 连接池保留更久且不自动重试 POST——用户停顿后
+/// 首个请求（发消息/存凭证/加载预设）撞上陈旧连接即报
+/// 「client api:... failed: Load failed」，重试才恢复（Mac 实机：多处偶发）。
+/// 幂等（marker 检查）；锚点缺失（上游改版）时留证跳过，不影响启动。
+pub fn patch_webserver_keepalive() {
+    use std::io::Write;
+    let Some(dsh_dir) = runtime::dsh_package_dir() else {
+        return;
+    };
+    // npm 嵌套布局（实测）：dsh/node_modules/@deepseek-ai/dsh-host-webserver/...；
+    // hoisted 布局兜底：node_modules/@deepseek-ai/dsh-host-webserver/...
+    let nested = dsh_dir.join("node_modules/@deepseek-ai/dsh-host-webserver/lib/index.js");
+    let hoisted = dsh_dir
+        .parent()
+        .map(|scope| scope.join("dsh-host-webserver/lib/index.js"));
+    for candidate in [Some(nested), hoisted].into_iter().flatten() {
+        let Ok(content) = std::fs::read_to_string(&candidate) else {
+            continue;
+        };
+        if content.contains("keepAliveTimeout = 65000") {
+            return; // 已打补丁
+        }
+        if content.matches(KEEPALIVE_ANCHOR).count() != 1 {
+            if let Some(mut log) = runtime::open_log_append() {
+                let _ = writeln!(
+                    log,
+                    "[warn] keep-alive 补丁锚点不唯一/缺失（上游改版？），跳过: {}",
+                    candidate.display()
+                );
+            }
+            return;
+        }
+        let patched = content.replacen(
+            KEEPALIVE_ANCHOR,
+            &format!("{KEEPALIVE_PATCH}{KEEPALIVE_ANCHOR}"),
+            1,
+        );
+        let tmp = candidate.with_extension(format!("js.patch-{}", std::process::id()));
+        if std::fs::write(&tmp, patched).is_ok() && std::fs::rename(&tmp, &candidate).is_ok() {
+            if let Some(mut log) = runtime::open_log_append() {
+                let _ = writeln!(log, "[自愈] webserver keepAliveTimeout 5s -> 65s（{}）", candidate.display());
+            }
+            return;
+        }
+    }
+    if let Some(mut log) = runtime::open_log_append() {
+        let _ = writeln!(log, "[warn] 未找到 dsh-host-webserver，keep-alive 补丁跳过");
+    }
+}
+
+/// 单文件补丁核心（纯函数便于单测）：返回注入后的内容；已打补丁/锚点异常返回 None。
+fn patch_keepalive_contents(content: &str) -> Option<String> {
+    if content.contains("keepAliveTimeout = 65000") {
+        return None;
+    }
+    if content.matches(KEEPALIVE_ANCHOR).count() != 1 {
+        return None;
+    }
+    Some(content.replacen(
+        KEEPALIVE_ANCHOR,
+        &format!("{KEEPALIVE_PATCH}{KEEPALIVE_ANCHOR}"),
+        1,
+    ))
+}
+
 /// 单文件归位（路径参数化便于单测）：返回 true 表示实际修改了权限。
 #[cfg(unix)]
 fn enforce_owner_mode(path: &std::path::Path) -> bool {
@@ -844,6 +918,23 @@ mod tests {
         // 缺失文件 → 不动作
         assert!(!enforce_owner_mode(&dir.join("nope.yaml")));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// keep-alive 补丁核心：锚点注入一次、幂等、锚点缺失/多命中拒绝。
+    #[test]
+    fn patch_keepalive_contents_injects_once_and_is_idempotent() {
+        let src = "this.server = createServer((req, res) => {});\n\t\t\tthis.server.listen(this.config.port, this.config.host, () => {";
+        let patched = patch_keepalive_contents(src).expect("合法锚点应注入成功");
+        assert!(patched.contains("keepAliveTimeout = 65000"));
+        assert!(patched.contains("headersTimeout = 66000"));
+        // 只在 listen 前注入一次，原锚点语句保留
+        assert_eq!(patched.matches("this.server.listen(this.config.port").count(), 1);
+        // 幂等：已打补丁的内容再处理 → None
+        assert!(patch_keepalive_contents(&patched).is_none());
+        // 锚点缺失/多命中 → None（上游改版容错，绝不盲改）
+        assert!(patch_keepalive_contents("no anchor here").is_none());
+        let two = format!("{src}\n{src}");
+        assert!(patch_keepalive_contents(&two).is_none());
     }
 
     #[test]

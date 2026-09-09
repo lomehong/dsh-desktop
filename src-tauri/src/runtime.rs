@@ -104,6 +104,17 @@ pub fn dsh_bin_js() -> PathBuf {
     ready_root().map(|r| dsh_bin_js_in(&r)).unwrap_or_else(|| dsh_bin_js_in(&runtime_root()))
 }
 
+/// 已装 dsh 包根目录（node_modules/@deepseek-ai/dsh）：webserver keep-alive 补丁等
+/// 后安装自愈用。便携运行时缺失时返回 None。
+pub fn dsh_package_dir() -> Option<PathBuf> {
+    let root = ready_root()?;
+    let mut p = root.join("node");
+    if !cfg!(windows) {
+        p = p.join("lib");
+    }
+    Some(p.join("node_modules").join("@deepseek-ai").join("dsh"))
+}
+
 pub fn log_file() -> PathBuf {
     runtime_root().join("dsh-desktop.log")
 }

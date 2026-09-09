@@ -644,6 +644,10 @@ fn start_service_locked(app: &tauri::AppHandle) -> Result<(), String> {
     // 后 res.destroy() 掐断连接，WebKit 侧表现为 credentials/set "Load failed"
     // （Mac 实机故障：旧版 dsh/迁移拷贝留下 644 的凭证文件）。启动前归位为 600。
     install::enforce_credentials_owner_mode();
+    // webserver keep-alive 补丁：keepAliveTimeout 5s→65s。Node 默认 5 秒关空闲连接，
+    // WebKit 连接池保留更久且不自动重试 POST——停顿后首个请求撞陈旧连接即报
+    // 「client api:... failed: Load failed」（Mac 实机：发消息/存凭证/加载预设多处偶发）。
+    install::patch_webserver_keepalive();
     status::set(app, "正在启动 DSH 服务…");
     // spawn_dsh 内部已把 child 挂入 state（冷启动孤儿修复）；此处拿回 Running 后
     // 用真实端口覆盖占位 pid 记录并重新登记句柄。
