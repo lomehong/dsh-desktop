@@ -555,6 +555,7 @@ fn patch_keepalive_contents(content: &str) -> Option<String> {
 /// 单文件归位（路径参数化便于单测）：返回 true 表示实际修改了权限。
 #[cfg(unix)]
 fn enforce_owner_mode(path: &std::path::Path) -> bool {
+    use std::io::Write;
     use std::os::unix::fs::PermissionsExt;
     let Ok(meta) = std::fs::metadata(path) else {
         return false;
