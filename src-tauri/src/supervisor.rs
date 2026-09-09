@@ -639,6 +639,11 @@ fn start_service_locked(app: &tauri::AppHandle) -> Result<(), String> {
             }
         }
     }
+    // 凭证文件权限自愈（全模式）：dsh 0.1.3+ 的 credentials-local 在 POSIX 系统对
+    // .credentials.yaml 强制 owner-only（组/他人可读即抛错），webserver 处理器抛错
+    // 后 res.destroy() 掐断连接，WebKit 侧表现为 credentials/set "Load failed"
+    // （Mac 实机故障：旧版 dsh/迁移拷贝留下 644 的凭证文件）。启动前归位为 600。
+    install::enforce_credentials_owner_mode();
     status::set(app, "正在启动 DSH 服务…");
     // spawn_dsh 内部已把 child 挂入 state（冷启动孤儿修复）；此处拿回 Running 后
     // 用真实端口覆盖占位 pid 记录并重新登记句柄。

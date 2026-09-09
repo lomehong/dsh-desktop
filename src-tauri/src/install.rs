@@ -469,6 +469,47 @@ pub fn ensure_runtime_locked(app: &tauri::AppHandle) -> Result<(), String> {
     install_runtime_inner(app)
 }
 
+/// 凭证文件权限自愈（POSIX）：dsh 0.1.3+ 的 credentials-local 对
+/// `<home>/.credentials.yaml` 强制 owner-only（组/他人可读即抛错），webserver
+/// 处理器抛错后 res.destroy() 掐断连接，WebKit 侧表现为 credentials/set
+/// "Load failed"（Mac 实机：旧版 dsh/迁移拷贝留下 644 的凭证文件）。
+/// 组/他人位非零则归位为 600；文件缺失或已合规则空操作。
+pub fn enforce_credentials_owner_mode() {
+    enforce_owner_mode(&runtime::app_home().join(".credentials.yaml"));
+}
+
+/// 单文件归位（路径参数化便于单测）：返回 true 表示实际修改了权限。
+#[cfg(unix)]
+fn enforce_owner_mode(path: &std::path::Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    let Ok(meta) = std::fs::metadata(path) else {
+        return false;
+    };
+    let mode = meta.permissions().mode();
+    if mode & 0o077 == 0 {
+        return false;
+    }
+    let mut perms = meta.permissions();
+    perms.set_mode(0o600);
+    let changed = std::fs::set_permissions(path, perms).is_ok();
+    if changed {
+        if let Some(mut log) = runtime::open_log_append() {
+            let _ = writeln!(
+                log,
+                "[自愈] 凭证文件权限 {:o} -> 600（{}）",
+                mode & 0o777,
+                path.display()
+            );
+        }
+    }
+    changed
+}
+
+#[cfg(not(unix))]
+fn enforce_owner_mode(_path: &std::path::Path) -> bool {
+    false // Windows 无 POSIX 权限位，dsh 也跳过该检查（win32 直接 return）
+}
+
 /// 当前 DSH home：始终用 dsh-desktop 专属 home（与系统 dsh/persona 的 ~/.dsh 隔离）。
 pub fn dsh_home() -> PathBuf {
     runtime::app_home()
@@ -780,6 +821,30 @@ pub fn install_and_start(app: &tauri::AppHandle) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// POSIX 权限自愈：644 → 600，600/缺失不动作。（win 开发机无 POSIX 位，测试随 CI mac 跑）
+    #[cfg(unix)]
+    #[test]
+    fn enforce_owner_mode_heals_group_readable_file() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("dsh-perm-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(".credentials.yaml");
+        std::fs::write(&path, "deepseek:\n  apiKey: sk-test\n").unwrap();
+        let mut loose = std::fs::metadata(&path).unwrap().permissions();
+        loose.set_mode(0o644);
+        std::fs::set_permissions(&path, loose).unwrap();
+
+        assert!(enforce_owner_mode(&path));
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+        // 已合规 → 不再动作
+        assert!(!enforce_owner_mode(&path));
+        // 缺失文件 → 不动作
+        assert!(!enforce_owner_mode(&dir.join("nope.yaml")));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn version_triple_strips_prerelease_and_build_suffixes() {
