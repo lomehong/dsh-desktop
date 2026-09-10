@@ -373,6 +373,12 @@ pub fn spawn_dsh(app: &tauri::AppHandle, launch: Launch) -> Result<Running, Stri
             let sep = if cfg!(windows) { ";" } else { ":" };
             let sys = std::env::var("PATH").unwrap_or_default();
             let mut c = Command::new(&node);
+            // webview 的 127.0.0.1 cookie jar 会随每次核心重启积累一枚 dsh-auth-*
+            // （cookie 名按 authority 哈希、域名同为 127.0.0.1，端口不参与隔离），
+            // Cookie 头超过 Node 默认 16KB 上限后请求一律 431。整包请求（/plugins/?…，
+            // 请求行最长）最先撞线——真实故障 2026-09-10：UI 永远卡「Failed to load
+            // plugins」，curl/独立浏览器均正常。放宽到 128KB 作结构性兜底。
+            c.arg("--max-http-header-size=131072");
             c.arg(&bin).arg("web");
             // 容错：镜像旧包可能缺 --no-open，按实际能力决定是否传，避免「unknown option」崩溃
             if install::web_supports_no_open() {
@@ -407,6 +413,8 @@ pub fn spawn_dsh(app: &tauri::AppHandle, launch: Launch) -> Result<Running, Stri
                 "未找到 @deepseek-ai/dsh 全局安装，请执行 npm install -g @deepseek-ai/dsh".to_string()
             })?;
             let mut c = Command::new(node);
+            // 同便携分支：兜底 webview cookie jar 积累导致的 431（见上文注释）
+            c.arg("--max-http-header-size=131072");
             c.arg(bin).arg("web");
             // 容错：镜像旧包可能缺 --no-open，按实际能力决定是否传，避免「unknown option」崩溃
             if install::web_supports_no_open() {
