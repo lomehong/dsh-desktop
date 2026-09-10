@@ -39,6 +39,24 @@ curl -X POST http://127.0.0.1:3080/dsh-remote/api/pairing
 
 **安全上下文**：页面经壳内本地回环反向代理加载（origin 为 `127.0.0.1:<随机端口>`）——dsh 视为本机浏览器（模型/设置完整可用），回环天然是安全上下文；代理仅绑回环、自动注入凭证。
 
+## 数字分身套件（双通道安装）
+
+托盘「高级」下两个入口，服务两类人：
+
+| 入口 | 面向 | 安装器来源 | 形态 |
+|---|---|---|---|
+| 安装数字分身套件（本地调试） | 套件开发者 | 用户选的本地 meta-repo 根（路径持久化，失效自动重选） | `link:` 链接插件目录，改源码重启即生效 |
+| 安装/更新数字分身套件（生产·GitHub） | 最终用户 | 运行时从 `lomehong/digital-twin` main 拉官方安装器（ghfast 镜像兜底） | 各插件仓库 GitHub Release 的构建物 tarball，目标机无需仓库与工具链 |
+
+两通道共用同一套安全网：
+
+- **装前快照** `profiles/web/package.json` + `pnpm-lock.yaml`（`suite-install-backup/`）；脚本失败或校验失败即回滚，绝不把半成品 manifest 留给下次启动（2026-09-10 真实事故：装完重启撞 `ERR_MODULE_NOT_FOUND` 把服务打崩）；
+- **装后探针**：对清单里的套件依赖逐个用宿主 Node import 其主机侧入口（复现 dsh 启动加载路径），把「装完才发现解析断裂」拦在重启之前；失败则回滚 + 精确报错 + 不重启；
+- **宿主锚定**（生产通道）：安装器把宿主已有的 `@deepseek-ai/*` 用 `pnpm.overrides` 全钉到宿主版本——dsh 0.1.x 全在预发布标签上，插件 manifest 的普通 semver 区间（如 `^0.1.2`）匹配不到任何预发布版本会直接 `ERR_PNPM_NO_MATCHING_VERSION`；锚定后解析恒成立、版本与宿主一致、pnpm 复用宿主同一 store 实体；
+- **生产即更新**：tarball URL 带 `?release=<tag>`，同 Release 重跑幂等、发了新 Release 重跑即升级；缺任一插件的 Release 资产则中止不动任何状态。
+
+两通道互相切换以最后一次安装为准（安装器负责清理另一形态残留）。安装记录写 `installed-suite.json`（含 `channel`）。
+
 ## 开发
 
 ```powershell

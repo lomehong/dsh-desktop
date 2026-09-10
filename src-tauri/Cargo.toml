@@ -1,6 +1,6 @@
 [package]
 name = "dsh-desktop"
-version = "0.1.42"
+version = "0.1.43"
 description = "DSH Desktop — DeepSeek Harness 桌面应用（Windows / macOS）"
 edition = "2021"
 
@@ -20,6 +20,10 @@ tokio = { version = "1", features = ["net", "io-util", "rt-multi-thread", "sync"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tauri-plugin-decorum = "1"
+# 数字分身一键安装（D2b）：托盘「安装数字分身套件」弹原生文件夹选择器
+# 让用户选 meta-repo 根目录，再调 install-all.bat。读路径走持久化文件，
+# 二次点击不重复选。零 JS 端调用——纯 Rust API（blocking_pick_folder）。
+tauri-plugin-dialog = "2"
 
 # Windows JumpList（D3b）：ICustomDestinationList COM 的类型化封装，GUID/接口全部来自
 # crate 自身（不手写 vtable / 不猜 GUID）。仅 Windows 目标编译。

@@ -605,6 +605,14 @@ fn spec_for_local(ctx: &MenuContext) -> MenuSpec {
                             label: t("menu.export_diagnostics").into(),
                         },
                         MenuEntry::Item {
+                            id: "install-digital-twin-local",
+                            label: t("menu.install_twin_local").into(),
+                        },
+                        MenuEntry::Item {
+                            id: "install-digital-twin-release",
+                            label: t("menu.install_twin_release").into(),
+                        },
+                        MenuEntry::Item {
                             id: "reset-dsh-home",
                             label: t("menu.reset_home").into(),
                         },
@@ -727,6 +735,10 @@ fn entry_visible(entry: &MenuEntry, ctx: &MenuContext) -> bool {
             "show-qrcode" => ctx.remote,
             // 重置 DSH home：仅便携
             "reset-dsh-home" => ctx.portable,
+            // 安装数字分身套件（D2b）：仅本地模式（远程模式装不到本地 dsh；装完必重启
+            // 也是本地的）。便携模式不禁用——本地调试通道的 meta-repo 根在 D: 盘或
+            // C: 盘均可；生产通道更是零本地依赖（从 GitHub Release 拉构建物）。
+            "install-digital-twin-local" | "install-digital-twin-release" => !ctx.remote,
             _ => true,
         },
         MenuEntry::Submenu { .. } => true,
@@ -911,6 +923,29 @@ pub fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
             }
             "wizard" => {
                 crate::persona::reopen(app);
+            }
+            "install-digital-twin-local" => {
+                // D2b 本地调试通道：选本地 meta-repo 目录 → link: 形态装入。
+                // 内部已走 FlowGate 闸锁 + 快照/回滚/探针 + 重启 dsh；托盘只负责
+                // spawn 出去不阻塞 UI。
+                let handle = app.clone();
+                std::thread::spawn(move || {
+                    crate::install::install_digital_twin_suite(
+                        &handle,
+                        crate::install::SuiteChannel::Local,
+                    )
+                });
+            }
+            "install-digital-twin-release" => {
+                // D2b 生产通道：从各插件仓库的 GitHub Release 拉构建物，目标机无需
+                // 本地仓库；再点一次 = 升级到最新 Release（安装器按 tag 刷新 URL）。
+                let handle = app.clone();
+                std::thread::spawn(move || {
+                    crate::install::install_digital_twin_suite(
+                        &handle,
+                        crate::install::SuiteChannel::Release,
+                    )
+                });
             }
             "check-app-update" => {
                 let handle = app.clone();

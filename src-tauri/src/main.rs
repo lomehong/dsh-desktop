@@ -18,6 +18,7 @@ mod remote_proxy;
 mod runtime;
 mod settings;
 mod status;
+mod suite_path;
 mod supervisor;
 mod tray;
 mod webview;
@@ -564,6 +565,10 @@ fn main() {
         ))
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
+        // 数字分身一键安装（D2b）：弹原生文件夹选择器让用户选 meta-repo 根目录
+        // 纯 Rust API 调用，零 JS 桥。注册位置紧跟 notification/updater 保持 plugin
+        // 注册块连贯。
+        .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_decorum::init())
         .manage(AppState {
             child: Mutex::new(None),

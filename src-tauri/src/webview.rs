@@ -144,6 +144,93 @@ pub const SECURE_CONTEXT_SHIM_JS: &str = r##"
 })();
 "##;
 
+/// 套件安装进度浮层（2026-09-10 用户反馈：托盘点击后长时间无任何可见反馈，
+/// 失败时的原因也只在托盘 tooltip 里）。壳在关键阶段调 `w.eval` 驱动本浮层：
+/// 显示当前阶段与已完成步骤，失败时把可读原因直接留在屏幕上。
+///
+/// 设计要点：
+/// - 只注入 API，不自动显示——壳决定何时 show/step/done/fail/hide；
+/// - `pointer-events:none`：纯展示，不挡用户操作（失败态给一个可点关闭按钮）；
+/// - 主题跟随 app：挂在 body 下，直接吃 `--dsw-alias-*` token（深浅主题自动适配）；
+/// - 端口守卫同其它注入脚本：加载页（非 http）空操作；
+/// - 页面导航（重启进入加载页）后文档重建，浮层自然消失——重启阶段由加载页
+///   自身的进度 UI 接管，无需跨文档保活。
+pub const SUITE_PROGRESS_JS: &str = r##"
+(function () {
+  if (location.protocol !== 'http:' || location.port === '') return;
+  var box = null, titleEl = null, stepEl = null, spinner = null, closer = null;
+  function ensure() {
+    if (box || !document.body) return box;
+    var s = document.createElement('style');
+    s.textContent = '@keyframes dsh-suite-spin{to{transform:rotate(360deg)}}';
+    (document.head || document.documentElement).appendChild(s);
+    box = document.createElement('div');
+    box.style.cssText = 'position:fixed;left:50%;top:16%;transform:translateX(-50%);' +
+      'z-index:2147483646;min-width:300px;max-width:min(560px,86vw);padding:14px 16px;' +
+      'border-radius:12px;display:none;gap:10px;align-items:flex-start;' +
+      'background:var(--dsw-alias-bg-layer-1,#fff);color:var(--dsw-alias-label-primary,#0f1115);' +
+      'border:1px solid var(--dsw-alias-border-l1,rgba(0,0,0,.12));' +
+      'box-shadow:0 12px 40px rgba(0,0,0,.28);pointer-events:none;' +
+      'font:13px/1.6 system-ui,"Microsoft YaHei",sans-serif;white-space:pre-wrap;';
+    spinner = document.createElement('span');
+    spinner.style.cssText = 'flex:none;width:14px;height:14px;margin-top:2px;border-radius:50%;' +
+      'border:2px solid var(--dsw-alias-border-l1,rgba(0,0,0,.2));border-top-color:#4d6bfe;' +
+      'animation:dsh-suite-spin .8s linear infinite;';
+    var col = document.createElement('div');
+    col.style.cssText = 'flex:1;min-width:0;';
+    titleEl = document.createElement('div');
+    titleEl.style.cssText = 'font-weight:650;';
+    stepEl = document.createElement('div');
+    stepEl.style.cssText = 'margin-top:4px;font-size:12px;opacity:.82;';
+    col.appendChild(titleEl);
+    col.appendChild(stepEl);
+    closer = document.createElement('button');
+    closer.textContent = '关闭';
+    closer.style.cssText = 'display:none;flex:none;pointer-events:auto;cursor:pointer;' +
+      'font:12px system-ui,sans-serif;padding:2px 10px;border-radius:6px;' +
+      'border:1px solid var(--dsw-alias-border-l1,rgba(0,0,0,.2));background:transparent;' +
+      'color:var(--dsw-alias-label-secondary,#666);';
+    closer.onclick = function () { api.hide(); };
+    box.appendChild(spinner);
+    box.appendChild(col);
+    box.appendChild(closer);
+    document.body.appendChild(box);
+    return box;
+  }
+  function put(t) {
+    if (!ensure()) return;
+    box.style.display = 'flex';
+    if (typeof t === 'string' && t) stepEl.textContent = t;
+  }
+  var api = {
+    show: function (t, detail) {
+      if (!ensure()) return;
+      titleEl.textContent = t || '数字分身套件';
+      closer.style.display = 'none';
+      spinner.style.display = 'block';
+      stepEl.textContent = detail || '';
+      box.style.display = 'flex';
+    },
+    step: function (t) { put(t); },
+    done: function (t) {
+      if (!ensure()) return;
+      spinner.style.display = 'none';
+      if (typeof t === 'string' && t) stepEl.textContent = t;
+    },
+    fail: function (t) {
+      if (!ensure()) return;
+      spinner.style.display = 'none';
+      closer.style.display = 'block';
+      titleEl.textContent = '数字分身套件安装失败';
+      stepEl.textContent = t || '（无详细信息，见壳日志）';
+      stepEl.style.color = 'var(--dsw-alias-label-error,#d4380d)';
+    },
+    hide: function () { if (box) box.style.display = 'none'; }
+  };
+  window.__dshSuiteProgress__ = api;
+})();
+"##;
+
 /// 模式角标：窗口顶部居中常驻小徽标（「本地」/「远程 · 地址」），让用户一眼分辨
 /// 当前连的是哪个实例。远程模式由代理本地应答 `/__remote/badge`（含展示地址）；
 /// 本地模式该路径在本地 dsh 上 404 → 保持「本地」。仅装饰，pointer-events 关闭。
@@ -232,6 +319,7 @@ pub fn create_main_window(app: &tauri::AppHandle) -> tauri::Result<()> {
     }
     let window = builder
         .initialization_script(MODE_BADGE_JS)
+        .initialization_script(SUITE_PROGRESS_JS)
         .initialization_script(SECURE_CONTEXT_SHIM_JS)
         .initialization_script(TITLEBAR_INSET_CSS)
         .initialization_script(DECORUM_ICON_CSS)

@@ -893,9 +893,775 @@ pub fn install_and_start(app: &tauri::AppHandle) {
     }
 }
 
+/* ── 数字分身套件一键安装（D2b） ── */
+
+/** 托盘「安装数字分身套件」流程：
+
+    1) 读 `suite_path::read()` 拿持久化的套件根；失效（文件无 / 目录删了）则
+       调 `suite_path::pick(app)` 弹原生文件夹选择器让用户选；选完 `write()` 落盘
+    2) 校验目录下存在 `install-all.bat`——缺失立即报错并弹系统通知
+    2.5) 装前快照 profile 清单与锁文件（`suite-install-backup/`）——脚本失败或
+       探针失败时回滚用，防止半成品 manifest 让下次启动变 boot 毒药
+       （2026-09-10 dsh-memory 解析断裂事故的教训）
+    3) `cmd /c install-all.bat` 同步跑，捕获 stdout/stderr 全量写日志
+    3.5) 探针校验：逐个 link: 依赖用宿主 Node import 其主机侧入口——复现 dsh
+       启动的加载路径，把「装完才发现解析断裂」拦在重启之前；失败则回滚 +
+       报错 + 不重启
+    4) 成功 → 写 `installed-suite.json` 标记 + 系统通知 + `supervisor::restart_by_mode`
+       让 dsh 重新加载 11 个插件 + 物化 digital-twin preset
+    5) 失败 → 回滚 manifest + `status::fail` + 系统通知 + stderr 尾部透传（≤8 行）
+
+    与 `install_runtime` / `upgrade_runtime` 共用同一把 FlowGate 闸锁——在途流程未
+    结束时点会排队而非静默放弃。
+
+    不抽去新文件 / 不开新 module——install.rs 已经是"安装子进程并与 dsh 交互"的
+    收敛点，加新函数自然符合既有阅读路径。
+
+    远程模式由 `tray::entry_visible` 在菜单层隐藏（远程实例装不到本地 dsh）。
+*/
+/// 套件安装通道（2026-09-10 需求方确认的双通道设计）。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SuiteChannel {
+    /// 本地调试：link: 链接本地 meta-repo 根，改源码重启即生效——面向套件开发者。
+    /// 需要本机有仓库 + 子模块 checkout + 插件已构建（lib/ 存在）。
+    Local,
+    /// 生产：从各插件仓库的 GitHub Release 拉构建物 tarball——面向最终用户，
+    /// 目标机无需仓库与工具链；重跑一次 = 升级到最新 Release（安装器按 tag 刷新 URL）。
+    Release,
+}
+
+impl SuiteChannel {
+    /// 状态栏/通知里的人话标签。
+    fn label(self) -> &'static str {
+        match self {
+            SuiteChannel::Local => "本地调试",
+            SuiteChannel::Release => "生产（GitHub Release）",
+        }
+    }
+
+    /// 安装器仓库与分支（生产通道运行时拉取官方安装器——单一实现、零漂移：
+    /// 壳不内置副本，套件仓库更新安装器后所有机器即刻受益）。
+    /// 附 `?cb=<时间戳>`：raw 走 CDN 缓存（实测推送后需数分钟才全网刷新），
+    /// 带唯一查询串强制回源，避免「刚修好的安装器拉到的还是旧副本」。
+    fn installer_urls(self) -> Vec<String> {
+        let cb = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        match self {
+            SuiteChannel::Local => Vec::new(),
+            SuiteChannel::Release => vec![
+                format!("https://raw.githubusercontent.com/lomehong/digital-twin/main/install-all.bat?cb={cb}"),
+                // ghfast 镜像兜底：与更新器 endpoints 同款国内可达性策略
+                format!("https://ghfast.top/https://raw.githubusercontent.com/lomehong/digital-twin/main/install-all.bat?cb={cb}"),
+            ],
+        }
+    }
+}
+
+/** 托盘「安装数字分身套件」流程（双通道共用主体，仅"安装器从哪来 + 传什么参数"不同）：
+
+    1) 定位安装器：
+       - 本地调试：读 `suite_path::read()` 拿持久化的套件根；失效则弹文件夹选择器，选完落盘；
+         校验目录下存在 `install-all.bat`。
+       - 生产：从官方仓库 raw 拉最新 `install-all.bat`（含 ghfast 镜像兜底）落到
+         `runtime_root/suite-installer/`，不经用户选目录——目标机无需任何本地仓库。
+    2.5) 装前快照 profile 清单与锁文件（`suite-install-backup/`）——脚本失败或探针
+       失败时回滚用，防止半成品 manifest 让下次启动变 boot 毒药（2026-09-10 教训）
+    3) `cmd /c install-all.bat [-Release]` 同步跑，捕获 stdout/stderr 全量写日志
+    3.5) 探针校验：对清单里的套件依赖逐个用宿主 Node import 其主机侧入口——复现 dsh
+       启动的加载路径，把「装完才发现解析断裂」拦在重启之前；失败则回滚 + 报错 + 不重启
+    4) 成功 → 写 `installed-suite.json` 标记（含通道）+ 系统通知 + `supervisor::restart_by_mode`
+    5) 失败 → 回滚 manifest + `status::fail` + 系统通知 + stderr 尾部透传（≤8 行）
+
+    两通道共享同一套安全网（快照/回滚/探针）与同一把 FlowGate 闸锁；互相切换时
+    「以最后一次安装为准」——安装器负责清理另一形态的残留（link: ↔ tarball URL、
+    pnpm.overrides 只在 release 形态存在）。
+
+    远程模式由 `tray::entry_visible` 在菜单层隐藏（远程实例装不到本地 dsh）。
+*/
+pub fn install_digital_twin_suite(app: &tauri::AppHandle, channel: SuiteChannel) {
+    let state: tauri::State<crate::AppState> = app.state();
+    state.restarting.acquire();
+    suite_progress(
+        app,
+        "show",
+        &format!("通道：{}——准备中…", channel.label()),
+    );
+
+    // 1) 定位安装器：本地通道走用户目录，生产通道拉官方最新
+    let (installer_dir, bat_args, suite_root) = match channel {
+        SuiteChannel::Local => {
+            let root = match crate::suite_path::read() {
+                Some(p) => p,
+                None => match crate::suite_path::pick(app) {
+                    Some(p) => {
+                        if let Err(e) = crate::suite_path::write(&p) {
+                            if let Some(mut log) = crate::runtime::open_log_append() {
+                                use std::io::Write;
+                                let _ = writeln!(log, "[数字分身] 路径持久化失败: {e}");
+                            }
+                        }
+                        p
+                    }
+                    None => {
+                        status::set(app, "已取消：未选择数字分身套件目录");
+                        suite_progress(app, "hide", "");
+                        state.restarting.release();
+                        return;
+                    }
+                },
+            };
+            (root.clone(), Vec::new(), Some(root))
+        }
+        SuiteChannel::Release => {
+            let dir = runtime::runtime_root().join("suite-installer");
+            status::set(app, "正在获取数字分身套件安装器（GitHub）…");
+            suite_progress(app, "step", "正在从 GitHub 获取安装器…");
+            if let Err(e) = fetch_suite_installer(&dir, &channel.installer_urls()) {
+                let msg = format!("获取套件安装器失败（网络不通？）：{e}");
+                status::fail(app, &msg);
+                suite_progress(app, "fail", &msg);
+                notify_digital_twin(app, "数字分身安装失败", &msg);
+                state.restarting.release();
+                return;
+            }
+            (dir, vec!["-Release"], None)
+        }
+    };
+
+    // 2) 校验安装器存在（本地通道：用户选的目录；生产通道：刚拉下来的目录）
+    let bat = installer_dir.join("install-all.bat");
+    if !bat.is_file() {
+        let msg = match channel {
+            SuiteChannel::Local => format!(
+                "选定的目录不是数字分身套件根（未发现 install-all.bat）：{}",
+                installer_dir.display()
+            ),
+            SuiteChannel::Release => format!(
+                "拉取到的安装器不完整（未发现 install-all.bat）：{}",
+                installer_dir.display()
+            ),
+        };
+        status::fail(app, &msg);
+        notify_digital_twin(app, "数字分身安装失败", &msg);
+        state.restarting.release();
+        return;
+    }
+
+    // 2.5) 行尾规范化：cmd 在 LF-only 批处理上会解析跑飞（详见 normalize_bat_eol 文档）。
+    //      生产通道在 fetch 内已做过，此处幂等；本地通道的副本可能来自 Linux 克隆/编辑。
+    match normalize_bat_eol(&bat) {
+        Ok(true) => {
+            if let Some(mut log) = crate::runtime::open_log_append() {
+                use std::io::Write;
+                let _ = writeln!(
+                    log,
+                    "[数字分身] 安装器为 LF-only，已就地规范化为 CRLF（cmd 批处理解析需要）"
+                );
+            }
+        }
+        Ok(false) => {}
+        Err(e) => {
+            status::fail(app, &e);
+            notify_digital_twin(app, "数字分身安装失败", &e);
+            state.restarting.release();
+            return;
+        }
+    }
+
+    // 3) 跑 install-all.bat：cmd /C 包装以支持 bat；DSH_HOME 显式注入，避开脚本
+    //    探测 %LOCALAPPDATA%\dsh-desktop-app-data\home 与我们的 runtime 路径不一致的隐患。
+    //    装前快照：bat 先改 manifest 再跑 pnpm——pnpm 失败时 manifest 已指向未就位的
+    //    依赖，下次启动必崩；快照让失败路径能回到装前状态。
+    let home = runtime::app_home();
+    let backup_dir = runtime::runtime_root().join("suite-install-backup");
+    snapshot_web_profile(&home, &backup_dir);
+    status::set(
+        app,
+        &format!("正在安装数字分身套件（{} 通道）…", channel.label()),
+    );
+    suite_progress(
+        app,
+        "step",
+        "正在安装插件（下载 Release/链接本地目录 → pnpm install）…首次可能需要 1-2 分钟",
+    );
+    let mut cmd = std::process::Command::new("cmd");
+    cmd.args(["/c", "install-all.bat"]);
+    cmd.args(&bat_args)
+        .current_dir(&installer_dir)
+        // install-all.bat 自己找 DSH_HOME 的兜底只探测 %LOCALAPPDATA%\dsh-desktop-app-data\home：
+        // 便携版 home 在包内 Data\ 下探测不到，不注入就会落到 ~/.dsh 装错家。
+        // 显式注入与 supervisor spawn 同源（app_home()），保证装进壳正在用的 home。
+        .env("DSH_HOME", runtime::app_home().display().to_string());
+    runtime::no_window(&mut cmd);
+    let output = match cmd.output() {
+        Ok(o) => o,
+        Err(e) => {
+            let msg = format!("启动 install-all.bat 失败: {e}");
+            status::fail(app, &msg);
+            notify_digital_twin(app, "数字分身安装失败", &msg);
+            state.restarting.release();
+            return;
+        }
+    };
+
+    // 4) 全量日志落盘——install-all.bat 的 link: 阶段、pnpm install 阶段、junction
+    //    修复阶段都可能失败，无 stdout/stderr 留证等于让用户盲调
+    if let Some(mut log) = crate::runtime::open_log_append() {
+        use std::io::Write;
+        let _ = writeln!(
+            log,
+            "\n[数字分身] install-all.bat 退出码={:?}",
+            output.status.code()
+        );
+        if !output.stdout.is_empty() {
+            let _ = writeln!(
+                log,
+                "--- stdout ---\n{}",
+                String::from_utf8_lossy(&output.stdout)
+            );
+        }
+        if !output.stderr.is_empty() {
+            let _ = writeln!(
+                log,
+                "--- stderr ---\n{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+    }
+
+    if !output.status.success() {
+        let stdout_text = readable_output(&output.stdout);
+        let stderr_text = readable_output(&output.stderr);
+        // 取 stderr（空则退 stdout）最后 8 行做错误摘要（太长 status 文本会爆）；
+        // 同款"tail N 行"模式在 install_runtime_inner 里用于 npm 错误摘要
+        let tail: String = {
+            let source = if stderr_text.trim().is_empty() { &stdout_text } else { &stderr_text };
+            let lines: Vec<&str> = source.lines().filter(|l| !l.trim().is_empty()).collect();
+            let start = lines.len().saturating_sub(8);
+            lines[start..].join("\n")
+        };
+        // bat 先改 manifest 再跑 pnpm：脚本失败时 manifest 可能已指向未就位的
+        // 链接（下次启动必崩）——回滚到装前快照，服务留在旧组合上继续跑。
+        restore_web_profile(&home, &backup_dir);
+        let msg = format!(
+            "数字分身安装失败（退出码 {:?}，已回滚 profile 清单）stderr 尾部：{tail}",
+            output.status.code()
+        );
+        status::fail(app, &msg);
+        suite_progress(app, "fail", &tail);
+        notify_digital_twin(app, "数字分身安装失败", &tail);
+        state.restarting.release();
+        return;
+    }
+
+    // 3.5) 探针校验：对清单里的套件依赖逐个用宿主 Node import 其主机侧入口——复现
+    //      dsh 启动的加载路径（link 通道按真实路径解析，缺 @deepseek-ai/<pkg> 会
+    //      ERR_MODULE_NOT_FOUND；release 通道则为 pnpm 解出的真实目录）。把
+    //      「装完一重启就崩」拦在重启之前：失败则回滚 manifest、不重启、给出精确原因。
+    suite_progress(app, "step", "正在校验插件可加载性（防「装完一重启就崩」）…");
+    let failures = probe_suite_plugins(&home);
+    if !failures.is_empty() {
+        restore_web_profile(&home, &backup_dir);
+        let msg = format!(
+            "数字分身套件安装后校验未通过（已回滚，未重启）：{}",
+            failures.join("；")
+        );
+        status::fail(app, &msg);
+        suite_progress(app, "fail", &failures.join("\n"));
+        notify_digital_twin(app, "数字分身安装失败", &failures.join(" | "));
+        state.restarting.release();
+        return;
+    }
+    suite_progress(app, "step", "插件校验通过，正在重启 DSH 加载套件…");
+
+    // 5) 落 installed-suite.json 标记（diagnostics.rs 后续可读这一项给诊断包）：
+    //    - 通道（本地调试 / 生产）——用户看到「改了源码不生效」时先查这里是哪种形态
+    //    - 本地调试通道的套件根（让"重装/升级"能默认填好）
+    //    - 装好的时间戳
+    let marker = crate::runtime::runtime_root().join("installed-suite.json");
+    if let Some(parent) = marker.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let channel_name = match channel {
+        SuiteChannel::Local => "local",
+        SuiteChannel::Release => "release",
+    };
+    let root_field = match &suite_root {
+        Some(p) => format!(
+            r#""suite_root":"{}","#,
+            p.display().to_string().replace('\\', "\\\\")
+        ),
+        None => String::new(),
+    };
+    let payload = format!(
+        r#"{{"channel":"{channel_name}",{root_field}"installed_at":{}}}"#,
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0)
+    );
+    if let Err(e) = std::fs::write(&marker, payload) {
+        if let Some(mut log) = crate::runtime::open_log_append() {
+            use std::io::Write;
+            let _ = writeln!(log, "[数字分身] 写 installed-suite.json 失败: {e}");
+        }
+    }
+
+    status::set(
+        app,
+        &format!(
+            "数字分身套件已安装（{} 通道），正在重启 DSH 让预设物化…",
+            channel.label()
+        ),
+    );
+    notify_digital_twin(
+        app,
+        "数字分身已安装",
+        match channel {
+            SuiteChannel::Local => "以本地调试形态装入（改源码重启即生效）；DSH 正在重启，约 10-30 秒后就绪",
+            SuiteChannel::Release => "以生产形态装入（GitHub Release 构建物）；再点一次本项即可升级到最新 Release。DSH 正在重启，约 10-30 秒后就绪",
+        },
+    );
+
+    // 6) 重启：让 dsh web 重新加载 11 个插件，物化 digital-twin preset
+    //    必须本地模式——远程模式该菜单项已隐藏（tray::entry_visible 守门）。
+    //    先释放闸锁再走公开重启流程（restart_by_mode 自己 acquire）：闸锁非重入
+    //    （布尔 + Condvar），持锁跨调会自我死锁——首版真实缺陷：装完永远卡在
+    //    「正在重启」。与 upgrade_runtime / install_and_start 的编排同款。
+    suite_progress(app, "done", "安装完成，正在重启 DSH（约 10-30 秒；期间页面会短暂切到加载页）…");
+    state.restarting.release();
+    supervisor::restart_by_mode(app);
+}
+
+/// 安装进度浮层驱动（页面内 API 由 webview.rs 的 SUITE_PROGRESS_JS 注入）：
+/// 壳侧只负责把阶段文案推进去——托盘点击后长时间无可见反馈是用户实测的体验缺口。
+/// 页面导航中（导航后文档重建，API 暂不存在）调用是安全的空操作。
+fn suite_progress(app: &tauri::AppHandle, method: &str, text: &str) {
+    let Some(w) = app.get_webview_window("main") else { return };
+    let arg = serde_json::to_string(text).unwrap_or_else(|_| "\"\"".to_string());
+    let _ = w.eval(&format!(
+        "window.__dshSuiteProgress__&&window.__dshSuiteProgress__.{method}({arg})"
+    ));
+}
+
+/// 子进程输出 → 可读文本。bat 已 `chcp 65001`，正常路径即 UTF-8；若仍出现大量
+/// 替换符（历史版 bat / 非 UTF-8 工具链），显式告诉用户"编码异常、详见日志"，
+/// 而不是把乱码原样丢进通知（2026-09-10 用户实测：失败提示全乱码看不懂）。
+fn readable_output(bytes: &[u8]) -> String {
+    let text = String::from_utf8_lossy(bytes).to_string();
+    if text.matches('\u{FFFD}').count() >= 5 {
+        format!("（原始输出编码非 UTF-8，以下可能乱码；完整输出见壳日志）\n{text}")
+    } else {
+        text
+    }
+}
+
+/// 系统通知统一封装（tauri-plugin-notification 走 app.notification()；
+/// 失败仅记日志，不抛——通知是体验优化而非链路必需）。
+fn notify_digital_twin(app: &tauri::AppHandle, title: &str, body: &str) {    use tauri_plugin_notification::NotificationExt;
+    if let Err(e) = app
+        .notification()
+        .builder()
+        .title(title)
+        .body(body)
+        .show()
+    {
+        if let Some(mut log) = crate::runtime::open_log_append() {
+            use std::io::Write;
+            let _ = writeln!(log, "[数字分身] 系统通知失败: {e}");
+        }
+    }
+}
+
+/* ── D2b 安装安全网：快照/回滚 + 装后解析探针 ──
+   背景（2026-09-10 真实事故）：install-all.bat 先改 manifest 再跑 pnpm，pnpm 失败
+   时 manifest 已指向未就位的链接 → 下次 dsh 启动必崩；即使脚本成功，junction 链接
+   的插件按真实路径解析依赖，其自身 node_modules 缺 @deepseek-ai/<pkg> 时同样在启动时
+   ERR_MODULE_NOT_FOUND。两道防线：装前快照（失败回滚）+ 装后探针（拦在重启前）。
+   （注：Rust 块注释可嵌套，注释正文里不得出现斜杠星序列——曾因此踩坑。） */
+
+/// web profile 的清单/锁文件路径对（快照与回滚共用同一份清单）。
+/// 锁文件位置随 pnpm 布局变化：当前在 `profiles/web/`（profile 自身即项目根，
+/// 实测 2026-09-10：`profiles/web/pnpm-lock.yaml` 53KB），历史上在 `profiles/`
+/// （工作区根）。两个位置都纳入、不存在的自动跳过——快照必须覆盖真实那一份，
+/// 否则回滚只还原 manifest、锁文件仍停在失败态。
+fn web_profile_files(home: &std::path::Path) -> [(std::path::PathBuf, &'static str); 3] {
+    [
+        (home.join("profiles").join("web").join("package.json"), "package.json"),
+        (home.join("profiles").join("web").join("pnpm-lock.yaml"), "web-pnpm-lock.yaml"),
+        (home.join("profiles").join("pnpm-lock.yaml"), "pnpm-lock.yaml"),
+    ]
+}
+
+/// 装前快照（覆盖式，单代够用）。任一环节失败只记日志——快照是保险丝不是链路。
+fn snapshot_web_profile(home: &std::path::Path, backup: &std::path::Path) {
+    if let Err(e) = std::fs::create_dir_all(backup) {
+        if let Some(mut log) = crate::runtime::open_log_append() {
+            use std::io::Write;
+            let _ = writeln!(log, "[数字分身] 快照目录创建失败（回滚不可用）: {e}");
+        }
+        return;
+    }
+    for (src, name) in web_profile_files(home) {
+        if !src.is_file() {
+            continue;
+        }
+        if let Err(e) = std::fs::copy(&src, backup.join(name)) {
+            if let Some(mut log) = crate::runtime::open_log_append() {
+                use std::io::Write;
+                let _ = writeln!(log, "[数字分身] 快照 {name} 失败（回滚不可用）: {e}");
+            }
+        }
+    }
+}
+
+/// 失败回滚：只覆盖快照里存在的文件（装前本就没有的文件不造出来）。
+fn restore_web_profile(home: &std::path::Path, backup: &std::path::Path) {
+    for (dst, name) in web_profile_files(home) {
+        let b = backup.join(name);
+        if !b.is_file() {
+            continue;
+        }
+        let outcome = std::fs::copy(&b, &dst);
+        if let Some(mut log) = crate::runtime::open_log_append() {
+            use std::io::Write;
+            match outcome {
+                Ok(_) => {
+                    let _ = writeln!(log, "[数字分身] 已回滚 {name} 至装前快照");
+                }
+                Err(e) => {
+                    let _ = writeln!(log, "[数字分身] 回滚 {name} 失败: {e}");
+                }
+            }
+        }
+    }
+}
+
+/// 套件包名判定：安装器的 PLUGINS 清单就是这批（`@dsh-extra/*` 前缀 + `dsh-yuyi`）。
+/// 只探测套件自己的包——宿主 harness 包（`@deepseek-ai/*`）由 dsh 自身加载，不在此列。
+fn is_suite_package(name: &str) -> bool {
+    name.starts_with("@dsh-extra/") || name == "dsh-yuyi"
+}
+
+/// 某个套件依赖的安装目录：
+/// - `link:` 形态（本地调试通道）→ 链接目标（meta-repo 里的插件目录）；
+/// - tarball 形态（生产通道）→ profile 的 node_modules（pnpm 解出的真实目录）。
+fn suite_package_dir(home: &std::path::Path, spec: &str, name: &str) -> std::path::PathBuf {
+    match spec.strip_prefix("link:") {
+        Some(p) => std::path::PathBuf::from(p),
+        None => home
+            .join("profiles")
+            .join("web")
+            .join("node_modules")
+            .join(name),
+    }
+}
+
+/// 插件的主机侧入口（dsh 加载构建产物）：exports["."]（字符串或 .default）→
+/// main → index.js。浏览器端 "./client" 不在此列——它不经 Node 解析。
+fn suite_entry_file(pkg_dir: &std::path::Path) -> Result<std::path::PathBuf, String> {
+    let text = std::fs::read_to_string(pkg_dir.join("package.json"))
+        .map_err(|e| format!("读 package.json 失败: {e}"))?;
+    let v: serde_json::Value =
+        serde_json::from_str(&text).map_err(|e| format!("解析 package.json 失败: {e}"))?;
+    let entry = v
+        .get("exports")
+        .and_then(|e| e.get("."))
+        .and_then(|e| {
+            if let Some(s) = e.as_str() {
+                Some(s.to_string())
+            } else {
+                e.get("default").and_then(|d| d.as_str()).map(str::to_string)
+            }
+        })
+        .or_else(|| v.get("main").and_then(|m| m.as_str()).map(str::to_string))
+        .unwrap_or_else(|| "index.js".to_string());
+    Ok(pkg_dir.join(entry))
+}
+
+/// 探针：用宿主 Node import 插件主机侧入口（与 dsh 启动加载同一条路径）。
+/// None=通过；Some=单行失败描述（缺包时附可操作的指引）。
+fn probe_suite_plugin(
+    node: &std::path::Path,
+    name: &str,
+    pkg_dir: &std::path::Path,
+) -> Option<String> {
+    let entry = match suite_entry_file(pkg_dir) {
+        Ok(e) => e,
+        Err(e) => return Some(format!("{name}: {e}")),
+    };
+    let uri = format!("file:///{}", entry.display().to_string().replace('\\', "/"));
+    // uri 走 argv 而非内联进脚本：路径引号/转义不归我们管；e.code+e.message 首行即结论
+    let script = "import(process.argv[1]).then(()=>{},e=>{console.error((e.code??'')+' '+(e.message??''));process.exit(1)})";
+    let mut cmd = std::process::Command::new(node);
+    cmd.args(["-e", script, &uri]).current_dir(pkg_dir);
+    crate::runtime::no_window(&mut cmd);
+    match cmd.output() {
+        Err(e) => Some(format!("{name}: 探针进程启动失败: {e}")),
+        Ok(o) if o.status.success() => None,
+        Ok(o) => {
+            let err = String::from_utf8_lossy(&o.stderr);
+            let first = err.lines().next().unwrap_or("未知错误").trim();
+            let mut line = format!("{name}: {first}");
+            if first.contains("Cannot find package") {
+                line.push_str("（插件目录内解析不到该依赖——请更新套件 install-all.bat（新版自动修复），或到该插件目录补 junction 至宿主 store）");
+            }
+            Some(line)
+        }
+    }
+}
+
+/// 装后校验：对清单里的套件依赖逐个跑入口探针（两个通道共用）。清单读不到 → 通过。
+fn probe_suite_plugins(home: &std::path::Path) -> Vec<String> {
+    let Ok(text) = std::fs::read_to_string(home.join("profiles").join("web").join("package.json"))
+    else {
+        return Vec::new();
+    };
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return Vec::new();
+    };
+    let Some(deps) = v.get("dependencies").and_then(|d| d.as_object()) else {
+        return Vec::new();
+    };
+    let targets: Vec<(&String, std::path::PathBuf)> = deps
+        .iter()
+        .filter(|(name, _)| is_suite_package(name))
+        .filter_map(|(name, spec)| {
+            let spec = spec.as_str()?;
+            Some((name, suite_package_dir(home, spec, name)))
+        })
+        .collect();
+    if targets.is_empty() {
+        return Vec::new();
+    }
+    let node = runtime::node_exe();
+    if !node.exists() {
+        return vec!["内置 Node 运行时缺失，无法做安装后校验".to_string()];
+    }
+    targets
+        .iter()
+        .filter_map(|(name, dir)| probe_suite_plugin(&node, name, dir))
+        .collect()
+}
+
+/// 生产通道：拉取官方安装器到本地目录（壳不内置副本——套件仓库更新安装器后所有
+/// 机器即刻受益，零漂移）。用宿主 Node 做 HTTPS 下载（Node 24 自带 fetch，零新增
+/// Rust 依赖），逐个来源尝试（官方 raw → ghfast 镜像），校验嵌入式 JS 标记后落盘。
+fn fetch_suite_installer(dir: &std::path::Path, urls: &[String]) -> Result<(), String> {
+    if urls.is_empty() {
+        return Err("未配置安装器来源".to_string());
+    }
+    std::fs::create_dir_all(dir).map_err(|e| format!("创建安装器目录失败: {e}"))?;
+    let node = runtime::node_exe();
+    if !node.exists() {
+        return Err("内置 Node 运行时缺失".to_string());
+    }
+    let out = dir.join("install-all.bat");
+    // argv: [1]=输出路径, [2..]=候选 URL。校验 JS-START 标记，避免把 404 页面/代理页当安装器。
+    // 注意：失败/成功后都用 process.exitCode 交还控制权、让事件循环自然收干——
+    // 紧跟 fetch 调 process.exit() 会触发 libuv 断言（win async.c）崩溃退出码非 0，
+    // 明明下载成功的文件会被判失败（2026-09-10 实测）。
+    let script = "const fs=require('fs');const out=process.argv[1];const urls=process.argv.slice(2);\
+(async()=>{let ok=false;for(const u of urls){try{const r=await fetch(u);if(!r.ok)continue;const t=await r.text();\
+if(!t.includes('//==JS-START=='))continue;fs.writeFileSync(out,t);ok=true;break}catch{}}\
+process.exitCode=ok?0:2})()";
+    let mut cmd = std::process::Command::new(&node);
+    // --dns-result-order=ipv4first：Node 的 fetch/undici 默认 IPv6 优先，且不读 Windows
+    // 系统代理——受限网络下直连 github.com 会超时 10s（2026-09-10 实测：系统代理已启用
+    // 但无 HTTPS_PROXY，加此参数立即 200；PowerShell 因走系统代理一直正常 → 假故障）。
+    cmd.arg("--dns-result-order=ipv4first").arg("-e").arg(script).arg(&out);
+    for u in urls {
+        cmd.arg(u);
+    }
+    cmd.current_dir(dir);
+    crate::runtime::no_window(&mut cmd);
+    let output = cmd
+        .output()
+        .map_err(|e| format!("下载器启动失败: {e}"))?;
+    if !output.status.success() || !out.is_file() {
+        let err = String::from_utf8_lossy(&output.stderr);
+        let first = err.lines().next().unwrap_or("网络不可达").trim();
+        return Err(format!("所有来源均不可用（{first}）"));
+    }
+    // 下载回来的行尾不可信：raw CDN 按 git blob 下发，blob 为 LF 时 cmd 会解析跑飞。
+    normalize_bat_eol(&out)?;
+    Ok(())
+}
+
+/// 把 .bat 的行尾规范化为 CRLF（返回是否发生了改写）。
+///
+/// 为什么必须：cmd.exe 的批处理解析器在 LF-only 文件上会跑飞——变量展开被粘连成
+/// 单个 token、`exit /b` 失效，最终越过脚本末尾执行到 install-all.bat 里的嵌入式
+/// JS 文本，表现为满屏「不是内部或外部命令」+ 中文乱码（GBK 被按 UTF-8 读）。
+/// 2026-09-10 用户实测的生产通道失败即此：**本地工作区副本是 CRLF（git 检出转换）
+/// 所以跑得通，而从 GitHub raw 下载回来是 LF 所以跑不通**。
+/// 仓库已用 `.gitattributes` 的 `-text` 让 blob 保留 CRLF；这里再兜一层，
+/// 对 CDN 缓存陈旧 / 其他 LF 来源（Linux 上编辑、镜像站）一律免疫。
+fn normalize_bat_eol(path: &std::path::Path) -> Result<bool, String> {
+    let bytes = std::fs::read(path).map_err(|e| format!("读取安装器失败: {e}"))?;
+    if bytes.contains(&b'\r') {
+        return Ok(false); // 已含 CR（CRLF 或混合）：保守不动
+    }
+    let mut out = Vec::with_capacity(bytes.len() + bytes.len() / 16);
+    for byte in bytes {
+        if byte == b'\n' {
+            out.push(b'\r');
+        }
+        out.push(byte);
+    }
+    std::fs::write(path, out).map_err(|e| format!("规范化安装器行尾失败: {e}"))?;
+    Ok(true)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 行尾规范化：LF-only 就地改写成 CRLF（cmd 需要）；已是 CRLF 时幂等不动。
+    #[test]
+    fn normalize_bat_eol_rewrites_only_lf() {
+        let dir = std::env::temp_dir().join(format!("dsh-eol-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let lf = dir.join("lf.bat");
+        std::fs::write(&lf, b"@echo off\nset RC=\nexit /b %RC%\n").unwrap();
+        assert!(normalize_bat_eol(&lf).unwrap(), "LF-only 应被改写");
+        let bytes = std::fs::read(&lf).unwrap();
+        assert_eq!(bytes.iter().filter(|b| **b == b'\r').count(), 3, "三行都应补上 CR");
+        assert!(!normalize_bat_eol(&lf).unwrap(), "已是 CRLF：再调必须幂等");
+
+        let crlf = dir.join("crlf.bat");
+        std::fs::write(&crlf, b"@echo off\r\nexit /b 0\r\n").unwrap();
+        let before = std::fs::read(&crlf).unwrap();
+        assert!(!normalize_bat_eol(&crlf).unwrap(), "CRLF 不应被改动");
+        assert_eq!(std::fs::read(&crlf).unwrap(), before, "CRLF 必须逐字节原样保留");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 乱码降级：正常 UTF-8 原样返回；大量替换符（非 UTF-8 工具链输出）时
+    /// 显式提示编码异常，而不是把乱码当错误原因丢给用户（2026-09-10 实测）。
+    #[test]
+    fn readable_output_flags_non_utf8() {
+        assert_eq!(readable_output("安装成功".as_bytes()), "安装成功");
+        let gbk_like: Vec<u8> = vec![0xB0, 0xA1, 0xB0, 0xA1, 0xB0, 0xA1, 0xB0, 0xA1, 0xB0, 0xA1, 0xB0, 0xA1];
+        let text = readable_output(&gbk_like);
+        assert!(text.contains("编码非 UTF-8"), "非 UTF-8 输出应显式标注: {text}");
+    }
+
+    /// 套件包名判定 + 双通道目录解析：
+    /// link:（本地调试）→ 链接目标；tarball URL（生产）→ profile node_modules。
+    #[test]
+    fn suite_package_resolution_covers_both_channels() {
+        assert!(is_suite_package("@dsh-extra/dsh-memory"));
+        assert!(is_suite_package("dsh-yuyi"));
+        assert!(!is_suite_package("@deepseek-ai/dsh-tools"));
+        assert!(!is_suite_package("esbuild"));
+
+        let home = std::path::PathBuf::from("C:/home");
+        assert_eq!(
+            suite_package_dir(&home, "link:E:/code/nodejs/dsh/dsh-memory", "@dsh-extra/dsh-memory"),
+            std::path::PathBuf::from("E:/code/nodejs/dsh/dsh-memory")
+        );
+        assert_eq!(
+            suite_package_dir(
+                &home,
+                "https://github.com/lomehong/dsh-memory/releases/latest/download/dsh-memory-latest.tgz?release=v0.1.1",
+                "@dsh-extra/dsh-memory"
+            ),
+            home.join("profiles").join("web").join("node_modules").join("@dsh-extra/dsh-memory")
+        );
+    }
+
+    /// 生产通道安装器来源：两条候选（官方 raw + 镜像）顺序稳定，且都带缓存击穿参数
+    /// （raw 的 CDN 缓存会让刚修好的安装器拉不到，`?cb=` 强制回源）。
+    #[test]
+    fn release_channel_has_installer_sources() {
+        let urls = SuiteChannel::Release.installer_urls();
+        assert_eq!(urls.len(), 2, "应有官方 raw 与镜像两条来源");
+        assert!(urls[0].starts_with("https://raw.githubusercontent.com/lomehong/digital-twin/"));
+        assert!(urls[1].contains("ghfast.top"));
+        assert!(urls.iter().all(|u| u.contains("?cb=")), "两条来源都必须带缓存击穿参数: {urls:?}");
+        assert!(SuiteChannel::Local.installer_urls().is_empty(), "本地通道用用户目录里的安装器");
+        assert_eq!(SuiteChannel::Local.label(), "本地调试");
+        assert!(SuiteChannel::Release.label().contains("生产"));
+        // 空来源必须明确失败而不是静默跳过
+        assert!(fetch_suite_installer(std::path::Path::new("."), &[]).is_err());
+    }
+
+    /// 入口解析：exports["."] 字符串 / 对象.default / main / 全无 → index.js。
+    #[test]
+    fn suite_entry_file_resolution_variants() {
+        let dir = std::env::temp_dir()
+            .join(format!("dsh-entry-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let write = |text: &str| std::fs::write(dir.join("package.json"), text).unwrap();
+
+        write(r#"{"main":"lib/index.js"}"#);
+        assert_eq!(suite_entry_file(&dir).unwrap(), dir.join("lib/index.js"));
+
+        write(r#"{"exports":{".":"./lib/main.js"}}"#);
+        assert_eq!(suite_entry_file(&dir).unwrap(), dir.join("./lib/main.js"));
+
+        write(r#"{"exports":{".":{"types":"./lib/types/index.d.ts","default":"./lib/index.js"}}}"#);
+        assert_eq!(suite_entry_file(&dir).unwrap(), dir.join("lib/index.js"));
+
+        write(r#"{"exports":{".":{"types":"./lib/types/index.d.ts"}},"main":"lib/fallback.js"}"#);
+        assert_eq!(suite_entry_file(&dir).unwrap(), dir.join("lib/fallback.js"));
+
+        write(r#"{"name":"no-entry"}"#);
+        assert_eq!(suite_entry_file(&dir).unwrap(), dir.join("index.js"));
+
+        // 损坏 JSON → Err 而非 panic
+        write("{ not json");
+        assert!(suite_entry_file(&dir).is_err());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 快照/回滚回环：快照后改动原件，回滚必须逐字恢复；装前缺失的文件回滚不造。
+    #[test]
+    fn snapshot_and_restore_roundtrip() {
+        let stamp = format!("dsh-snap-test-{}", std::process::id());
+        let home = std::env::temp_dir().join(&stamp).join("home");
+        let backup = std::env::temp_dir().join(&stamp).join("backup");
+        let profile_dir = home.join("profiles").join("web");
+        std::fs::create_dir_all(&profile_dir).unwrap();
+        std::fs::create_dir_all(home.join("profiles")).unwrap();
+        std::fs::write(profile_dir.join("package.json"), "{\"v\":1}").unwrap();
+        std::fs::write(home.join("profiles").join("pnpm-lock.yaml"), "lockfile: true").unwrap();
+
+        snapshot_web_profile(&home, &backup);
+        // 装后状态：原件被改动
+        std::fs::write(profile_dir.join("package.json"), "{\"v\":2,\"poisoned\":true}").unwrap();
+        std::fs::write(home.join("profiles").join("pnpm-lock.yaml"), "lockfile: changed").unwrap();
+
+        restore_web_profile(&home, &backup);
+        assert_eq!(
+            std::fs::read_to_string(profile_dir.join("package.json")).unwrap(),
+            "{\"v\":1}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(home.join("profiles").join("pnpm-lock.yaml")).unwrap(),
+            "lockfile: true"
+        );
+
+        // 装前缺失 lock 的场景：回滚不得把它造出来
+        let stamp2 = format!("dsh-snap-test2-{}", std::process::id());
+        let home2 = std::env::temp_dir().join(&stamp2).join("home");
+        let backup2 = std::env::temp_dir().join(&stamp2).join("backup");
+        std::fs::create_dir_all(home2.join("profiles").join("web")).unwrap();
+        std::fs::write(home2.join("profiles/web/package.json"), "{}").unwrap();
+        snapshot_web_profile(&home2, &backup2);
+        restore_web_profile(&home2, &backup2);
+        assert!(!home2.join("profiles/pnpm-lock.yaml").exists());
+
+        let _ = std::fs::remove_dir_all(std::env::temp_dir().join(&stamp));
+        let _ = std::fs::remove_dir_all(std::env::temp_dir().join(&stamp2));
+    }
 
     /// POSIX 权限自愈：644 → 600，600/缺失不动作。（win 开发机无 POSIX 位，测试随 CI mac 跑）
     #[cfg(unix)]
