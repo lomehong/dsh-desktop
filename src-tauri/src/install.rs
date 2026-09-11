@@ -968,7 +968,12 @@ impl SuiteChannel {
          `runtime_root/suite-installer/`，不经用户选目录——目标机无需任何本地仓库。
     2.5) 装前快照 profile 清单与锁文件（`suite-install-backup/`）——脚本失败或探针
        失败时回滚用，防止半成品 manifest 让下次启动变 boot 毒药（2026-09-10 教训）
-    3) `cmd /c install-all.bat [-Release]` 同步跑，捕获 stdout/stderr 全量写日志
+    3) 同步跑官方安装器（双平台共用同一份，零漂移）：
+       - Windows：`cmd /c install-all.bat [-Release]`；
+       - macOS/Linux：安装器是「bat 壳 + 内嵌 ESM」的多语言文件，壳提取内嵌 JS 用
+         便携 Node 执行（见 run_suite_installer；首次自动准备 pnpm、附 cmd 兼容垫片
+         兜住 local 通道的 junction 修复调用）。
+       捕获 stdout/stderr 全量写日志
     3.5) 探针校验：对清单里的套件依赖逐个用宿主 Node import 其主机侧入口——复现 dsh
        启动的加载路径，把「装完才发现解析断裂」拦在重启之前；失败则回滚 + 报错 + 不重启
     4) 成功 → 写 `installed-suite.json` 标记（含通道）+ 系统通知 + `supervisor::restart_by_mode`
@@ -1044,6 +1049,7 @@ pub fn install_digital_twin_suite(app: &tauri::AppHandle, channel: SuiteChannel)
             ),
         };
         status::fail(app, &msg);
+        suite_progress(app, "fail", &msg);
         notify_digital_twin(app, "数字分身安装失败", &msg);
         state.restarting.release();
         return;
@@ -1064,6 +1070,7 @@ pub fn install_digital_twin_suite(app: &tauri::AppHandle, channel: SuiteChannel)
         Ok(false) => {}
         Err(e) => {
             status::fail(app, &e);
+            suite_progress(app, "fail", &e);
             notify_digital_twin(app, "数字分身安装失败", &e);
             state.restarting.release();
             return;
@@ -1077,6 +1084,15 @@ pub fn install_digital_twin_suite(app: &tauri::AppHandle, channel: SuiteChannel)
     let home = runtime::app_home();
     let backup_dir = runtime::runtime_root().join("suite-install-backup");
     snapshot_web_profile(&home, &backup_dir);
+    // 官方安装器需要 pnpm；macOS 无系统 pnpm 时首次自动备一份（corepack 只是安装器
+    // 的最后兜底，常备一份后 `dsh plugin` 补装路径也不会再撞 "pnpm not found on PATH"）。
+    #[cfg(not(windows))]
+    if let Err(e) = ensure_pnpm_available() {
+        if let Some(mut log) = crate::runtime::open_log_append() {
+            use std::io::Write;
+            let _ = writeln!(log, "[warn] pnpm 准备失败（继续，安装器将走 corepack 兜底）: {e}");
+        }
+    }
     status::set(
         app,
         &format!("正在安装数字分身套件（{} 通道）…", channel.label()),
@@ -1086,21 +1102,18 @@ pub fn install_digital_twin_suite(app: &tauri::AppHandle, channel: SuiteChannel)
         "step",
         "正在安装插件（下载 Release/链接本地目录 → pnpm install）…首次可能需要 1-2 分钟",
     );
-    let mut cmd = std::process::Command::new("cmd");
-    cmd.args(["/c", "install-all.bat"]);
-    cmd.args(&bat_args)
-        .current_dir(&installer_dir)
-        // install-all.bat 自己找 DSH_HOME 的兜底只探测 %LOCALAPPDATA%\dsh-desktop-app-data\home：
-        // 便携版 home 在包内 Data\ 下探测不到，不注入就会落到 ~/.dsh 装错家。
-        // 显式注入与 supervisor spawn 同源（app_home()），保证装进壳正在用的 home。
-        .env("DSH_HOME", runtime::app_home().display().to_string());
-    runtime::no_window(&mut cmd);
-    let output = match cmd.output() {
+    let output = match run_suite_installer(&installer_dir, &bat, &bat_args) {
         Ok(o) => o,
         Err(e) => {
-            let msg = format!("启动 install-all.bat 失败: {e}");
-            status::fail(app, &msg);
-            notify_digital_twin(app, "数字分身安装失败", &msg);
+            // 失败必须清浮层 + 留日志：早期此分支只发系统通知，浮层永久残留，用户
+            // 看到的就是「一直卡在准备中」（2026-09-11 实机事故）。
+            if let Some(mut log) = crate::runtime::open_log_append() {
+                use std::io::Write;
+                let _ = writeln!(log, "[数字分身] {e}");
+            }
+            status::fail(app, &e);
+            suite_progress(app, "fail", &e);
+            notify_digital_twin(app, "数字分身安装失败", &e);
             state.restarting.release();
             return;
         }
@@ -1515,6 +1528,197 @@ fn normalize_bat_eol(path: &std::path::Path) -> Result<bool, String> {
     Ok(true)
 }
 
+/// 提取官方安装器（install-all.bat）内嵌的 JS 段——与 bat 自身的提取器同语义
+/// （按 `//==JS-START==` / `//==JS-END==` 标记切割）。安装器是「bat 壳 + 内嵌 ESM」
+/// 的多语言文件：Windows 走 cmd，macOS/Linux 由壳提取后用便携 Node 执行同一份逻辑，
+/// 双平台单一实现、零漂移。
+///
+/// Windows 运行时由 cmd 直接执行整个文件，提取函数仅测试与非 Windows 分支使用。
+#[cfg_attr(windows, allow(dead_code))]
+fn extract_embedded_js(bat_text: &str) -> Result<&str, String> {
+    const START: &str = "//==JS-START==";
+    const END: &str = "//==JS-END==";
+    let start = bat_text
+        .find(START)
+        .ok_or_else(|| "安装器缺少 //==JS-START== 标记（非官方安装器？）".to_string())?
+        + START.len();
+    let end = bat_text
+        .find(END)
+        .ok_or_else(|| "安装器缺少 //==JS-END== 标记（文件被截断？）".to_string())?;
+    if end <= start {
+        return Err("安装器 JS 段标记顺序异常".to_string());
+    }
+    Ok(&bat_text[start..end])
+}
+
+/// POSIX cmd 兼容垫片：官方安装器修复 link: 依赖时调用 `cmd /c rmdir <path>` 与
+/// `cmd /c mklink /J <link> <target>`（Windows junction 特权）。macOS 没有 cmd，
+/// 这里提供只覆盖这两个操作的等价物（删符号链接/空目录、建目录符号链接），
+/// 其余命令一律非零退出——最小暴露面。
+#[cfg(not(windows))]
+const CMD_SHIM_SH: &str = r##"#!/bin/sh
+# dsh-desktop POSIX cmd 垫片：仅支持 `cmd /c rmdir <path>` 与 `cmd /c mklink /J <link> <target>`。
+[ "$1" = "/c" ] || exit 2
+shift
+op="$1"
+shift
+case "$op" in
+  rmdir)
+    p="$1"
+    if [ -L "$p" ]; then rm -f -- "$p"; exit 0; fi
+    if [ -d "$p" ]; then rmdir -- "$p" 2>/dev/null; exit $?; fi
+    exit 1
+    ;;
+  mklink)
+    [ "$1" = "/J" ] || exit 2
+    link="$2"; target="$3"
+    mkdir -p -- "$(dirname -- "$link")" 2>/dev/null || true
+    ln -s -- "$target" "$link" 2>/dev/null || exit 1
+    exit 0
+    ;;
+  *)
+    echo "dsh-desktop cmd shim: unsupported: $op" >&2
+    exit 2
+    ;;
+esac
+"##;
+
+#[cfg(not(windows))]
+fn write_cmd_shim(dir: &std::path::Path) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::create_dir_all(dir)?;
+    let path = dir.join("cmd");
+    std::fs::write(&path, CMD_SHIM_SH)?;
+    let mut perms = std::fs::metadata(&path)?.permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(&path, perms)
+}
+
+/// 跑官方套件安装器（双通道共用）：
+/// - Windows：`cmd /c install-all.bat <args>`（原路径，行为不变）；
+/// - macOS/Linux：提取内嵌 JS 到临时文件 → 便携 Node 执行。argv 约定与 bat 相同
+///   （`<repo-root> [flags]`）。环境对齐 bat 头：DSH_HOME 注入（bat 自带的兜底只探测
+///   %LOCALAPPDATA%，macOS 会落到 ~/.dsh 装错家）、ipv4 优先、PATH 前置便携 node 的
+///   bin（pnpm/corepack 解析）、NODE_USE_ENV_PROXY 透传，另加 cmd 垫片兜住 local
+///   通道的 junction 修复调用。
+fn run_suite_installer(
+    installer_dir: &std::path::Path,
+    bat: &std::path::Path,
+    bat_args: &[&str],
+) -> Result<std::process::Output, String> {
+    let home = runtime::app_home();
+    #[cfg(windows)]
+    {
+        let mut cmd = std::process::Command::new("cmd");
+        cmd.args(["/c", "install-all.bat"])
+            .args(bat_args)
+            .current_dir(installer_dir)
+            .env("DSH_HOME", home.display().to_string());
+        runtime::no_window(&mut cmd);
+        return cmd
+            .output()
+            .map_err(|e| format!("启动 install-all.bat 失败: {e}"));
+    }
+    #[cfg(not(windows))]
+    {
+        let text = std::fs::read_to_string(bat).map_err(|e| format!("读取安装器失败: {e}"))?;
+        let js = extract_embedded_js(&text)?;
+        let node = runtime::node_exe();
+        if !node.exists() {
+            return Err("内置 Node 运行时缺失，无法执行套件安装器".to_string());
+        }
+        let node_bin = node
+            .parent()
+            .unwrap_or(std::path::Path::new(""))
+            .to_path_buf();
+        let pid = std::process::id();
+        let js_file = std::env::temp_dir().join(format!("dsh-install-all-{pid}.mjs"));
+        std::fs::write(&js_file, js).map_err(|e| format!("写出安装器 JS 失败: {e}"))?;
+        let shim_dir = std::env::temp_dir().join(format!("dsh-cmd-shim-{pid}"));
+        let shim_ok = write_cmd_shim(&shim_dir).is_ok();
+        let sys_path = std::env::var("PATH").unwrap_or_default();
+        let path = if shim_ok {
+            format!("{}:{}:{}", shim_dir.display(), node_bin.display(), sys_path)
+        } else {
+            format!("{}:{}", node_bin.display(), sys_path)
+        };
+        let mut cmd = std::process::Command::new(&node);
+        cmd.arg(&js_file)
+            .arg(installer_dir)
+            .args(bat_args)
+            .current_dir(installer_dir)
+            .env("DSH_HOME", home.display().to_string())
+            .env("PATH", path)
+            .env("NODE_USE_ENV_PROXY", "1");
+        let opts = std::env::var("NODE_OPTIONS").unwrap_or_default();
+        if !opts.contains("--dns-result-order") {
+            cmd.env(
+                "NODE_OPTIONS",
+                format!("{opts} --dns-result-order=ipv4first").trim().to_string(),
+            );
+        }
+        runtime::no_window(&mut cmd);
+        let out = cmd
+            .output()
+            .map_err(|e| format!("启动套件安装器失败: {e}"));
+        let _ = std::fs::remove_file(&js_file);
+        let _ = std::fs::remove_dir_all(&shim_dir);
+        out
+    }
+}
+
+/// POSIX 下确保 pnpm 可用（官方安装器与 `dsh plugin` 都依赖它）。缺失时用便携 npm
+/// 装一份到便携运行时（镜像优先，与 dsh 安装同源）——之后 `dsh plugin` 补装路径也
+/// 能找到它（`dsh_cli_command` 的 PATH 前置正是便携 node 的 bin 目录）。幂等：
+/// PATH 上已有 pnpm 直接返回；失败只报错不抛（安装器自身还有 corepack 兜底）。
+#[cfg(not(windows))]
+fn ensure_pnpm_available() -> Result<(), String> {
+    let node = runtime::node_exe();
+    if !node.exists() {
+        return Err("内置 Node 运行时缺失".to_string());
+    }
+    let node_bin = node
+        .parent()
+        .unwrap_or(std::path::Path::new(""))
+        .to_path_buf();
+    let path = format!(
+        "{}:{}",
+        node_bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let has_pnpm = std::process::Command::new("pnpm")
+        .arg("--version")
+        .env("PATH", &path)
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    if has_pnpm {
+        return Ok(());
+    }
+    let mut last_err = String::new();
+    for registry in npm_registry() {
+        let Ok(mut cmd) = npm_command() else {
+            return Err("便携 npm 不可用".to_string());
+        };
+        cmd.args(["install", "-g", "pnpm@latest", "--prefix"])
+            .arg(active_root().join("node"))
+            .arg(&registry)
+            .env("PATH", &path);
+        match runtime::no_window(&mut cmd).output() {
+            Ok(o) if o.status.success() => {
+                if let Some(mut log) = runtime::open_log_append() {
+                    use std::io::Write;
+                    let _ = writeln!(log, "[数字分身] 已为套件安装准备 pnpm（{registry}）");
+                }
+                return Ok(());
+            }
+            Ok(o) => last_err = format!("npm 退出码 {:?}（{registry}）", o.status.code()),
+            Err(e) => last_err = format!("npm 启动失败: {e}"),
+        }
+    }
+    Err(format!("pnpm 安装失败：{last_err}"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1590,6 +1794,65 @@ mod tests {
         assert!(SuiteChannel::Release.label().contains("生产"));
         // 空来源必须明确失败而不是静默跳过
         assert!(fetch_suite_installer(std::path::Path::new("."), &[]).is_err());
+    }
+
+    /// 官方安装器是「bat 壳 + 内嵌 ESM」：提取器必须与 bat 自身的标记切割同语义，
+    /// 缺失/乱序标记要明确报错（双平台共用同一份官方实现的关键装载点）。
+    #[test]
+    fn extract_embedded_js_slices_between_markers() {
+        let sample = "cmd header\r\n//==JS-START==\nconsole.log('hi');\n//==JS-END==\r\ncmd tail";
+        assert_eq!(extract_embedded_js(sample).unwrap(), "\nconsole.log('hi');\n");
+        assert!(extract_embedded_js("no markers at all").is_err());
+        assert!(extract_embedded_js("//==JS-END== x //==JS-START==").is_err());
+    }
+
+    /// cmd 垫片契约（仅 POSIX）：只覆盖 rmdir 与 mklink /J 两个操作、其余非零退出——
+    /// 官方安装器 local 通道的 junction 修复依赖这两个调用在 macOS 上可用。
+    #[cfg(not(windows))]
+    #[test]
+    fn cmd_shim_covers_only_rmdir_and_mklink() {
+        let s = CMD_SHIM_SH;
+        assert!(s.contains("\"/c\""), "缺少 /c 解析");
+        assert!(s.contains("rmdir)"), "缺少 rmdir 分支");
+        assert!(s.contains("mklink)"), "缺少 mklink 分支");
+        assert!(s.contains("ln -s"), "mklink 未映射为符号链接");
+        assert!(s.contains("exit 2"), "未覆盖的命令必须非零退出");
+    }
+
+    /// 跨平台装载契约（仅 POSIX）：run_suite_installer 必须提取内嵌 JS、按 bat 约定
+    /// 传 argv（`<installer-dir> [flags]`）、注入 DSH_HOME、并把 cmd 垫片放进 PATH——
+    /// 用假安装器把观察到的 argv/env 落盘断言，不碰任何真实状态。
+    #[cfg(not(windows))]
+    #[test]
+    fn run_suite_installer_executes_embedded_js_with_bat_conventions() {
+        if !runtime::node_exe().exists() {
+            return; // 无便携运行时的裸环境跳过（提取逻辑已有独立单测）
+        }
+        let dir = std::env::temp_dir().join(format!("dsh-runner-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let out = dir.join("observed.json");
+        let js = format!(
+            "import {{ writeFileSync }} from 'node:fs';\nwriteFileSync({out:?}, JSON.stringify({{ root: process.argv[2], flags: process.argv.slice(3), home: process.env.DSH_HOME, path: process.env.PATH }}));\n",
+            out = out.display().to_string()
+        );
+        std::fs::write(
+            dir.join("install-all.bat"),
+            format!("@echo off\r\nrem header\r\n//==JS-START==\n{js}//==JS-END==\r\nrem tail\r\n"),
+        )
+        .unwrap();
+        let result = run_suite_installer(&dir, &dir.join("install-all.bat"), &["-Release"]);
+        let o = result.expect("runner 应能启动安装器");
+        assert!(o.status.success(), "stderr: {}", String::from_utf8_lossy(&o.stderr));
+        let v: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&out).unwrap()).unwrap();
+        assert_eq!(v["root"].as_str().unwrap(), dir.to_str().unwrap());
+        assert_eq!(v["flags"], serde_json::json!(["-Release"]));
+        assert!(v["home"].as_str().unwrap().ends_with("home"));
+        assert!(
+            v["path"].as_str().unwrap().contains("dsh-cmd-shim-"),
+            "cmd 垫片未进入 PATH"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// 入口解析：exports["."] 字符串 / 对象.default / main / 全无 → index.js。

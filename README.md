@@ -55,6 +55,8 @@ curl -X POST http://127.0.0.1:3080/dsh-remote/api/pairing
 - **宿主锚定**（生产通道）：安装器把宿主已有的 `@deepseek-ai/*` 用 `pnpm.overrides` 全钉到宿主版本——dsh 0.1.x 全在预发布标签上，插件 manifest 的普通 semver 区间（如 `^0.1.2`）匹配不到任何预发布版本会直接 `ERR_PNPM_NO_MATCHING_VERSION`；锚定后解析恒成立、版本与宿主一致、pnpm 复用宿主同一 store 实体；
 - **生产即更新**：tarball URL 带 `?release=<tag>`，同 Release 重跑幂等、发了新 Release 重跑即升级；缺任一插件的 Release 资产则中止不动任何状态。
 
+双通道均支持 Windows 与 macOS：官方安装器是「bat 壳 + 内嵌 ESM」的多语言文件——Windows 走 `cmd /c`，macOS 由壳提取内嵌 JS 用便携 Node 执行同一份逻辑（首次自动准备 pnpm；local 通道的 junction 修复由 POSIX 兼容垫片承接）。官方安装器保持唯一实现，零漂移。
+
 两通道互相切换以最后一次安装为准（安装器负责清理另一形态残留）。安装记录写 `installed-suite.json`（含 `channel`）。
 
 ## 开发
