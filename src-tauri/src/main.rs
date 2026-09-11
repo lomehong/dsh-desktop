@@ -4,6 +4,7 @@
 // 无条件 GUI 子系统（debug 也不弹控制台）；诊断输出全部走日志文件。
 #![windows_subsystem = "windows"]
 
+mod about;
 mod diagnostics;
 mod events;
 mod i18n;
@@ -56,7 +57,7 @@ struct AppState {
 }
 
 /// 自定义命令只服务本地加载页；Harness 远程页面调用一律拒绝（IPC 零授权边界在命令层再拦一道）。
-fn caller_is_local(window: &tauri::WebviewWindow) -> bool {
+pub(crate) fn caller_is_local(window: &tauri::WebviewWindow) -> bool {
     window
         .url()
         .map(|u| webview::is_local_url(u.as_str()))
@@ -606,7 +607,11 @@ fn main() {
             get_notifications,
             clear_notifications,
             settings::settings_load,
-            settings::settings_save
+            settings::settings_save,
+            about::about_info,
+            about::about_check_update,
+            about::about_install_update,
+            about::about_open_repo
         ])
         .setup(|app| {
             let handle = app.handle().clone();

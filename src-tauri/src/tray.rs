@@ -465,6 +465,10 @@ fn spec_for_remote(ctx: &MenuContext) -> MenuSpec {
                             label: t("menu.close_to_tray").into(),
                             checked: true, // 当前默认行为；预留为可配置项
                         },
+                        MenuEntry::Item {
+                            id: "about",
+                            label: t("menu.about").into(),
+                        },
                     ],
                 }],
             },
@@ -590,6 +594,10 @@ fn spec_for_local(ctx: &MenuContext) -> MenuSpec {
                             id: "close-to-tray",
                             label: t("menu.close_to_tray").into(),
                             checked: true,
+                        },
+                        MenuEntry::Item {
+                            id: "about",
+                            label: t("menu.about").into(),
                         },
                     ],
                 }],
@@ -899,6 +907,15 @@ pub fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
                     if let Some(mut log) = crate::runtime::open_log_append() {
                         use std::io::Write;
                         let _ = writeln!(log, "[设置] 打开配置窗失败: {e}");
+                    }
+                }
+            }
+            "about" => {
+                // 关于窗（无边框固定尺寸面板）：版本信息 + 项目主页 + 日志/数据目录入口 + 检查更新
+                if let Err(e) = crate::about::open_about_window(app) {
+                    if let Some(mut log) = crate::runtime::open_log_append() {
+                        use std::io::Write;
+                        let _ = writeln!(log, "[关于] 打开关于窗失败: {e}");
                     }
                 }
             }

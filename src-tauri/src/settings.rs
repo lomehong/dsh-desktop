@@ -98,7 +98,9 @@ fn build_settings_window(app: &tauri::AppHandle) -> tauri::Result<()> {
     .title("DSH 设置")
     .inner_size(620.0, 580.0)
     .min_inner_size(540.0, 480.0)
-    .center();
+    .center()
+    // 本机页面之外一律拒绝：配置窗不承担浏览职责（无外链），被导航即异常
+    .on_navigation(|url| crate::webview::is_local_url(url.as_str()));
     #[cfg(not(target_os = "macos"))]
     {
         builder = builder.decorations(false);
@@ -116,21 +118,32 @@ fn build_settings_window(app: &tauri::AppHandle) -> tauri::Result<()> {
 /* ── Tauri 命令（配置页调用；自定义命令不受 capabilities 约束，无需列出） ── */
 
 /// 配置 + 只读运行时信息（版本/数据目录/日志路径），配置页首屏一次取齐。
+/// 带 caller_is_local 守卫：自定义命令不受 capabilities 约束，命令层是最后一道边界
+/// （数据目录/版本属主机信息，Harness 页面调用一律拒绝）。
 #[tauri::command]
-pub fn settings_load() -> serde_json::Value {
+pub fn settings_load(window: tauri::WebviewWindow) -> Result<serde_json::Value, String> {
+    if !crate::caller_is_local(&window) {
+        return Err("无权限".into());
+    }
     let cfg = load();
-    serde_json::json!({
+    Ok(serde_json::json!({
         "fixedPort": cfg.fixed_port,
         "dshVersion": crate::install::installed_dsh_version(),
         "runtimeRoot": crate::runtime::runtime_root().display().to_string(),
         "logFile": crate::runtime::log_file().display().to_string(),
-    })
+    }))
 }
 
 /// 保存端口配置。None = 随机端口。生效时机为下次启动服务（配置页有提示，
-/// 立即生效走托盘「重启服务」，由用户主动触发）。
+/// 立即生效走托盘「重启服务」，由用户主动触发）。守卫理由同 settings_load。
 #[tauri::command]
-pub fn settings_save(fixed_port: Option<u16>) -> Result<(), String> {
+pub fn settings_save(
+    window: tauri::WebviewWindow,
+    fixed_port: Option<u16>,
+) -> Result<(), String> {
+    if !crate::caller_is_local(&window) {
+        return Err("无权限".into());
+    }
     if let Some(p) = fixed_port {
         if p < 1024 {
             return Err("固定端口需 ≥ 1024（避开系统常用端口）".into());
