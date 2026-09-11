@@ -144,6 +144,98 @@ pub const SECURE_CONTEXT_SHIM_JS: &str = r##"
 })();
 "##;
 
+/// 老 WebKit 兼容垫片（2026-09-11 实机事故：dsh 0.1.5-rc 升级后启动屏
+/// 「Failed to load plugins / Can't find variable: Iterator」）：macOS < 15.4
+/// （Safari/WebKit < 18.4）缺 ES2025 `Iterator` helpers，而 dsh 客户端插件 bundle
+/// （pdfjs-dist 6.x 等）在**模块顶层**做 `typeof Iterator.prototype.join` 特性检测——
+/// 对未声明的 Iterator 做成员访问会直接 ReferenceError，整个插件 import 失败。
+/// `Math.sumPrecise`（ES2026）同属该内核缺失、pdf.js 运行时代码路径直接调用，
+/// 一并补齐。契约与 SECURE_CONTEXT_SHIM_JS 一致：仅缺失时补，原生实现
+/// （Safari 18.4+/Chromium 122+）永不覆盖；try/catch 包裹，极端环境不抛错。
+pub const WEBKIT_ES2025_SHIM_JS: &str = r##"
+(function () {
+  try {
+    if (typeof globalThis.Iterator === 'undefined') {
+      var wrap = function (it) {
+        var out = Object.create(Iterator.prototype);
+        out.next = function () { return it.next(); };
+        return out;
+      };
+      var Iterator = function Iterator() {};
+      Iterator.prototype[Symbol.iterator] = function () { return this; };
+      Iterator.from = function (src) {
+        var it = src;
+        if (it === null || it === undefined) throw new TypeError('Iterator.from: source is not iterable');
+        if (typeof it.next !== 'function') {
+          if (typeof it[Symbol.iterator] !== 'function') throw new TypeError('Iterator.from: source is not iterable');
+          it = it[Symbol.iterator]();
+        }
+        if (typeof it[Symbol.iterator] !== 'function') {
+          it[Symbol.iterator] = function () { return this; };
+        }
+        return wrap(it);
+      };
+      var chain = function (name, gen) {
+        Iterator.prototype[name] = function () {
+          return wrap(gen.apply(null, [this].concat([].slice.call(arguments))));
+        };
+      };
+      var terminal = function (name, fn) {
+        Iterator.prototype[name] = function () {
+          return fn.apply(null, [this].concat([].slice.call(arguments)));
+        };
+      };
+      chain('map', function* (self, fn) { var i = 0; for (var v of self) yield fn(v, i++); });
+      chain('filter', function* (self, fn) { var i = 0; for (var v of self) if (fn(v, i++)) yield v; });
+      chain('take', function* (self, n) {
+        n = Math.max(0, Math.trunc(n) || 0);
+        if (n === 0) return;
+        var i = 0;
+        for (var v of self) { yield v; if (++i >= n) return; }
+      });
+      chain('drop', function* (self, n) {
+        n = Math.max(0, Math.trunc(n) || 0);
+        var i = 0;
+        for (var v of self) if (i++ >= n) yield v;
+      });
+      chain('flatMap', function* (self, fn) { var i = 0; for (var v of self) yield* fn(v, i++); });
+      terminal('toArray', function (self) { var out = []; for (var v of self) out.push(v); return out; });
+      terminal('forEach', function (self, fn) { var i = 0; for (var v of self) fn(v, i++); });
+      terminal('some', function (self, fn) { var i = 0; for (var v of self) if (fn(v, i++)) return true; return false; });
+      terminal('every', function (self, fn) { var i = 0; for (var v of self) if (!fn(v, i++)) return false; return true; });
+      terminal('find', function (self, fn) { var i = 0; for (var v of self) if (fn(v, i++)) return v; });
+      terminal('reduce', function (self, fn, init) {
+        var has = arguments.length > 2, acc = init, i = 0;
+        for (var v of self) {
+          if (!has) { has = true; acc = v; continue; }
+          acc = fn(acc, v, i++);
+        }
+        if (!has) throw new TypeError('reduce of empty Iterator with no initial value');
+        return acc;
+      });
+      terminal('join', function (self, sep) {
+        var out = [];
+        for (var v of self) out.push(v);
+        return out.join(sep);
+      });
+      globalThis.Iterator = Iterator;
+    }
+    if (typeof Math.sumPrecise !== 'function') {
+      Math.sumPrecise = function (values) {
+        var sum = 0, c = 0;
+        for (var v of values) {
+          v = Number(v);
+          var t = sum + v;
+          c += Math.abs(sum) >= Math.abs(v) ? (sum - t + v) : (v - t + sum);
+          sum = t;
+        }
+        return sum + c;
+      };
+    }
+  } catch (e) { /* 极端环境：保持原状，不影响页面自身脚本 */ }
+})();
+"##;
+
 /// 套件安装进度浮层（2026-09-10 用户反馈：托盘点击后长时间无任何可见反馈，
 /// 失败时的原因也只在托盘 tooltip 里）。壳在关键阶段调 `w.eval` 驱动本浮层：
 /// 显示当前阶段与已完成步骤，失败时把可读原因直接留在屏幕上。
@@ -321,6 +413,7 @@ pub fn create_main_window(app: &tauri::AppHandle) -> tauri::Result<()> {
         .initialization_script(MODE_BADGE_JS)
         .initialization_script(SUITE_PROGRESS_JS)
         .initialization_script(SECURE_CONTEXT_SHIM_JS)
+        .initialization_script(WEBKIT_ES2025_SHIM_JS)
         .initialization_script(TITLEBAR_INSET_CSS)
         .initialization_script(DECORUM_ICON_CSS)
         .on_navigation(move |url| {
@@ -648,6 +741,40 @@ mod tests {
             s.contains("box-sizing:border-box"),
             "分隔线会画到带外（应含在 40px 带内）"
         );
+    }
+
+    /// WebKit ES2025 垫片契约（2026-09-11 实机事故）：macOS 15.2 / Safari 18.2 内核
+    /// 缺 `Iterator` helpers，dsh 插件 bundle（pdfjs-dist 6.x）顶层特性检测直接
+    /// ReferenceError →「Failed to load plugins」。契约：仅缺失时补、原生存在绝不
+    /// 覆盖、极端环境不抛错；且必须覆盖 pdf.js 依赖的 `Iterator.prototype.join`。
+    #[test]
+    fn webkit_es2025_shim_only_fills_missing_and_covers_pdfjs_pattern() {
+        let s = WEBKIT_ES2025_SHIM_JS;
+        // 仅补缺守卫：原生实现（Safari 18.4+/Chromium 122+）行为不变
+        assert!(s.contains("typeof globalThis.Iterator === 'undefined'"), "缺少 Iterator 缺失守卫");
+        assert!(s.contains("typeof Math.sumPrecise !== 'function'"), "缺少 Math.sumPrecise 缺失守卫");
+        // helper 基本盘 + pdf.js 顶层特性检测依赖的原型方法（join）
+        for needle in [
+            "Iterator.prototype[Symbol.iterator]",
+            "Iterator.from = function",
+            "chain('map'",
+            "chain('filter'",
+            "chain('take'",
+            "chain('drop'",
+            "chain('flatMap'",
+            "terminal('toArray'",
+            "terminal('forEach'",
+            "terminal('some'",
+            "terminal('every'",
+            "terminal('find'",
+            "terminal('reduce'",
+            "terminal('join'",
+        ] {
+            assert!(s.contains(needle), "垫片缺少 {needle}");
+        }
+        // 整体 IIFE + try/catch：脚本失败不波及页面自身
+        assert!(s.trim_start().starts_with("(function () {"));
+        assert!(s.contains("} catch (e)"));
     }
 
     /// 模式角标挂在 body 下，body 让位后必须反向平移回窗口顶——否则角标叠在
