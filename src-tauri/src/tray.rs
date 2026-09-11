@@ -405,6 +405,9 @@ pub struct MenuContext {
 }
 
 /// 远程模式 spec。
+/// 重组（2026-09-10）：重连/运行时检查/二维码配对收拢进「远程实例」段；
+/// 日志/数据目录/诊断收拢进「日志与诊断」子菜单（删除与 opendir 重复的
+/// open-runtime-dir）；「关于」独立为底部项。id 均未变。
 fn spec_for_remote(ctx: &MenuContext) -> MenuSpec {
     use crate::i18n::t;
     MenuSpec {
@@ -418,43 +421,40 @@ fn spec_for_remote(ctx: &MenuContext) -> MenuSpec {
                     MenuEntry::Item { id: "notifications", label: t("menu.notifications").into() },
                 ],
             },
-            // 2. 服务
+            // 2. 远程实例
             MenuSection {
                 items: vec![
-                    MenuEntry::Item {
-                        id: "restart",
-                        label: t("menu.restart_remote").into(),
-                    },
-                    MenuEntry::Item {
-                        id: "check-dsh-update",
-                        label: t("menu.check_dsh_update").into(),
-                    },
-                    MenuEntry::Item { id: "openlog", label: t("menu.openlog").into() },
-                    MenuEntry::Item {
-                        id: "opendir",
-                        label: if ctx.portable { t("menu.usb_opendir").into() } else { t("menu.opendir").into() },
-                    },
+                    MenuEntry::Item { id: "restart", label: t("menu.restart_remote").into() },
+                    MenuEntry::Item { id: "check-dsh-update", label: t("menu.check_dsh_update").into() },
+                    MenuEntry::Item { id: "show-qrcode", label: t("menu.qrcode").into() },
                 ],
             },
             // 3. 模式
             MenuSection {
-                items: vec![
-                    MenuEntry::Item {
-                        id: "tolocal",
-                        label: t("menu.tolocal").into(),
-                    },
-                ],
+                items: vec![MenuEntry::Item { id: "tolocal", label: t("menu.tolocal").into() }],
             },
-            // 4. 设置（子菜单）
+            // 4. 日志与诊断（子菜单）
+            MenuSection {
+                items: vec![MenuEntry::Submenu {
+                    id: "logs",
+                    label: t("menu.logs").into(),
+                    items: vec![
+                        MenuEntry::Item { id: "openlog", label: t("menu.openlog").into() },
+                        MenuEntry::Item {
+                            id: "opendir",
+                            label: if ctx.portable { t("menu.usb_opendir").into() } else { t("menu.opendir").into() },
+                        },
+                        MenuEntry::Item { id: "export-diagnostics", label: t("menu.export_diagnostics").into() },
+                    ],
+                }],
+            },
+            // 5. 设置（子菜单）
             MenuSection {
                 items: vec![MenuEntry::Submenu {
                     id: "settings",
                     label: t("menu.settings").into(),
                     items: vec![
-                        MenuEntry::Item {
-                            id: "settings-window",
-                            label: t("menu.open_settings").into(),
-                        },
+                        MenuEntry::Item { id: "settings-window", label: t("menu.open_settings").into() },
                         MenuEntry::Check {
                             id: "autostart",
                             label: t("menu.autostart").into(),
@@ -465,53 +465,33 @@ fn spec_for_remote(ctx: &MenuContext) -> MenuSpec {
                             label: t("menu.close_to_tray").into(),
                             checked: true, // 当前默认行为；预留为可配置项
                         },
-                        MenuEntry::Item {
-                            id: "about",
-                            label: t("menu.about").into(),
-                        },
                     ],
                 }],
             },
-            // 5. 高级（子菜单）
+            // 6. 关于
             MenuSection {
-                items: vec![MenuEntry::Submenu {
-                    id: "advanced",
-                    label: t("menu.advanced").into(),
-                    items: vec![
-                        MenuEntry::Item {
-                            id: "show-qrcode",
-                            label: t("menu.qrcode").into(),
-                        },
-                        MenuEntry::Item {
-                            id: "export-diagnostics",
-                            label: t("menu.export_diagnostics").into(),
-                        },
-                        MenuEntry::Item {
-                            id: "open-runtime-dir",
-                            label: t("menu.opendir").into(),
-                        },
-                    ],
-                }],
+                items: vec![MenuEntry::Item { id: "about", label: t("menu.about").into() }],
             },
-            // 6. 退出（自带换行）
+            // 7. 退出（自带换行）
             MenuSection {
-                items: vec![MenuEntry::Item {
-                    id: "quit",
-                    label: t("menu.quit").into(),
-                }],
+                items: vec![MenuEntry::Item { id: "quit", label: t("menu.quit").into() }],
             },
         ],
     }
 }
 
 /// 本地模式 spec。
+/// 重组（2026-09-10）：更新类入口收拢进「服务」；日志/数据目录/诊断收拢进
+/// 「日志与诊断」子菜单；数字分身向导 + 双通道安装收拢进「数字分身」子菜单
+///（不再平级暴露通道细节）；「关于」从设置子菜单独立为底部项。id 均未变。
 fn spec_for_local(ctx: &MenuContext) -> MenuSpec {
     use crate::i18n::t;
+    let opendir_label = if ctx.portable { t("menu.usb_opendir").into() } else { t("menu.opendir").into() };
+
+    // 服务：重启 + 全部更新入口（应用本体 / DSH 运行时）收拢于此
     let mut service_items: Vec<MenuEntry> = vec![
-        MenuEntry::Item {
-            id: "restart",
-            label: t("menu.restart_local").into(),
-        },
+        MenuEntry::Item { id: "restart", label: t("menu.restart_local").into() },
+        MenuEntry::Item { id: "upgrade", label: t("menu.upgrade").into() },
     ];
     if !ctx.portable {
         // 应用本体更新（tauri-plugin-updater）面向安装版
@@ -520,32 +500,11 @@ fn spec_for_local(ctx: &MenuContext) -> MenuSpec {
             label: t("menu.check_app_update").into(),
         });
     }
-    service_items.push(MenuEntry::Item {
-        id: "openlog",
-        label: t("menu.openlog").into(),
-    });
-    service_items.push(MenuEntry::Item {
-        id: "opendir",
-        label: if ctx.portable { t("menu.usb_opendir").into() } else { t("menu.opendir").into() },
-    });
 
+    // 模式与实例：连接远程 + 已保存实例（多实例）
     let mut mode_items: Vec<MenuEntry> = vec![
-        MenuEntry::Item {
-            id: "connect",
-            label: t("menu.connect").into(),
-        },
-        MenuEntry::Item {
-            id: "upgrade",
-            label: t("menu.upgrade").into(),
-        },
+        MenuEntry::Item { id: "connect", label: t("menu.connect").into() },
     ];
-    if ctx.portable {
-        mode_items.push(MenuEntry::Item {
-            id: "wizard",
-            label: t("menu.wizard").into(),
-        });
-    }
-    // D2 多实例：已保存实例子菜单（id 形如 "saved:<address>"，事件分发按前缀路由）
     if !ctx.saved.is_empty() {
         mode_items.push(MenuEntry::Submenu {
             id: "saved",
@@ -561,6 +520,14 @@ fn spec_for_local(ctx: &MenuContext) -> MenuSpec {
         });
     }
 
+    // 数字分身：向导（便携）+ 双通道安装收拢进一个子菜单，不再平级暴露通道细节
+    let mut suite_items: Vec<MenuEntry> = Vec::new();
+    if ctx.portable {
+        suite_items.push(MenuEntry::Item { id: "wizard", label: t("menu.wizard").into() });
+    }
+    suite_items.push(MenuEntry::Item { id: "install-digital-twin-local", label: t("menu.install_twin_local").into() });
+    suite_items.push(MenuEntry::Item { id: "install-digital-twin-release", label: t("menu.install_twin_release").into() });
+
     MenuSpec {
         sections: vec![
             // 1. 窗口
@@ -573,18 +540,35 @@ fn spec_for_local(ctx: &MenuContext) -> MenuSpec {
             },
             // 2. 服务
             MenuSection { items: service_items },
-            // 3. 模式
+            // 3. 模式与实例
             MenuSection { items: mode_items },
-            // 4. 设置
+            // 4. 数字分身（子菜单）
+            MenuSection {
+                items: vec![MenuEntry::Submenu {
+                    id: "suite",
+                    label: t("menu.suite").into(),
+                    items: suite_items,
+                }],
+            },
+            // 5. 日志与诊断（子菜单）
+            MenuSection {
+                items: vec![MenuEntry::Submenu {
+                    id: "logs",
+                    label: t("menu.logs").into(),
+                    items: vec![
+                        MenuEntry::Item { id: "openlog", label: t("menu.openlog").into() },
+                        MenuEntry::Item { id: "opendir", label: opendir_label },
+                        MenuEntry::Item { id: "export-diagnostics", label: t("menu.export_diagnostics").into() },
+                    ],
+                }],
+            },
+            // 6. 设置（子菜单）
             MenuSection {
                 items: vec![MenuEntry::Submenu {
                     id: "settings",
                     label: t("menu.settings").into(),
                     items: vec![
-                        MenuEntry::Item {
-                            id: "settings-window",
-                            label: t("menu.open_settings").into(),
-                        },
+                        MenuEntry::Item { id: "settings-window", label: t("menu.open_settings").into() },
                         MenuEntry::Check {
                             id: "autostart",
                             label: t("menu.autostart").into(),
@@ -593,41 +577,16 @@ fn spec_for_local(ctx: &MenuContext) -> MenuSpec {
                         MenuEntry::Check {
                             id: "close-to-tray",
                             label: t("menu.close_to_tray").into(),
-                            checked: true,
-                        },
-                        MenuEntry::Item {
-                            id: "about",
-                            label: t("menu.about").into(),
+                            checked: true, // 当前默认行为；预留为可配置项
                         },
                     ],
                 }],
             },
-            // 5. 高级
+            // 7. 关于
             MenuSection {
-                items: vec![MenuEntry::Submenu {
-                    id: "advanced",
-                    label: t("menu.advanced").into(),
-                    items: vec![
-                        MenuEntry::Item {
-                            id: "export-diagnostics",
-                            label: t("menu.export_diagnostics").into(),
-                        },
-                        MenuEntry::Item {
-                            id: "install-digital-twin-local",
-                            label: t("menu.install_twin_local").into(),
-                        },
-                        MenuEntry::Item {
-                            id: "install-digital-twin-release",
-                            label: t("menu.install_twin_release").into(),
-                        },
-                        MenuEntry::Item {
-                            id: "reset-dsh-home",
-                            label: t("menu.reset_home").into(),
-                        },
-                    ],
-                }],
+                items: vec![MenuEntry::Item { id: "about", label: t("menu.about").into() }],
             },
-            // 6. 退出
+            // 8. 退出
             MenuSection {
                 items: vec![MenuEntry::Item { id: "quit", label: t("menu.quit").into() }],
             },
