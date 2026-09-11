@@ -619,6 +619,16 @@ fn main() {
             tray::build_tray(&handle)?;
             // D3b：Windows 任务栏右键任务列表（尽力而为，失败仅记日志）
             jumplist::update(&handle);
+            // 预热「设置 / 关于」窗：启动 3 秒后隐藏建窗（渲染进程孵化 1~3s 挪到
+            // 后台），首次打开零等待。失败静默——惰性创建仍会兜底。
+            {
+                let h = handle.clone();
+                std::thread::spawn(move || {
+                    std::thread::sleep(std::time::Duration::from_secs(3));
+                    let _ = settings::warm_settings_window(&h);
+                    let _ = about::warm_about_window(&h);
+                });
+            }
             // 冷启动动作参数（JumpList 任务在无实例时点击 = 冷启动带参）：延后到线程执行，
             // 让 setup 先完成、加载页先起来
             let cold_args: Vec<String> = std::env::args().skip(1).collect();

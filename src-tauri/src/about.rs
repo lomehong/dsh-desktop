@@ -33,6 +33,17 @@ fn platform_label(os: &str, arch: &str) -> String {
     format!("{os_name} {arch_name}")
 }
 
+/// 启动后预热：隐藏建窗，首次打开零渲染进程孵化。失败静默（惰性创建兜底）。
+pub fn warm_about_window(app: &tauri::AppHandle) -> tauri::Result<()> {
+    if app.get_webview_window("about").is_some() {
+        return Ok(());
+    }
+    let handle = app.clone();
+    app.run_on_main_thread(move || {
+        let _ = build_about_window(&handle, false);
+    })
+}
+
 /// 打开关于窗口（幂等：已存在则 show+focus）。
 pub fn open_about_window(app: &tauri::AppHandle) -> tauri::Result<()> {
     if let Some(w) = app.get_webview_window("about") {
@@ -42,7 +53,7 @@ pub fn open_about_window(app: &tauri::AppHandle) -> tauri::Result<()> {
     }
     let handle = app.clone();
     app.run_on_main_thread(move || {
-        if let Err(e) = build_about_window(&handle) {
+        if let Err(e) = build_about_window(&handle, true) {
             if let Some(mut log) = crate::runtime::open_log_append() {
                 let _ = writeln!(log, "[关于] 创建关于窗口失败: {e}");
             }
@@ -50,11 +61,13 @@ pub fn open_about_window(app: &tauri::AppHandle) -> tauri::Result<()> {
     })
 }
 
-fn build_about_window(app: &tauri::AppHandle) -> tauri::Result<()> {
+fn build_about_window(app: &tauri::AppHandle, visible: bool) -> tauri::Result<()> {
     // 双重检查：并发触发时（派发排队期间第二次调用）可能已建好
     if let Some(w) = app.get_webview_window("about") {
-        let _ = w.show();
-        let _ = w.set_focus();
+        if visible {
+            let _ = w.show();
+            let _ = w.set_focus();
+        }
         return Ok(());
     }
     let mut builder = tauri::WebviewWindowBuilder::new(
@@ -66,6 +79,7 @@ fn build_about_window(app: &tauri::AppHandle) -> tauri::Result<()> {
     .inner_size(460.0, 560.0)
     .resizable(false)
     .center()
+    .visible(visible)
     // 本机页面之外一律拒绝（About 窗不承担浏览职责；外链走 about_open_repo 交系统浏览器）
     .on_navigation(|url| crate::webview::is_local_url(url.as_str()));
     #[cfg(not(target_os = "macos"))]
@@ -78,7 +92,21 @@ fn build_about_window(app: &tauri::AppHandle) -> tauri::Result<()> {
             .title_bar_style(tauri::TitleBarStyle::Overlay)
             .hidden_title(true);
     }
-    builder.build()?;
+    let window = builder.build()?;
+    // 关闭 = 隐藏（暖窗常驻）：关闭即销毁会让下次打开重新孵化 WebView2 渲染进程
+    // （Windows 上 1~3s，杀软扫描加重——「关于窗口打开非常慢」的根因）。页面自绘
+    // 关闭钮走 selfWin.close()，同样触发 CloseRequested，此处统一拦成隐藏。
+    let win = window.clone();
+    window.on_window_event(move |event| {
+        if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+            api.prevent_close();
+            let _ = win.hide();
+        }
+    });
+    if visible {
+        let _ = window.show();
+        let _ = window.set_focus();
+    }
     Ok(())
 }
 
