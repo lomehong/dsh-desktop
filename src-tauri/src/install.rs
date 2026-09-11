@@ -9,11 +9,11 @@ use crate::runtime::{self, no_window};
 use crate::{status, supervisor};
 use tauri::Manager;
 
-/// 固定的 dsh 基线版本（全新环境首装用；升级走 alpha/latest 双 tag 择新，可用
-/// DSH_DESKTOP_DSH_VERSION 固定）。基线必须跟上插件生态的 API 代际：profile 插件
-/// （如 dsh-better-sidebar@0.18）的 peer 依赖按 rc.1 构建，基线落后会让插件全部
-/// 因 API 缺符号（settingsNamespace）加载失败（真实故障 2026-09）。
-pub const DSH_VERSION: &str = "0.1.5-alpha.1";
+/// 固定的 dsh 基线版本（全新环境首装用；升级走 alpha/latest/next 三 tag 预发布
+/// 感知择新，可用 DSH_DESKTOP_DSH_VERSION 固定）。基线必须跟上插件生态的 API 代际：
+/// profile 插件（如 dsh-better-sidebar@0.18）的 peer 依赖按当前线构建，基线落后
+/// 会让插件因 API 缺符号（settingsNamespace）加载失败（真实故障 2026-09）。
+pub const DSH_VERSION: &str = "0.1.5-rc.2";
 /// 便携 Node 版本（dsh rc.x 的 zstd 要求需要 Node 24）。
 const NODE_VERSION: &str = "24.19.0";
 /// 壳已适配的 dsh 最高版本（语义化三元组）。0.1.5-alpha.1 真机复核：六依赖点
@@ -242,8 +242,8 @@ fn dist_tag_version(tag: &str) -> Result<String, String> {
     Err(format!("查询最新版本失败：{last_err}（可设置 DSH_DESKTOP_NPM_REGISTRY）"))
 }
 
-/// 升级目标版本：DSH_DESKTOP_DSH_VERSION 显式指定优先；否则查询 alpha/latest 两个
-/// dist-tag 取**较高**者（预发布感知比较，cmp_versions）。旧逻辑「装了 alpha 就只跟
+/// 升级目标版本：DSH_DESKTOP_DSH_VERSION 显式指定优先；否则查询 alpha/latest/next
+/// 三个 dist-tag 取**较高**者（预发布感知比较，cmp_versions）。旧逻辑「装了 alpha 就只跟
 /// alpha tag」是为防「升级按钮变降级」（latest 曾指向旧稳定线），但 latest 反超 alpha
 /// 时形成死锁——真实故障：用户被锁死 0.1.2-alpha.5，npm latest 已是 0.1.2-rc.1，插件
 /// 生态按 rc.1 构建，升级按钮永远提示「已是最新」。单 tag 查询失败时用另一个兜底。
@@ -255,7 +255,9 @@ fn target_version() -> Result<String, String> {
     }
     let mut last_err = String::new();
     let mut best: Option<String> = None;
-    for tag in ["alpha", "latest"] {
+    // next tag：预发布候选的常规发布位（2026-09-11 实测 0.1.5-rc.2 只挂在 next，
+    // 漏扫会让升级目标停在 rc.1）
+    for tag in ["alpha", "latest", "next"] {
         match dist_tag_version(tag) {
             Ok(v) => {
                 let is_newer = best
@@ -2043,6 +2045,7 @@ npm warn allow-scripts Run `npm install -g --allow-scripts=@deepseek-ai/dsh-subp
         // 0.1.5 系列（含 alpha/正式）≤ 当前适配线 (0,1,5)：放行（2026-09-08 多角色
         // 评估零必须改动后放行；session v3 迁移单向是已知取舍）
         assert!(version_triple("0.1.5-alpha.1").unwrap() <= DSH_MAX_ADAPTED);
+        assert!(version_triple("0.1.5-rc.2").unwrap() <= DSH_MAX_ADAPTED);
         assert!(version_triple("0.1.5").unwrap() <= DSH_MAX_ADAPTED);
         // 0.1.3/0.1.4 历史线同样放行（评估确认无破坏面）
         assert!(version_triple("0.1.3-alpha.2").unwrap() <= DSH_MAX_ADAPTED);
