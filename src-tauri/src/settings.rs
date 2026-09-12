@@ -80,6 +80,9 @@ pub fn warm_settings_window(app: &tauri::AppHandle) -> tauri::Result<()> {
 /// 无边框 + settings.html 自绘标题栏（拖拽/最小化/最大化/关闭）。
 pub fn open_settings_window(app: &tauri::AppHandle) -> tauri::Result<()> {
     if let Some(w) = app.get_webview_window("settings") {
+        // 暖窗内容会过期（运行时升级后 dsh 版本号停在启动时刻）：打开前重载。
+        // 代价是未保存的表单输入随重载丢弃——表单极小，可接受。
+        let _ = w.eval("location.reload()");
         let _ = w.show();
         let _ = w.set_focus();
         return Ok(());

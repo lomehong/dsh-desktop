@@ -47,6 +47,9 @@ pub fn warm_about_window(app: &tauri::AppHandle) -> tauri::Result<()> {
 /// 打开关于窗口（幂等：已存在则 show+focus）。
 pub fn open_about_window(app: &tauri::AppHandle) -> tauri::Result<()> {
     if let Some(w) = app.get_webview_window("about") {
+        // 暖窗内容会过期（如运行时升级后版本号停在启动时刻）：打开前重载页面。
+        // 重载在隐藏态执行，show 后即为新内容。
+        let _ = w.eval("location.reload()");
         let _ = w.show();
         let _ = w.set_focus();
         return Ok(());
