@@ -1402,16 +1402,20 @@ fn probe_suite_plugin(
     node: &std::path::Path,
     name: &str,
     pkg_dir: &std::path::Path,
+    profile_dir: &std::path::Path,
 ) -> Option<String> {
     let entry = match suite_entry_file(pkg_dir) {
         Ok(e) => e,
         Err(e) => return Some(format!("{name}: {e}")),
     };
-    let uri = format!("file:///{}", entry.display().to_string().replace('\\', "/"));
-    // uri 走 argv 而非内联进脚本：路径引号/转义不归我们管；e.code+e.message 首行即结论
+    let _ = entry; // 前置快筛已给出可读指引；主探针见下
+    // 主探针：按**包名**从 profile web 目录导入——完全复现 dsh loader 的解析路径
+    //（node_modules 解析 + exports 校验）。此前按入口**文件路径**导入绕过了
+    // exports 校验，漏掉 ERR_INVALID_PACKAGE_CONFIG 这类坏 manifest
+    //（2026-09-11 实测：dsh-architect exports 混入非点号键，探针通过、dsh 启动即崩）。
     let script = "import(process.argv[1]).then(()=>{},e=>{console.error((e.code??'')+' '+(e.message??''));process.exit(1)})";
     let mut cmd = std::process::Command::new(node);
-    cmd.args(["-e", script, &uri]).current_dir(pkg_dir);
+    cmd.args(["-e", script, name]).current_dir(profile_dir);
     crate::runtime::no_window(&mut cmd);
     match cmd.output() {
         Err(e) => Some(format!("{name}: 探针进程启动失败: {e}")),
@@ -1451,13 +1455,14 @@ fn probe_suite_plugins(home: &std::path::Path) -> Vec<String> {
     if targets.is_empty() {
         return Vec::new();
     }
+    let profile_dir = home.join("profiles").join("web");
     let node = runtime::node_exe();
     if !node.exists() {
         return vec!["内置 Node 运行时缺失，无法做安装后校验".to_string()];
     }
     targets
         .iter()
-        .filter_map(|(name, dir)| probe_suite_plugin(&node, name, dir))
+        .filter_map(|(name, dir)| probe_suite_plugin(&node, name, dir, &profile_dir))
         .collect()
 }
 
