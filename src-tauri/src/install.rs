@@ -23,6 +23,10 @@ const NODE_VERSION: &str = "24.19.0";
 /// 本体；DSH_DESKTOP_DSH_VERSION 显式指定视为知情强制。
 const DSH_MAX_ADAPTED: (u64, u64, u64) = (0, 1, 6);
 
+/// ⚠️ 运行时升级纪律（真实事故两次，教训见 docs/lessons/2026-09-15-runtime-upgrade-whilst-running.md）：
+/// **执行 npm install 升级运行时前，必须确认用户已关闭 dsh-desktop 应用。**
+/// 绝不在应用可能正在运行时热替换运行时文件——旧壳 guard 会拦 0.1.6 导致打不开。
+///
 /// 壳已适配的 dsh 最高版本三元组（supervisor 启动预检用）。
 pub fn max_adapted() -> (u64, u64, u64) {
     DSH_MAX_ADAPTED
