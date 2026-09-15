@@ -13,15 +13,15 @@ use tauri::Manager;
 /// 感知择新，可用 DSH_DESKTOP_DSH_VERSION 固定）。基线必须跟上插件生态的 API 代际：
 /// profile 插件（如 dsh-better-sidebar@0.18）的 peer 依赖按当前线构建，基线落后
 /// 会让插件因 API 缺符号（settingsNamespace）加载失败（真实故障 2026-09）。
-pub const DSH_VERSION: &str = "0.1.5-rc.2";
+pub const DSH_VERSION: &str = "0.1.6-alpha.1";
 /// 便携 Node 版本（dsh rc.x 的 zstd 要求需要 Node 24）。
 const NODE_VERSION: &str = "24.19.0";
-/// 壳已适配的 dsh 最高版本（语义化三元组）。0.1.5-alpha.1 真机复核：六依赖点
-/// （web 启动/stdout、token 认证、remote.mux、trustedHosts、webserver 注入、CLI
-/// 转发）rc.1→0.1.5 零破坏（多角色评估，2026-09-08）；session v3 迁移单向是
-/// 已知取舍。升到 (0,1,5) 放行 0.1.3/0.1.4/0.1.5 系列。npm 超出此版本时仍拒绝
-/// 升级并引导先升级应用本体；DSH_DESKTOP_DSH_VERSION 显式指定视为知情强制。
-const DSH_MAX_ADAPTED: (u64, u64, u64) = (0, 1, 5);
+/// 壳已适配的 dsh 最高版本（语义化三元组）。0.1.6-alpha.1 评估（2026-09-09）：
+/// 全部 11 个依赖包零 diff——804 commits/78 万行全在其他区域（browser-use/
+/// computer-use/ssh/ptc-runtime 新包 + web UI/docs/benchmarks），插件与壳零影响。
+/// 升到 (0,1,6) 放行 0.1.6 系列。npm 超出此版本时仍拒绝升级并引导先升级应用
+/// 本体；DSH_DESKTOP_DSH_VERSION 显式指定视为知情强制。
+const DSH_MAX_ADAPTED: (u64, u64, u64) = (0, 1, 6);
 
 /// 壳已适配的 dsh 最高版本三元组（supervisor 启动预检用）。
 pub fn max_adapted() -> (u64, u64, u64) {
@@ -2043,12 +2043,15 @@ npm warn allow-scripts Run `npm install -g --allow-scripts=@deepseek-ai/dsh-subp
 
     #[test]
     fn guard_blocks_next_minor_line_allows_current() {
-        // 预发布段按其所属三元组参与比较：0.1.6-alpha 起视为需要壳配套适配——必须拦
-        assert!(version_triple("0.1.6-alpha.1").unwrap() > DSH_MAX_ADAPTED);
-        assert!(version_triple("0.1.6").unwrap() > DSH_MAX_ADAPTED);
+        // 预发布段按其所属三元组参与比较：0.1.7-alpha 起视为需要壳配套适配——必须拦
+        assert!(version_triple("0.1.7-alpha.1").unwrap() > DSH_MAX_ADAPTED);
+        assert!(version_triple("0.1.7").unwrap() > DSH_MAX_ADAPTED);
         assert!(version_triple("0.2.0").unwrap() > DSH_MAX_ADAPTED);
-        // 0.1.5 系列（含 alpha/正式）≤ 当前适配线 (0,1,5)：放行（2026-09-08 多角色
-        // 评估零必须改动后放行；session v3 迁移单向是已知取舍）
+        // 0.1.6 系列（含 alpha/正式）≤ 当前适配线 (0,1,6)：放行（2026-09-09 评估
+        // 11 个依赖包零 diff，零破坏后放行）
+        assert!(version_triple("0.1.6-alpha.1").unwrap() <= DSH_MAX_ADAPTED);
+        assert!(version_triple("0.1.6").unwrap() <= DSH_MAX_ADAPTED);
+        // 0.1.5 系列（含 alpha/正式/rc）放行
         assert!(version_triple("0.1.5-alpha.1").unwrap() <= DSH_MAX_ADAPTED);
         assert!(version_triple("0.1.5-rc.2").unwrap() <= DSH_MAX_ADAPTED);
         assert!(version_triple("0.1.5").unwrap() <= DSH_MAX_ADAPTED);
