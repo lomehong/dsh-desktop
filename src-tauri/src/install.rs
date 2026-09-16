@@ -1658,6 +1658,63 @@ fn run_suite_installer(
         let sys_path = std::env::var("PATH").unwrap_or_default();
         cmd.env("PATH", format!("{};{}", node_bin.display(), sys_path));
         cmd.env("DSH_NODE_EXE", node.display().to_string());
+        // Windows 系统代理（WinINET）注入 HTTPS_PROXY/HTTP_PROXY（2026-09-16 新机故障三段）：
+        // release 探针的 PowerShell 兜底能吃系统代理成功，而安装器内的 pnpm 拉 GitHub
+        // Release tarball 不读 WinINET——不注入代理 env 时报
+        // "error sending request for url https://github.com/..."。best-effort：
+        // 用户已显式设置代理 env 时不覆盖；注册表读取失败不阻断。
+        if std::env::var("HTTPS_PROXY").unwrap_or_default().is_empty()
+            && std::env::var("HTTP_PROXY").unwrap_or_default().is_empty()
+        {
+            let query = |value: &str| -> String {
+                let mut c = std::process::Command::new("reg");
+                c.args([
+                    "query",
+                    r"HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings",
+                    "/v",
+                    value,
+                ]);
+                runtime::no_window(&mut c);
+                match c.output() {
+                    Ok(o) => String::from_utf8_lossy(&o.stdout).to_string(),
+                    Err(_) => String::new(),
+                }
+            };
+            let proxy_enabled = query("ProxyEnable").contains("0x1");
+            let raw_server = query("ProxyServer");
+            let server = raw_server
+                .split("REG_SZ")
+                .last()
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            if proxy_enabled && !server.is_empty() {
+                // ProxyServer 形态两种：`host:port` 或按协议 `http=…;https=…;ftp=…`
+                let server = if server.contains(';') {
+                    let parts: Vec<&str> = server.split(';').map(str::trim).collect();
+                    let https = parts
+                        .iter()
+                        .find(|s| s.to_ascii_lowercase().starts_with("https="))
+                        .map(|s| s.trim_start_matches("https=").to_string());
+                    https.unwrap_or_else(|| {
+                        parts
+                            .first()
+                            .map(|s| s.trim_start_matches("http=").to_string())
+                            .unwrap_or_default()
+                    })
+                } else {
+                    server
+                };
+                if !server.is_empty() {
+                    let url = if server.contains("://") {
+                        server
+                    } else {
+                        format!("http://{server}")
+                    };
+                    let _ = cmd.env("HTTPS_PROXY", &url).env("HTTP_PROXY", &url);
+                }
+            }
+        }
         runtime::no_window(&mut cmd);
         return cmd
             .output()
