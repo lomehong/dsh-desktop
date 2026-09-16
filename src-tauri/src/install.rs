@@ -106,9 +106,29 @@ pub fn cmp_versions(a: &str, b: &str) -> std::cmp::Ordering {
     }
 }
 
-/// 给命令前置便携 node 目录到 PATH（Unix 的 npm 脚本用 `#!/usr/bin/env node` 找解释器）。
+/// 便携 node 可执行目录（PATH 前置用）。从 node_exe() 的父目录推导——
+/// Windows 便携发行版 node.exe/npm.cmd 在顶层，Unix 在 bin/ 下，两者都正确。
+fn portable_node_bin_dir() -> PathBuf {
+    runtime::node_exe()
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| {
+            if cfg!(windows) {
+                runtime::runtime_root().join("node")
+            } else {
+                runtime::runtime_root().join("node").join("bin")
+            }
+        })
+}
+
+/// 给命令前置便携 node 可执行目录到 PATH（Unix 的 npm 脚本用 `#!/usr/bin/env node`
+/// 找解释器；Windows 的 npm 生命周期脚本（koffi/node-pty 的 `cmd /c node …`）同样
+/// 靠 PATH 找 node——npm 7+ 已移除 scripts-prepend-node-path，不再自动补）。
+/// （真实故障 2026-09-16：Windows 曾误前置 `node\bin`——不存在的目录，无系统 Node
+/// 的新机器上 koffi 安装脚本解析不到 node，`npm install` 退出码 1，首启自愈失败；
+/// 有系统 Node 的机器被 PATH 兜底掩盖。）
 fn prepend_node_path(c: &mut Command) {
-    let node_bin = runtime::runtime_root().join("node").join("bin");
+    let node_bin = portable_node_bin_dir();
     let sep = if cfg!(windows) { ";" } else { ":" };
     let sys = std::env::var("PATH").unwrap_or_default();
     c.env("PATH", format!("{}{}{}", node_bin.display(), sep, sys));
@@ -2069,5 +2089,20 @@ npm warn allow-scripts Run `npm install -g --allow-scripts=@deepseek-ai/dsh-subp
         // 旧 0.1.1.x 也放行
         assert!(version_triple("0.1.1-rc.3").unwrap() <= DSH_MAX_ADAPTED);
         assert!(version_triple("0.1.1").unwrap() <= DSH_MAX_ADAPTED);
+    }
+
+    /// 2026-09-16 真实故障回归：Windows 曾误前置 `node\bin`（不存在的目录），
+    /// 无系统 Node 的机器上 npm 生命周期脚本（koffi 的 `cmd /c node cnoke.cjs`）
+    /// 解析不到 node → 安装失败。前置目录必须等于 node_exe 的父目录。
+    #[test]
+    fn portable_node_bin_dir_matches_node_exe_parent() {
+        let node_exe = runtime::node_exe();
+        let dir = portable_node_bin_dir();
+        assert_eq!(Some(dir.as_path()), node_exe.parent());
+        if cfg!(windows) {
+            assert!(!dir.ends_with("bin"), "Windows 便携布局不应指向 node\\bin: {}", dir.display());
+        } else {
+            assert!(dir.ends_with("bin"), "Unix 便携布局应在 node/bin 下: {}", dir.display());
+        }
     }
 }
