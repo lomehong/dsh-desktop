@@ -1645,6 +1645,19 @@ fn run_suite_installer(
             .args(bat_args)
             .current_dir(installer_dir)
             .env("DSH_HOME", home.display().to_string());
+        // 便携 node 目录前置进安装器 PATH + 显式节点路径（2026-09-16 新机故障二段）：
+        // 无系统 Node 的机器上，安装器对 node 的解析依赖它自己对桌面布局的探测——
+        // 旧版安装器只认 legacy 布局，新布局机器曾报 "Node.js not found"；且生产
+        // 通道的安装器经镜像分发，副本可能滞后。壳直接给权威路径与 PATH 前置，
+        // 让新旧任何版本的安装器都能解析（旧版首步 where node 即命中）。
+        let node = runtime::node_exe();
+        let node_bin = node
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| runtime::runtime_root().join("node"));
+        let sys_path = std::env::var("PATH").unwrap_or_default();
+        cmd.env("PATH", format!("{};{}", node_bin.display(), sys_path));
+        cmd.env("DSH_NODE_EXE", node.display().to_string());
         runtime::no_window(&mut cmd);
         return cmd
             .output()
