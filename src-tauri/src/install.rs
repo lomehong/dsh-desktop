@@ -711,6 +711,11 @@ pub fn install_profile_plugins(profiles: &[String], why: &str) -> Result<(), Str
     if profiles.is_empty() {
         return Ok(());
     }
+    // `dsh plugin install` 内部拉 pnpm——无系统 Node/pnpm 的机器（2026-09-16 新机）
+    // 必须先把 pnpm 备进便携 runtime（dsh_cli_command 已把该目录前置进子进程 PATH）。
+    if let Err(e) = ensure_pnpm_available() {
+        return Err(format!("pnpm 不可用，无法补装 profile 插件: {e}"));
+    }
     let mut log = runtime::open_log_append();
     let mut failures: Vec<String> = Vec::new();
     for name in profiles {
@@ -1110,9 +1115,9 @@ pub fn install_digital_twin_suite(app: &tauri::AppHandle, channel: SuiteChannel)
     let home = runtime::app_home();
     let backup_dir = runtime::runtime_root().join("suite-install-backup");
     snapshot_web_profile(&home, &backup_dir);
-    // 官方安装器需要 pnpm；macOS 无系统 pnpm 时首次自动备一份（corepack 只是安装器
-    // 的最后兜底，常备一份后 `dsh plugin` 补装路径也不会再撞 "pnpm not found on PATH"）。
-    #[cfg(not(windows))]
+    // 官方安装器需要 pnpm；无系统 pnpm 的机器（新机首装/无 Node 环境）首次自动
+    // 备一份到便携运行时（corepack 只是安装器的最后兜底，常备一份后 `dsh plugin`
+    // 补装路径也不会再撞 "pnpm not found on PATH"）。
     if let Err(e) = ensure_pnpm_available() {
         if let Some(mut log) = crate::runtime::open_log_append() {
             use std::io::Write;
@@ -1768,11 +1773,12 @@ fn run_suite_installer(
     }
 }
 
-/// POSIX 下确保 pnpm 可用（官方安装器与 `dsh plugin` 都依赖它）。缺失时用便携 npm
+/// 确保便携 pnpm 可用（官方安装器与 `dsh plugin` 都依赖它）。缺失时用便携 npm
 /// 装一份到便携运行时（镜像优先，与 dsh 安装同源）——之后 `dsh plugin` 补装路径也
-/// 能找到它（`dsh_cli_command` 的 PATH 前置正是便携 node 的 bin 目录）。幂等：
+/// 能找到它（`dsh_cli_command` 的 PATH 前置正是便携 node 目录）。幂等：
 /// PATH 上已有 pnpm 直接返回；失败只报错不抛（安装器自身还有 corepack 兜底）。
-#[cfg(not(windows))]
+/// Windows 同样生效（2026-09-16 新机故障：核心升级自愈清空 profile 插件目录后，
+/// `dsh plugin install` 因便携 runtime 无 pnpm 而失败）。
 fn ensure_pnpm_available() -> Result<(), String> {
     let node = runtime::node_exe();
     if !node.exists() {
@@ -1782,17 +1788,32 @@ fn ensure_pnpm_available() -> Result<(), String> {
         .parent()
         .unwrap_or(std::path::Path::new(""))
         .to_path_buf();
+    // Windows 用 `;` 分隔，且 pnpm 以 pnpm.cmd 形态存在——CreateProcess 只解析
+    // .exe，必须经 cmd /C 才能按 PATH 解析（2026-09-16 新机故障：本函数此前
+    // 仅 macOS 生效，Windows 上便携 runtime 无 pnpm，dsh plugin install 报
+    // "'pnpm' 不是内部或外部命令"）。
+    let sep = if cfg!(windows) { ";" } else { ":" };
     let path = format!(
-        "{}:{}",
+        "{}{}{}",
         node_bin.display(),
+        sep,
         std::env::var("PATH").unwrap_or_default()
     );
-    let has_pnpm = std::process::Command::new("pnpm")
-        .arg("--version")
-        .env("PATH", &path)
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false);
+    let has_pnpm = if cfg!(windows) {
+        let mut c = std::process::Command::new("cmd");
+        c.args(["/D", "/C", "pnpm", "--version"]).env("PATH", &path);
+        runtime::no_window(&mut c)
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    } else {
+        std::process::Command::new("pnpm")
+            .arg("--version")
+            .env("PATH", &path)
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    };
     if has_pnpm {
         return Ok(());
     }
