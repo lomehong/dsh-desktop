@@ -13,15 +13,23 @@ use tauri::Manager;
 /// 感知择新，可用 DSH_DESKTOP_DSH_VERSION 固定）。基线必须跟上插件生态的 API 代际：
 /// profile 插件（如 dsh-better-sidebar@0.18）的 peer 依赖按当前线构建，基线落后
 /// 会让插件因 API 缺符号（settingsNamespace）加载失败（真实故障 2026-09）。
-pub const DSH_VERSION: &str = "0.1.6-alpha.1";
+/// 基线还必须**紧跟上游最新发布**：dsh 主包的 @deepseek-ai/* 子依赖是 caret 范围
+/// 且 npm -g 无锁文件——上游发布新版后，旧基线的全新安装会解析到新子包形成
+/// 主/子版本混装树（实测 0.1.6-alpha.1 基线在 alpha.2 发布后：dsh-app-boot 被
+/// 解析成 alpha.2，缺 watchUserPatches 导出 → SyntaxError 启动即崩）。基线跟进
+/// 最新版 = 主子版本一致。根治需上游 exact 钉版或全局锁文件。
+pub const DSH_VERSION: &str = "0.1.7-alpha.2";
 /// 便携 Node 版本（dsh rc.x 的 zstd 要求需要 Node 24）。
 const NODE_VERSION: &str = "24.19.0";
 /// 壳已适配的 dsh 最高版本（语义化三元组）。0.1.6-alpha.1 评估（2026-09-09）：
 /// 全部 11 个依赖包零 diff——804 commits/78 万行全在其他区域（browser-use/
 /// computer-use/ssh/ptc-runtime 新包 + web UI/docs/benchmarks），插件与壳零影响。
-/// 升到 (0,1,6) 放行 0.1.6 系列。npm 超出此版本时仍拒绝升级并引导先升级应用
+/// 0.1.7-alpha.2 真机实证（2026-09-23）：启动/URL token 行/token→cookie/GET /、
+/// remote.mux WS（带 cookie 101、无 cookie 401——0.1.6-alpha.2 的静默挂断回归
+/// 已在上游修复）、$events/result、--no-open、keep-alive 补丁锚点全部通过。
+/// 升到 (0,1,7) 放行 0.1.7 系列。npm 超出此版本时仍拒绝升级并引导先升级应用
 /// 本体；DSH_DESKTOP_DSH_VERSION 显式指定视为知情强制。
-const DSH_MAX_ADAPTED: (u64, u64, u64) = (0, 1, 6);
+const DSH_MAX_ADAPTED: (u64, u64, u64) = (0, 1, 7);
 
 /// ⚠️ 运行时升级纪律（真实事故两次，教训见 docs/lessons/2026-09-15-runtime-upgrade-whilst-running.md）：
 /// **执行 npm install 升级运行时前，必须确认用户已关闭 dsh-desktop 应用。**
@@ -2158,9 +2166,13 @@ npm warn allow-scripts Run `npm install -g --allow-scripts=@deepseek-ai/dsh-subp
 
     #[test]
     fn guard_blocks_next_minor_line_allows_current() {
-        // 预发布段按其所属三元组参与比较：0.1.7-alpha 起视为需要壳配套适配——必须拦
-        assert!(version_triple("0.1.7-alpha.1").unwrap() > DSH_MAX_ADAPTED);
-        assert!(version_triple("0.1.7").unwrap() > DSH_MAX_ADAPTED);
+        // 0.1.7 系列放行（2026-09-23 真机实证：启动/认证/事件流/keep-alive 锚点全通过）
+        assert!(version_triple("0.1.7-alpha.1").unwrap() <= DSH_MAX_ADAPTED);
+        assert!(version_triple("0.1.7-alpha.2").unwrap() <= DSH_MAX_ADAPTED);
+        assert!(version_triple("0.1.7").unwrap() <= DSH_MAX_ADAPTED);
+        // 预发布段按其所属三元组参与比较：0.1.8-alpha 起视为需要壳配套适配——必须拦
+        assert!(version_triple("0.1.8-alpha.1").unwrap() > DSH_MAX_ADAPTED);
+        assert!(version_triple("0.1.8").unwrap() > DSH_MAX_ADAPTED);
         assert!(version_triple("0.2.0").unwrap() > DSH_MAX_ADAPTED);
         // 0.1.6 系列（含 alpha/正式）≤ 当前适配线 (0,1,6)：放行（2026-09-09 评估
         // 11 个依赖包零 diff，零破坏后放行）
@@ -2170,6 +2182,9 @@ npm warn allow-scripts Run `npm install -g --allow-scripts=@deepseek-ai/dsh-subp
         assert!(version_triple("0.1.5-alpha.1").unwrap() <= DSH_MAX_ADAPTED);
         assert!(version_triple("0.1.5-rc.2").unwrap() <= DSH_MAX_ADAPTED);
         assert!(version_triple("0.1.5").unwrap() <= DSH_MAX_ADAPTED);
+        // 0.1.6 系列放行（2026-09-08 多角色评估 + alpha.1/alpha.2 真机验证）
+        assert!(version_triple("0.1.6-alpha.1").unwrap() <= DSH_MAX_ADAPTED);
+        assert!(version_triple("0.1.6-alpha.2").unwrap() <= DSH_MAX_ADAPTED);
         // 0.1.3/0.1.4 历史线同样放行（评估确认无破坏面）
         assert!(version_triple("0.1.3-alpha.2").unwrap() <= DSH_MAX_ADAPTED);
         assert!(version_triple("0.1.4").unwrap() <= DSH_MAX_ADAPTED);
