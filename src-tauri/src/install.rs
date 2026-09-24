@@ -1493,10 +1493,10 @@ fn probe_suite_plugins(home: &std::path::Path) -> Vec<String> {
         return Vec::new();
     }
     let profile_dir = home.join("profiles").join("web");
-    let node = runtime::node_exe();
-    if !node.exists() {
-        return vec!["内置 Node 运行时缺失，无法做安装后校验".to_string()];
-    }
+    let node = match suite_node_exe() {
+        Ok(n) => n,
+        Err(e) => return vec![e],
+    };
     targets
         .iter()
         .filter_map(|(name, dir)| probe_suite_plugin(&node, name, dir, &profile_dir))
@@ -1506,15 +1506,26 @@ fn probe_suite_plugins(home: &std::path::Path) -> Vec<String> {
 /// 生产通道：拉取官方安装器到本地目录（壳不内置副本——套件仓库更新安装器后所有
 /// 机器即刻受益，零漂移）。用宿主 Node 做 HTTPS 下载（Node 24 自带 fetch，零新增
 /// Rust 依赖），逐个来源尝试（官方 raw → ghfast 镜像），校验嵌入式 JS 标记后落盘。
+/// 套件流程用的 Node 可执行：便携运行时优先；缺失时回退系统 PATH 上的 node
+/// （System 回退模式下壳本身就用系统 Node 跑 dsh，套件安装同理——
+/// 2026-09-24 实测：完全卸载便携运行时后，套件安装器因 node_exe() 只认
+/// 便携路径而误报「内置 Node 运行时缺失」）。
+fn suite_node_exe() -> Result<std::path::PathBuf, String> {
+    let portable = runtime::node_exe();
+    if portable.exists() {
+        return Ok(portable);
+    }
+    runtime::find_system_node().ok_or_else(|| {
+        "内置与系统 Node 均缺失：请先安装 Node.js 或在托盘「安装运行环境」重装便携运行时".to_string()
+    })
+}
+
 fn fetch_suite_installer(dir: &std::path::Path, urls: &[String]) -> Result<(), String> {
     if urls.is_empty() {
         return Err("未配置安装器来源".to_string());
     }
     std::fs::create_dir_all(dir).map_err(|e| format!("创建安装器目录失败: {e}"))?;
-    let node = runtime::node_exe();
-    if !node.exists() {
-        return Err("内置 Node 运行时缺失".to_string());
-    }
+    let node = suite_node_exe()?;
     let out = dir.join("install-all.bat");
     // argv: [1]=输出路径, [2..]=候选 URL。校验 JS-START 标记，避免把 404 页面/代理页当安装器。
     // 注意：失败/成功后都用 process.exitCode 交还控制权、让事件循环自然收干——
@@ -1737,10 +1748,7 @@ fn run_suite_installer(
     {
         let text = std::fs::read_to_string(bat).map_err(|e| format!("读取安装器失败: {e}"))?;
         let js = extract_embedded_js(&text)?;
-        let node = runtime::node_exe();
-        if !node.exists() {
-            return Err("内置 Node 运行时缺失，无法执行套件安装器".to_string());
-        }
+        let node = suite_node_exe()?;
         let node_bin = node
             .parent()
             .unwrap_or(std::path::Path::new(""))
@@ -1788,10 +1796,7 @@ fn run_suite_installer(
 /// Windows 同样生效（2026-09-16 新机故障：核心升级自愈清空 profile 插件目录后，
 /// `dsh plugin install` 因便携 runtime 无 pnpm 而失败）。
 fn ensure_pnpm_available() -> Result<(), String> {
-    let node = runtime::node_exe();
-    if !node.exists() {
-        return Err("内置 Node 运行时缺失".to_string());
-    }
+    let node = suite_node_exe()?;
     let node_bin = node
         .parent()
         .unwrap_or(std::path::Path::new(""))
