@@ -57,6 +57,26 @@ fn runtime_root_locked() -> PathBuf {
         (p.join("dsh-desktop"), p.join("dsh-desktop-app-data"))
     };
     if old.exists() && !new.exists() {
+        // 迁移边界：old 若是当前运行中 exe 的安装目录（NSIS 默认把应用装到
+        // %LOCALAPPDATA%\dsh-desktop，与旧数据目录同名——Windows 路径大小写
+        // 不敏感，二者恒为同一目录），rename 会搬走整个安装目录、弄断快捷
+        // 方式与卸载器引用（2026-09-24 用户实测：安装目录被反复搬移，运行时
+        // 与数据随之反复丢失）。此时跳过 rename：改用 new 作为运行根，并把
+        // home/node 迁移过来（best-effort；exe 本体留在安装目录随 NSIS 管理，
+        // 卸载时随目录删除属已知取舍）。
+        let exe_dir = std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(|p| p.to_path_buf()));
+        if exe_dir.as_deref() == Some(old.as_path()) {
+            for dir in ["home", "node"] {
+                let src = old.join(dir);
+                let dst = new.join(dir);
+                if src.exists() && !dst.exists() {
+                    let _ = std::fs::rename(&src, &dst);
+                }
+            }
+            return new;
+        }
         if std::fs::rename(&old, &new).is_ok() {
             return new;
         }
