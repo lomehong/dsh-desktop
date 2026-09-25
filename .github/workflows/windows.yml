@@ -23,41 +23,44 @@ jobs:
       - name: Build (debug)
         run: cargo build --manifest-path src-tauri/Cargo.toml
 
-      - name: Install Node 24 + dsh for smoke test
-        uses: actions/setup-node@v4
-        with:
-          node-version: 24
-
-      - name: Install dsh runtime for smoke test
-        shell: pwsh
-        run: |
-          npm install -g "@deepseek-ai/dsh@0.1.2-alpha.5"
-          dsh --version
+      - name: Unit and runtime isolation tests
+        run: cargo test --manifest-path src-tauri/Cargo.toml
 
       - name: Smoke test (boot → ready → graceful exit, no orphans)
         shell: pwsh
         env:
-          DSH_HOME: ${{ runner.temp }}\dsh-smoke-home
+          LOCALAPPDATA: ${{ runner.temp }}\dsh-smoke
         run: |
-          New-Item -ItemType Directory -Force -Path $env:DSH_HOME | Out-Null
+          New-Item -ItemType Directory -Force -Path $env:LOCALAPPDATA | Out-Null
+          # 启动时 PATH 仅含系统自带工具，禁止 runner 的 Node/npm/pnpm 掩盖自举缺陷。
+          $env:PATH = "$env:SystemRoot\System32;$env:SystemRoot;$env:SystemRoot\System32\WindowsPowerShell\v1.0"
           $exe = "src-tauri\target\debug\dsh-desktop.exe"
-          $p = Start-Process -FilePath $exe -ArgumentList "--quit-after-secs","240" -PassThru -Wait
+          $p = Start-Process -FilePath $exe -ArgumentList "--quit-after-secs","900" -PassThru -Wait
           if ($p.ExitCode -ne 0) { throw "smoke: app exit code $($p.ExitCode)" }
           $log = Join-Path $env:LOCALAPPDATA "dsh-desktop-app-data\dsh-desktop.log"
           if (-not (Select-String -Path $log -Pattern "dsh web: http://127\.0\.0\.1:\d+" -Quiet)) {
             throw "smoke: no URL line in log"
           }
-          Write-Host "smoke OK"
+          foreach ($file in @("node\node.exe", "node\node_modules\npm\bin\npm-cli.js", "node\node_modules\@deepseek-ai\dsh\lib\bin.js")) {
+            if (-not (Test-Path (Join-Path "$env:LOCALAPPDATA\dsh-desktop-app-data" $file))) { throw "missing owned runtime: $file" }
+          }
+          Write-Host "owned-runtime smoke OK"
+
+      - name: Suite toolchain without system Node or pnpm
+        shell: pwsh
+        env:
+          DSH_TEST_NODE_ROOT: ${{ runner.temp }}\dsh-smoke\dsh-desktop-app-data\node
+        run: cargo test --manifest-path src-tauri/Cargo.toml owned_toolchain_smoke_without_system_path -- --ignored --nocapture
 
       - name: Portable-mode smoke (USB layout → DSH_HOME redirect → wizard gating)
         shell: pwsh
         run: |
-          # 伪造U盘便携目录：exe + Data/node（runner node + npm -g dsh）+ Data/home
+          # 从应用自举出的完整自有运行时构造 USB 包，不借用 runner 的全局 Node/DSH。
           $usb = Join-Path $env:RUNNER_TEMP "fake-usb"
           New-Item -ItemType Directory -Force -Path "$usb\Data\home","$usb\Data\node" | Out-Null
           Copy-Item "src-tauri\target\debug\dsh-desktop.exe" $usb
-          Copy-Item (Get-Command node.exe).Source "$usb\Data\node\node.exe"
-          npm install -g "@deepseek-ai/dsh@0.1.2-alpha.5" --prefix "$usb\Data\node" --no-progress
+          Copy-Item "$env:RUNNER_TEMP\dsh-smoke\dsh-desktop-app-data\node\*" "$usb\Data\node" -Recurse
+          $env:PATH = "$env:SystemRoot\System32;$env:SystemRoot;$env:SystemRoot\System32\WindowsPowerShell\v1.0"
           # 完成标记：跳过向导直接启动（向导 UI 由本地验收覆盖）
           Set-Content "$usb\Data\home\persona-configured.json" '{"configured":true,"owner":"ci"}'
           # 宿主侧基准：记录本次冒烟前宿主 ~/.dsh 是否已有 profiles/web

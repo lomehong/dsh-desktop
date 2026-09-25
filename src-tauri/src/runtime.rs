@@ -8,12 +8,14 @@ use std::sync::OnceLock;
 /// 所有路径相对 exe 现场解析，U盘换盘符/换目录均有效。
 fn portable_root_locked() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
+    portable_root_next_to(&exe)
+}
+
+fn portable_root_next_to(exe: &std::path::Path) -> Option<PathBuf> {
     let dir = exe.parent()?;
     let data = dir.join("Data");
-    // 用运行时目录里的 node 判定「这是一个真的便携包」而不是碰巧叫 Data 的空目录：
-    // 便携包制作器总是预装 runtime；空 Data 目录只可能是用户手工误建，按安装版处理
-    // 会把宿主数据写进U盘，宁可忽略。
-    if data.is_dir() && node_exe_in(&data).exists() {
+    // 模式标记与完整性分开：Node 缺失时仍在 Data 内修复，不能切换到宿主目录。
+    if data.is_dir() {
         return Some(data);
     }
     None
@@ -40,49 +42,17 @@ pub fn app_home() -> PathBuf {
 /// 安装版 Windows: %LOCALAPPDATA%\dsh-desktop-app-data；macOS: ~/Library/Application Support/dsh-desktop-app-data
 /// 不用 `dsh-desktop`：NSIS 卸载器会整目录删除 InstallLocation，若应用恰好装在同名目录
 /// （历史上以 mainBinaryName 作为默认安装名出现过），卸载会把便携运行时一并删掉。
-/// 旧目录（…\dsh-desktop）存在时一次性整体迁移到新目录；迁移失败（如文件被占用）回退旧目录。
+/// 固定使用独立数据目录，不迁移、不复用安装目录，避免卸载/升级与运行时互相破坏。
 fn runtime_root_locked() -> PathBuf {
     if let Some(portable) = portable_root() {
         return portable;
     }
     #[cfg(windows)]
-    let (old, new) = {
-        let local = PathBuf::from(std::env::var("LOCALAPPDATA").unwrap_or_default());
-        (local.join("dsh-desktop"), local.join("dsh-desktop-app-data"))
-    };
+    let base = PathBuf::from(std::env::var_os("LOCALAPPDATA").unwrap_or_default());
     #[cfg(not(windows))]
-    let (old, new) = {
-        let home = std::env::var("HOME").unwrap_or_default();
-        let p = PathBuf::from(home).join("Library/Application Support");
-        (p.join("dsh-desktop"), p.join("dsh-desktop-app-data"))
-    };
-    if old.exists() && !new.exists() {
-        // 迁移边界：old 若是当前运行中 exe 的安装目录（NSIS 默认把应用装到
-        // %LOCALAPPDATA%\dsh-desktop，与旧数据目录同名——Windows 路径大小写
-        // 不敏感，二者恒为同一目录），rename 会搬走整个安装目录、弄断快捷
-        // 方式与卸载器引用（2026-09-24 用户实测：安装目录被反复搬移，运行时
-        // 与数据随之反复丢失）。此时跳过 rename：改用 new 作为运行根，并把
-        // home/node 迁移过来（best-effort；exe 本体留在安装目录随 NSIS 管理，
-        // 卸载时随目录删除属已知取舍）。
-        let exe_dir = std::env::current_exe()
-            .ok()
-            .and_then(|p| p.parent().map(|p| p.to_path_buf()));
-        if exe_dir.as_deref() == Some(old.as_path()) {
-            for dir in ["home", "node"] {
-                let src = old.join(dir);
-                let dst = new.join(dir);
-                if src.exists() && !dst.exists() {
-                    let _ = std::fs::rename(&src, &dst);
-                }
-            }
-            return new;
-        }
-        if std::fs::rename(&old, &new).is_ok() {
-            return new;
-        }
-        return old; // 迁移失败：沿用旧目录，功能不受影响
-    }
-    new
+    let base = PathBuf::from(std::env::var_os("HOME").unwrap_or_default())
+        .join("Library/Application Support");
+    base.join("dsh-desktop-app-data")
 }
 
 pub fn runtime_root() -> PathBuf {
@@ -110,10 +80,11 @@ fn portable_roots() -> Vec<PathBuf> {
     vec![runtime_root()]
 }
 
-/// node 与 dsh 都就绪的便携根目录；都没有时返回 None（bootstrap 走 System 回退或引导安装）。
-/// （与 USB 便携包的 `portable_root` 不同：这里指“装好的运行时根”，可能是自有目录或 persona 复用。）
+/// 自带 Node、npm、DSH 全部在场才算就绪；缺失交由自愈，不查找系统工具链。
 pub fn ready_root() -> Option<PathBuf> {
-    portable_roots().into_iter().find(|r| node_exe_in(r).exists() && dsh_bin_js_in(r).exists())
+    portable_roots().into_iter().find(|r| {
+        node_exe_in(r).is_file() && dsh_bin_js_in(r).is_file() && npm_cli_js_in(r).is_file()
+    })
 }
 
 pub fn node_exe() -> PathBuf {
@@ -183,26 +154,57 @@ pub fn process_alive(pid: u32) -> bool {
     process_name(pid).is_some()
 }
 
-/// dsh 的启动方式：便携版运行时（node + bin.js）或系统 node + 全局 dsh 命令。
-#[derive(Clone, Copy, PartialEq)]
+/// 子进程使用应用私有工具链、配置和缓存；不修改父进程或用户级环境。
+pub fn configure_command(cmd: &mut Command) -> Result<(), String> {
+    let root = runtime_root();
+    let home = app_home();
+    let cache = root.join("cache");
+    let config = root.join("config");
+    let tmp = cache.join("tmp");
+    let node = node_exe();
+    let node_bin = node.parent().ok_or("自带 Node 路径无父目录")?;
+    for dir in [&home, &cache, &config, &tmp] {
+        std::fs::create_dir_all(dir).map_err(|e| format!("创建应用运行目录失败（{}）：{e}", dir.display()))?;
+    }
+    // npm 的继承配置可能指向用户全局 prefix/cache，不能让其覆盖应用隔离边界。
+    for (key, _) in std::env::vars_os() {
+        if key.to_string_lossy().to_ascii_lowercase().starts_with("npm_config_") {
+            cmd.env_remove(key);
+        }
+    }
+    let inherited = std::env::var_os("PATH").unwrap_or_default();
+    let paths = std::iter::once(node_bin.to_path_buf()).chain(std::env::split_paths(&inherited));
+    let path = std::env::join_paths(paths).map_err(|e| format!("构造运行时 PATH 失败：{e}"))?;
+    let modules = root.join("node").join(if cfg!(windows) { "node_modules" } else { "lib/node_modules" });
+    let node_path = std::env::join_paths([modules.clone(), modules.join("@deepseek-ai/dsh/node_modules")])
+        .map_err(|e| format!("构造自有 NODE_PATH 失败：{e}"))?;
+    cmd.env("PATH", path)
+        .env("DSH_HOME", &home).env("DSH_NODE_EXE", &node)
+        .env("npm_config_prefix", root.join("node"))
+        .env("npm_config_cache", cache.join("npm"))
+        .env("npm_config_devdir", cache.join("node-gyp"))
+        .env("npm_config_userconfig", config.join("npmrc"))
+        .env("npm_config_globalconfig", config.join("npmrc-global"))
+        .env("npm_config_store_dir", cache.join("pnpm-store"))
+        .env("npm_config_cache_dir", cache.join("pnpm"))
+        .env("npm_config_state_dir", root.join("pnpm-state"))
+        .env("npm_config_global_dir", root.join("pnpm-global"))
+        .env("npm_config_global_bin_dir", node_bin)
+        .env("npm_config_manage_package_manager_versions", "false")
+        .env("PNPM_HOME", node_bin).env("COREPACK_HOME", cache.join("corepack"))
+        .env("XDG_CONFIG_HOME", &config).env("XDG_CACHE_HOME", &cache)
+        .env("XDG_DATA_HOME", root.join("data"))
+        .env("XDG_STATE_HOME", root.join("state"))
+        .env("NODE_OPTIONS", "--dns-result-order=ipv4first")
+        .env("NODE_USE_ENV_PROXY", "1").env("NODE_PATH", node_path)
+        .env("TEMP", &tmp).env("TMP", &tmp).env("TMPDIR", &tmp);
+    Ok(())
+}
+
+/// 本地服务仅允许使用应用自有运行时。
+#[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Launch {
     Portable,
-    System,
-}
-
-/// 检查命令是否可用（PATH 上能找到）。
-#[cfg(windows)]
-fn command_exists(name: &str) -> bool {
-    let mut c = Command::new("where.exe");
-    c.arg(name);
-    no_window(&mut c).output().map(|o| o.status.success()).unwrap_or(false)
-}
-
-#[cfg(not(windows))]
-fn command_exists(name: &str) -> bool {
-    let mut c = Command::new("sh");
-    c.args(["-c", &format!("command -v {name} >/dev/null 2>&1")]);
-    c.status().map(|s| s.success()).unwrap_or(false)
 }
 
 /// Windows 下隐藏子进程的控制台窗口。
@@ -218,199 +220,48 @@ pub fn no_window(cmd: &mut Command) -> &mut Command {
     cmd
 }
 
-/// DSH 要求的最低 Node 主版本号（zstd 解压需要 Node ≥ 24 的 createZstdDecompress）。
-const MIN_NODE_MAJOR: u32 = 24;
-
-/// 自愈信号前缀：bootstrap_runtime 返回此错误表示"系统 Node 不兼容，需自动重装便携运行时"。
-/// supervisor 检测此前缀触发 install::ensure_runtime_locked() 自愈流程。
+/// 自带环境不完整时由调用方在流程锁内准备运行时。
 pub const NEED_AUTO_REPAIR: &str = "[auto-repair]";
 
-/// 检测系统 node 的主版本号。返回 None 表示无法执行或解析失败。
-/// v0.1.28+ 加 no_window：之前漏写导致每次启动 bootstrap_runtime 都弹一次 cmd 窗口。
-fn system_node_major() -> Option<u32> {
-    let out = {
-        let mut c = Command::new("node");
-        c.arg("--version");
-        no_window(&mut c).output().ok()?
-    };
-    if !out.status.success() {
-        return None;
-    }
-    let ver = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    // "v24.19.0" → 24
-    ver.strip_prefix('v')
-        .and_then(|v| v.split('.').next())
-        .and_then(|n| n.parse::<u32>().ok())
+fn npm_cli_js_in(root: &PathBuf) -> PathBuf {
+    let modules = if cfg!(windows) { "node_modules" } else { "lib/node_modules" };
+    root.join("node").join(modules).join("npm/bin/npm-cli.js")
 }
 
-/// 在 PATH 上定位 `node` 可执行文件（首条结果）。System 模式拉起 dsh 用：
-/// 走 node + bin.js 路径，不再经 cmd.exe /C dsh.cmd（避免启动期弹窗闪烁）。
-/// 全会话缓存：找一次就够，进程重启后重新探测。
-pub fn find_system_node() -> Option<PathBuf> {
-    static CACHE: OnceLock<Option<PathBuf>> = OnceLock::new();
-    CACHE
-        .get_or_init(|| {
-            let probe = if cfg!(windows) {
-                let mut c = Command::new("where.exe");
-                c.arg("node");
-                no_window(&mut c).output().ok()
-            } else {
-                let mut c = Command::new("which");
-                c.arg("node");
-                c.output().ok()
-            };
-            let out = probe?;
-            if !out.status.success() {
-                return None;
-            }
-            String::from_utf8_lossy(&out.stdout)
-                .lines()
-                .map(str::trim)
-                .find(|l| !l.is_empty())
-                .map(PathBuf::from)
-        })
-        .clone()
-}
-
-/// 在 PATH 上定位 `dsh` 入口并反推出 bin.js 路径。System 模式拉起 dsh 用：
-/// - Windows：where dsh → C:\...\npm\dsh.cmd，bin.js 在同目录的 node_modules\@deepseek-ai\dsh\lib\bin.js
-/// - Unix：which dsh → /usr/local/bin/dsh，bin.js 在 /usr/local/lib/node_modules\@deepseek-ai\dsh\lib\bin.js
-/// 全会话缓存。
-pub fn find_system_dsh_bin() -> Option<PathBuf> {
-    static CACHE: OnceLock<Option<PathBuf>> = OnceLock::new();
-    CACHE
-        .get_or_init(|| {
-            let probe = if cfg!(windows) {
-                let mut c = Command::new("where.exe");
-                c.arg("dsh");
-                no_window(&mut c).output().ok()
-            } else {
-                let mut c = Command::new("which");
-                c.arg("dsh");
-                c.output().ok()
-            };
-            let out = probe?;
-            if !out.status.success() {
-                return None;
-            }
-            let dsh_path = String::from_utf8_lossy(&out.stdout)
-                .lines()
-                .map(str::trim)
-                .find(|l| !l.is_empty())?
-                .to_string();
-            let dsh_dir = PathBuf::from(dsh_path).parent()?.to_path_buf();
-            // dsh bin.js layout:
-            //   Windows (npm global): <prefix>/node_modules/@deepseek-ai/dsh/lib/bin.js
-            //   Unix (npm global): <prefix>/lib/node_modules/@deepseek-ai/dsh/lib/bin.js
-            //   prefix 在 Windows 是 dsh.cmd 所在目录；在 Unix 是 bin/dsh 的父目录（即 npm prefix）
-            let prefix = if cfg!(windows) {
-                dsh_dir
-            } else {
-                dsh_dir.parent()?.to_path_buf()
-            };
-            let bin_js = if cfg!(windows) {
-                prefix
-                    .join("node_modules")
-                    .join("@deepseek-ai")
-                    .join("dsh")
-                    .join("lib")
-                    .join("bin.js")
-            } else {
-                prefix
-                    .join("lib")
-                    .join("node_modules")
-                    .join("@deepseek-ai")
-                    .join("dsh")
-                    .join("lib")
-                    .join("bin.js")
-            };
-            bin_js.exists().then_some(bin_js)
-        })
-        .clone()
-}
-
-/// 便携运行时的 npm-cli.js 路径（用于直接 node + npm-cli.js 调 npm，
-/// 避开 cmd.exe /C npm.cmd 的窗口闪烁）。仅便携根有效；System 模式不走这条路径。
-/// 推导：npm.cmd 位于 <root>/node/，npm-cli.js 位于 <root>/node/node_modules/npm/bin/npm-cli.js
-/// 仅 Windows 使用（install.rs::npm_command 的非 Windows 分支直接调 bin/npm）。
-#[cfg(windows)]
+/// 所有平台都通过自带 Node 直接执行 npm CLI，避免 PATH 解析到系统 npm。
 pub fn portable_npm_cli_js() -> Option<PathBuf> {
-    let npm_cmd = portable_npm_cmd_path()?;
-    let npm_dir = npm_cmd.parent()?;
-    let cli = npm_dir
-        .join("node_modules")
-        .join("npm")
-        .join("bin")
-        .join("npm-cli.js");
-    cli.exists().then_some(cli)
+    let cli = npm_cli_js_in(&runtime_root());
+    cli.is_file().then_some(cli)
 }
 
-#[cfg(windows)]
-fn portable_npm_cmd_path() -> Option<PathBuf> {
-    let root = ready_root().unwrap_or_else(runtime_root);
-    let npm = root.join("node").join("npm.cmd");
-    npm.exists().then_some(npm)
-}
-
-/// 系统 node 是否满足 DSH 运行要求（版本 ≥ MIN_NODE_MAJOR）。
-pub fn system_node_capable() -> bool {
-    system_node_major().map_or(false, |major| major >= MIN_NODE_MAJOR)
-}
-
-/// 只检测、不安装：node 与 dsh 都就绪才返回启动方式，否则返回自愈信号。
-/// 自愈触发条件（均由 supervisor 检测 NEED_AUTO_REPAIR 前缀）：
-/// - 系统 Node 不存在
-/// - 系统 Node 存在但版本 < MIN_NODE_MAJOR（如 nvm v23 缺 zstd）
-/// - 系统 dsh 命令不存在
-/// 便携模式（U盘包）下不触发自愈（离线场景无法下载），仍走安装指引。
+/// 只检测自带环境。安装版缺失时自动准备，USB 离线包缺失时给出修复指引。
 pub fn bootstrap_runtime() -> Result<Launch, String> {
     let node_path = node_exe();
     let bin_path = dsh_bin_js();
-    let portable = node_path.exists() && bin_path.exists();
+    let portable = ready_root().is_some();
     // 诊断日志：记录检测到的路径与结果，便于排查环境差异
     if let Some(log) = open_log_append() {
         use std::io::Write;
         let mut log = log;
         let _ = writeln!(
             log,
-            "[检测] runtime_root={:?} node={:?} exists={} bin={:?} exists={} portable={} sys_node_capable={}",
+            "[检测] runtime_root={:?} node={:?} exists={} bin={:?} exists={} portable={} npm_ready={}",
             runtime_root(),
             node_path,
             node_path.exists(),
             bin_path,
             bin_path.exists(),
             portable,
-            system_node_capable()
+            portable_npm_cli_js().is_some()
         );
     }
     if portable {
         return Ok(Launch::Portable);
     }
-    // 便携模式（U盘包）：离线场景无法自动下载，仍走手动安装指引
     if portable_root().is_some() {
-        if !command_exists("node") {
-            return Err("未检测到 Node.js。\n请点击下方「安装运行环境」，或先安装 Node.js（https://nodejs.org/）。".into());
-        }
-        if !command_exists("dsh") {
-            return Err("未检测到 DSH。\n请点击下方「安装运行环境」，或先执行 npm install -g @deepseek-ai/dsh。".into());
-        }
-        return Ok(Launch::System);
+        return Err("便携包内 Node/npm/DSH 不完整，请联网后点击「安装运行环境」修复；不会使用系统运行时。".into());
     }
-    // 安装版：系统 Node 不存在或版本不兼容 → 自愈信号
-    if !command_exists("node") {
-        return Err(format!("{NEED_AUTO_REPAIR} 系统未安装 Node.js，将自动安装便携运行时。"));
-    }
-    if !system_node_capable() {
-        let major = system_node_major().map_or("未知".into(), |m| format!("v{m}"));
-        return Err(format!(
-            "{NEED_AUTO_REPAIR} 系统 Node 版本 {major} 不满足 DSH 要求（需 ≥ v{MIN_NODE_MAJOR}），将自动安装便携运行时。"
-        ));
-    }
-    // 系统 Node 兼容但 dsh 命令不存在 → 也触发自愈（装便携运行时比要求用户手动 npm i -g 更可靠）
-    if !command_exists("dsh") {
-        return Err(format!("{NEED_AUTO_REPAIR} 系统未安装 DSH，将自动安装便携运行时。"));
-    }
-    Ok(Launch::System)
+    Err(format!("{NEED_AUTO_REPAIR} 应用自带 Node/npm/DSH 不完整，将自动准备独立运行时。"))
 }
 
 /// 日志轮转阈值：超过即把当前日志改名为 `.old`（覆盖上一代）再重新开始。
@@ -447,4 +298,91 @@ pub fn unix_now() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+pub(crate) mod tests {
+    use super::*;
+
+    // 子进程隔离环境变量与 OnceLock，测试不能迁移或改写开发机的真实数据。
+    pub(crate) fn isolated_case(name: &str, setup: impl FnOnce(&std::path::Path)) -> Option<PathBuf> {
+        if std::env::var("DSH_TEST_CASE").as_deref() == Ok(name) {
+            return Some(PathBuf::from(std::env::var_os("DSH_TEST_ROOT").unwrap()));
+        }
+        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/test-data")
+            .join(format!("{}-{}-{}", name.replace(':', "-"), std::process::id(),
+                std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        std::fs::create_dir_all(&dir).unwrap();
+        setup(&dir);
+        let out = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", name, "--nocapture", "--include-ignored"])
+            .env("DSH_TEST_CASE", name).env("DSH_TEST_ROOT", &dir)
+            .env("LOCALAPPDATA", &dir).env("HOME", &dir)
+            .current_dir(&dir).output().unwrap();
+        if out.status.success() { let _ = std::fs::remove_dir_all(&dir); }
+        assert!(out.status.success(), "隔离测试失败（诊断数据保留在 {}）：{}\n{}", dir.display(),
+            String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+        None
+    }
+
+    pub(crate) fn data_base(dir: &std::path::Path) -> PathBuf {
+        if cfg!(windows) { dir.to_path_buf() } else { dir.join("Library/Application Support") }
+    }
+
+    #[test]
+    fn incomplete_usb_runtime_stays_inside_data() {
+        let Some(dir) = isolated_case("runtime::tests::incomplete_usb_runtime_stays_inside_data", |_| {}) else { return };
+        let data = dir.join("usb/Data");
+        std::fs::create_dir_all(&data).unwrap();
+        assert_eq!(portable_root_next_to(&dir.join("usb/dsh-desktop.exe")), Some(data),
+            "Data 是便携模式标记，Node 丢失不能使数据写回宿主机");
+    }
+
+    #[test]
+    fn native_build_cache_and_module_paths_are_owned() {
+        let Some(_) = isolated_case("runtime::tests::native_build_cache_and_module_paths_are_owned", |_| {}) else { return };
+        let mut cmd = Command::new("unused");
+        configure_command(&mut cmd).unwrap();
+        let env: std::collections::HashMap<_, _> = cmd.get_envs().collect();
+        let devdir = env.get(std::ffi::OsStr::new("npm_config_devdir")).and_then(|v| *v)
+            .expect("node-gyp 缓存必须在应用内部");
+        assert!(std::path::Path::new(devdir).starts_with(runtime_root()));
+        let modules = env.get(std::ffi::OsStr::new("NODE_PATH")).and_then(|v| *v)
+            .expect("保留指向自有包的 NODE_PATH，不能继承系统包目录");
+        assert!(std::env::split_paths(modules).all(|p| p.starts_with(runtime_root())));
+    }
+
+    #[test]
+    fn legacy_install_directory_is_never_moved_or_reused() {
+        let Some(dir) = isolated_case("runtime::tests::legacy_install_directory_is_never_moved_or_reused", |dir| {
+            let old = data_base(dir).join("dsh-desktop");
+            std::fs::create_dir_all(old.join("node")).unwrap();
+            std::fs::write(old.join("dsh-desktop.exe"), "应用文件").unwrap();
+        }) else { return };
+        let base = data_base(&dir);
+        assert_eq!(runtime_root(), base.join("dsh-desktop-app-data"));
+        assert!(base.join("dsh-desktop/dsh-desktop.exe").is_file(), "不能搬走安装目录");
+        assert!(!runtime_root().join("dsh-desktop.exe").exists());
+    }
+
+    #[test]
+    fn missing_owned_runtime_requires_repair_even_with_system_tools() {
+        let Some(_) = isolated_case("runtime::tests::missing_owned_runtime_requires_repair_even_with_system_tools", |_| {}) else { return };
+        let result = bootstrap_runtime();
+        assert!(matches!(result, Err(ref e) if e.starts_with(NEED_AUTO_REPAIR)),
+            "自带环境缺失时必须请求自愈，不能使用系统环境");
+    }
+
+    #[test]
+    fn node_and_dsh_without_npm_are_not_ready() {
+        let Some(_) = isolated_case("runtime::tests::node_and_dsh_without_npm_are_not_ready", |dir| {
+            let root = data_base(dir).join("dsh-desktop-app-data");
+            for file in [node_exe_in(&root), dsh_bin_js_in(&root)] {
+                std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+                std::fs::write(file, "测试占位").unwrap();
+            }
+        }) else { return };
+        assert!(ready_root().is_none(), "缺少自带 npm 时不能宣告运行时完整");
+        assert!(matches!(bootstrap_runtime(), Err(e) if e.starts_with(NEED_AUTO_REPAIR)));
+    }
 }

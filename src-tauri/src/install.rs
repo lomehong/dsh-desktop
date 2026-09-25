@@ -1,5 +1,5 @@
 //! 运行时安装与升级：便携 Node + 固定版本 dsh 装入应用数据目录
-//! （Windows %LOCALAPPDATA%\dsh-desktop，macOS ~/Library/Application Support/dsh-desktop）。
+//! （Windows %LOCALAPPDATA%\dsh-desktop-app-data，macOS ~/Library/Application Support/dsh-desktop-app-data）。
 //! 全程使用系统自带工具（curl 下载、tar 解压：Windows/macOS 为 bsdtar，Linux 为 gnu tar），
 //! 零新增 Rust 依赖；下载走 npmmirror 镜像，nodejs.org / npm 官方源兜底。
 use std::path::PathBuf;
@@ -18,9 +18,15 @@ use tauri::Manager;
 /// 主/子版本混装树（实测 0.1.6-alpha.1 基线在 alpha.2 发布后：dsh-app-boot 被
 /// 解析成 alpha.2，缺 watchUserPatches 导出 → SyntaxError 启动即崩）。基线跟进
 /// 最新版 = 主子版本一致。根治需上游 exact 钉版或全局锁文件。
-pub const DSH_VERSION: &str = "0.1.7-alpha.2";
+///
+/// 当前基线 0.1.7-rc.2（2026-09-24 核对 npm 官方）：主包全部 @deepseek-ai/* 子依赖
+/// 均精确钉在 0.1.7-rc.2，不形成主/子混装树；三元组 (0,1,7) 在 DSH_MAX_ADAPTED 内。
+/// rc.2 的真机启动/认证实证待补——隔离环境跑通前不宣称已验证。
+pub const DSH_VERSION: &str = "0.1.7-rc.2";
 /// 便携 Node 版本（dsh rc.x 的 zstd 要求需要 Node 24）。
 const NODE_VERSION: &str = "24.19.0";
+/// 固定自带包管理器版本，禁止因系统 pnpm 或 latest 跨大版本而改变安装行为。
+const PNPM_VERSION: &str = "10.34.5";
 /// 壳已适配的 dsh 最高版本（语义化三元组）。0.1.6-alpha.1 评估（2026-09-09）：
 /// 全部 11 个依赖包零 diff——804 commits/78 万行全在其他区域（browser-use/
 /// computer-use/ssh/ptc-runtime 新包 + web UI/docs/benchmarks），插件与壳零影响。
@@ -194,8 +200,7 @@ fn npm_registry() -> Vec<String> {
     }
 }
 
-/// 升级/查询所用的运行时根：优先解析到的便携根（含 dsh-persona 复用），
-/// 没有便携运行时时回退自有目录（此时 install_runtime 会先装基线）。
+/// 升级、查询与安装始终使用同一自有运行时根（安装版数据目录或 USB Data）。
 fn active_root() -> PathBuf {
     runtime::ready_root().unwrap_or_else(|| runtime::runtime_root())
 }
@@ -226,30 +231,14 @@ pub fn installed_dsh_version() -> Option<String> {
         .map(String::from)
 }
 
-/// 构造一条运行 npm 的 Command。
-/// Windows：直接 node + npm-cli.js，避开 cmd.exe /C npm.cmd 的窗口闪烁（v0.1.28 修复）；
-/// 找不到 npm-cli.js 时回退到 cmd.exe /C npm.cmd 兼容路径。
-/// Unix：直接 bin/npm（已是真二进制）。
+/// 所有平台使用自带 Node + npm-cli.js，配置与缓存收进应用目录，不回退系统 npm。
 fn npm_command() -> Result<Command, String> {
-    #[cfg(windows)]
-    {
-        let node = runtime::node_exe();
-        if let Some(cli) = runtime::portable_npm_cli_js().filter(|_| node.exists()) {
-            let mut c = Command::new(node);
-            c.arg(cli);
-            return Ok(c);
-        }
-        // 回退：cmd.exe /C npm.cmd
-        let npm = npm_tool().ok_or("便携运行时未安装，无法构造 npm 命令")?;
-        let mut c = Command::new("cmd.exe");
-        c.args(["/D", "/C"]).arg(&npm);
-        return Ok(c);
-    }
-    #[cfg(not(windows))]
-    {
-        let npm = npm_tool().ok_or("便携运行时未安装，无法构造 npm 命令")?;
-        Ok(Command::new(&npm))
-    }
+    let node = suite_node_exe()?;
+    let cli = runtime::portable_npm_cli_js().ok_or("应用自带 npm 不完整，请修复运行环境")?;
+    let mut cmd = Command::new(node);
+    cmd.arg(cli);
+    runtime::configure_command(&mut cmd)?;
+    Ok(cmd)
 }
 
 /// 查询 npm registry 上 @deepseek-ai/dsh 指定 dist-tag 的版本。
@@ -326,7 +315,7 @@ pub fn web_supports_no_open() -> bool {    let node = runtime::node_exe();
     }
     let mut c = Command::new(&node);
     c.arg(&bin).args(["web", "--help"]);
-    prepend_node_path(&mut c);
+    if runtime::configure_command(&mut c).is_err() { return false; }
     match no_window(&mut c).output() {
         Ok(o) => {
             let s = format!("{}{}", String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr));
@@ -682,7 +671,7 @@ pub fn profile_names() -> Vec<String> {
 }
 
 /// 构造调用便携 dsh CLI 的 Command（环境与 supervisor::spawn_dsh 的 Portable 分支对齐：
-/// DSH_HOME 指向专属 home、npm 缓存收进 home、PATH 前置便携 node、cwd 在 node 目录；
+/// DSH_HOME 指向专属 home、缓存收进自有目录、PATH 前置自带 node、cwd 在 node 目录；
 /// 非 Windows 补 HOME/NODE_PATH 保 ESM 解析）。运行时未就绪返回 None。
 fn dsh_cli_command() -> Option<Command> {
     let node = runtime::node_exe();
@@ -708,6 +697,7 @@ fn dsh_cli_command() -> Option<Command> {
         c.env("HOME", home_env)
             .env("NODE_PATH", format!("{}:{}", nm.display(), dsh_nm.display()));
     }
+    runtime::configure_command(&mut c).ok()?;
     Some(c)
 }
 
@@ -780,7 +770,7 @@ fn install_runtime_inner(app: &tauri::AppHandle) -> Result<(), String> {
     std::fs::create_dir_all(&root).map_err(|e| format!("无法创建数据目录: {e}"))?;
 
     // 1) 便携 Node：缺失则下载解压（按平台选发行版，顶层目录改名为 node）
-    if !runtime::node_exe().exists() {
+    if !runtime::node_exe().is_file() || runtime::portable_npm_cli_js().is_none() {
         let archive = node_archive_name()?;
         status::set(app, &format!("正在下载 Node v{NODE_VERSION}（镜像加速）…"));
         let downloads = root.join("downloads");
@@ -834,15 +824,17 @@ fn install_runtime_inner(app: &tauri::AppHandle) -> Result<(), String> {
         }
         npm_install_dsh_once(DSH_VERSION, "--registry=https://registry.npmjs.org")?;
     }
+    if runtime::ready_root().is_none() {
+        return Err("安装后自带 Node/npm/DSH 仍不完整，请查看运行时安装日志".into());
+    }
     Ok(())
 }
 
-/// 升级检查与安装（不含服务重启）：在**活动**便携运行时上就地升级
-/// （含 dsh-persona 复用的运行时）；完全没有便携运行时时先装基线到自有目录。
+/// 升级检查与安装（不含服务重启）：只升级应用自有运行时；缺失时先装基线。
 /// 返回给用户的状态文案。
 pub fn upgrade_dsh(app: &tauri::AppHandle) -> Result<String, String> {
     if npm_tool().is_none() {
-        // 无便携运行时（System 回退或全新）：先装基线，之后活动根即自有目录
+        // 自有运行时缺失：先装基线，不使用系统安装。
         install_runtime(app)?;
     }
     let target = target_version()?;
@@ -1033,6 +1025,35 @@ pub fn install_digital_twin_suite(app: &tauri::AppHandle, channel: SuiteChannel)
         &format!("通道：{}——准备中…", channel.label()),
     );
 
+    // 锁内先准备自有运行时，不能调用会重复 acquire 的 install_runtime。
+    let prepare = (|| -> Result<(), String> {
+        if *state.mode.lock().unwrap() == "remote" {
+            return Err("远程模式不能安装本地数字分身套件，请先切回本地模式".into());
+        }
+        if runtime::ready_root().is_none() {
+            suite_progress(app, "step", "正在准备应用自带 Node/npm/DSH 运行环境…");
+            supervisor::stop_child(app);
+            *state.origin.lock().unwrap() = None;
+            ensure_runtime_locked(app)?;
+        }
+        suite_progress(app, "step", "正在检查应用自带 pnpm…");
+        ensure_pnpm_available()?;
+        suite_progress(app, "step", "正在准备 web profile 与自有宿主依赖…");
+        ensure_suite_profile()
+    })();
+    if let Err(e) = prepare {
+        let msg = format!("准备应用自带运行环境失败：{e}");
+        status::fail(app, &msg);
+        suite_progress(app, "fail", &msg);
+        notify_digital_twin(app, "数字分身安装失败", &msg);
+        if let Some(mut log) = runtime::open_log_append() {
+            use std::io::Write;
+            let _ = writeln!(log, "[数字分身] {msg}");
+        }
+        state.restarting.release();
+        return;
+    }
+
     // 1) 定位安装器：本地通道走用户目录，生产通道拉官方最新
     let (installer_dir, bat_args, suite_root) = match channel {
         SuiteChannel::Local => {
@@ -1063,7 +1084,7 @@ pub fn install_digital_twin_suite(app: &tauri::AppHandle, channel: SuiteChannel)
             status::set(app, "正在获取数字分身套件安装器（GitHub）…");
             suite_progress(app, "step", "正在从 GitHub 获取安装器…");
             if let Err(e) = fetch_suite_installer(&dir, &channel.installer_urls()) {
-                let msg = format!("获取套件安装器失败（网络不通？）：{e}");
+                let msg = format!("获取套件安装器失败：{e}");
                 status::fail(app, &msg);
                 suite_progress(app, "fail", &msg);
                 notify_digital_twin(app, "数字分身安装失败", &msg);
@@ -1123,15 +1144,6 @@ pub fn install_digital_twin_suite(app: &tauri::AppHandle, channel: SuiteChannel)
     let home = runtime::app_home();
     let backup_dir = runtime::runtime_root().join("suite-install-backup");
     snapshot_web_profile(&home, &backup_dir);
-    // 官方安装器需要 pnpm；无系统 pnpm 的机器（新机首装/无 Node 环境）首次自动
-    // 备一份到便携运行时（corepack 只是安装器的最后兜底，常备一份后 `dsh plugin`
-    // 补装路径也不会再撞 "pnpm not found on PATH"）。
-    if let Err(e) = ensure_pnpm_available() {
-        if let Some(mut log) = crate::runtime::open_log_append() {
-            use std::io::Write;
-            let _ = writeln!(log, "[warn] pnpm 准备失败（继续，安装器将走 corepack 兜底）: {e}");
-        }
-    }
     status::set(
         app,
         &format!("正在安装数字分身套件（{} 通道）…", channel.label()),
@@ -1453,6 +1465,7 @@ fn probe_suite_plugin(
     let script = "import(process.argv[1]).then(()=>{},e=>{console.error((e.code??'')+' '+(e.message??''));process.exit(1)})";
     let mut cmd = std::process::Command::new(node);
     cmd.args(["-e", script, name]).current_dir(profile_dir);
+    if let Err(e) = runtime::configure_command(&mut cmd) { return Some(e); }
     crate::runtime::no_window(&mut cmd);
     match cmd.output() {
         Err(e) => Some(format!("{name}: 探针进程启动失败: {e}")),
@@ -1506,18 +1519,13 @@ fn probe_suite_plugins(home: &std::path::Path) -> Vec<String> {
 /// 生产通道：拉取官方安装器到本地目录（壳不内置副本——套件仓库更新安装器后所有
 /// 机器即刻受益，零漂移）。用宿主 Node 做 HTTPS 下载（Node 24 自带 fetch，零新增
 /// Rust 依赖），逐个来源尝试（官方 raw → ghfast 镜像），校验嵌入式 JS 标记后落盘。
-/// 套件流程用的 Node 可执行：便携运行时优先；缺失时回退系统 PATH 上的 node
-/// （System 回退模式下壳本身就用系统 Node 跑 dsh，套件安装同理——
-/// 2026-09-24 实测：完全卸载便携运行时后，套件安装器因 node_exe() 只认
-/// 便携路径而误报「内置 Node 运行时缺失」）。
+/// 套件只使用应用自带 Node；缺失必须由安装入口准备，不能借用系统环境掩盖故障。
 fn suite_node_exe() -> Result<std::path::PathBuf, String> {
     let portable = runtime::node_exe();
-    if portable.exists() {
+    if portable.is_file() {
         return Ok(portable);
     }
-    runtime::find_system_node().ok_or_else(|| {
-        "内置与系统 Node 均缺失：请先安装 Node.js 或在托盘「安装运行环境」重装便携运行时".to_string()
-    })
+    Err(format!("应用自带 Node 未就绪：{}；请重试安装运行环境", portable.display()))
 }
 
 fn fetch_suite_installer(dir: &std::path::Path, urls: &[String]) -> Result<(), String> {
@@ -1531,10 +1539,15 @@ fn fetch_suite_installer(dir: &std::path::Path, urls: &[String]) -> Result<(), S
     // 注意：失败/成功后都用 process.exitCode 交还控制权、让事件循环自然收干——
     // 紧跟 fetch 调 process.exit() 会触发 libuv 断言（win async.c）崩溃退出码非 0，
     // 明明下载成功的文件会被判失败（2026-09-10 实测）。
-    let script = "const fs=require('fs');const out=process.argv[1];const urls=process.argv.slice(2);\
-(async()=>{let ok=false;for(const u of urls){try{const r=await fetch(u);if(!r.ok)continue;const t=await r.text();\
-if(!t.includes('//==JS-START=='))continue;fs.writeFileSync(out,t);ok=true;break}catch{}}\
-process.exitCode=ok?0:2})()";
+    let script = r#"const fs=require('fs');const out=process.argv[1];const urls=process.argv.slice(2);
+(async()=>{let ok=false;for(const u of urls){try{
+const r=await fetch(u,{signal:AbortSignal.timeout(30000)});
+if(!r.ok)throw new Error('HTTP '+r.status);
+const t=await r.text();const a=t.indexOf('//==JS-START==');const b=t.indexOf('//==JS-END==');
+if(a<0||b<=a||!t.slice(a+14,b).trim())throw new Error('安装器内容不完整：缺少有效 JS 起止标记');
+fs.writeFileSync(out,t);ok=true;break;
+}catch(e){console.error(new URL(u).origin+'：'+(e.message||e)+' '+(e.cause?.code||''));}}
+process.exitCode=ok?0:2})()"#;
     let mut cmd = std::process::Command::new(&node);
     // --dns-result-order=ipv4first：Node 的 fetch/undici 默认 IPv6 优先，且不读 Windows
     // 系统代理——受限网络下直连 github.com 会超时 10s（2026-09-10 实测：系统代理已启用
@@ -1544,14 +1557,16 @@ process.exitCode=ok?0:2})()";
         cmd.arg(u);
     }
     cmd.current_dir(dir);
+    runtime::configure_command(&mut cmd)?;
     crate::runtime::no_window(&mut cmd);
     let output = cmd
         .output()
         .map_err(|e| format!("下载器启动失败: {e}"))?;
     if !output.status.success() || !out.is_file() {
         let err = String::from_utf8_lossy(&output.stderr);
-        let first = err.lines().next().unwrap_or("网络不可达").trim();
-        return Err(format!("所有来源均不可用（{first}）"));
+        let details = err.trim();
+        let details = if details.is_empty() { "下载进程未生成有效安装器" } else { details };
+        return Err(format!("安装器下载/校验失败（退出码 {:?}）：{details}", output.status.code()));
     }
     // 下载回来的行尾不可信：raw CDN 按 git blob 下发，blob 为 LF 时 cmd 会解析跑飞。
     normalize_bat_eol(&out)?;
@@ -1664,8 +1679,9 @@ fn run_suite_installer(
     let home = runtime::app_home();
     #[cfg(windows)]
     {
+        let _ = bat;
         let mut cmd = std::process::Command::new("cmd");
-        cmd.args(["/c", "install-all.bat"])
+        cmd.args(["/D", "/c", "install-all.bat"])
             .args(bat_args)
             .current_dir(installer_dir)
             .env("DSH_HOME", home.display().to_string());
@@ -1674,14 +1690,8 @@ fn run_suite_installer(
         // 旧版安装器只认 legacy 布局，新布局机器曾报 "Node.js not found"；且生产
         // 通道的安装器经镜像分发，副本可能滞后。壳直接给权威路径与 PATH 前置，
         // 让新旧任何版本的安装器都能解析（旧版首步 where node 即命中）。
-        let node = runtime::node_exe();
-        let node_bin = node
-            .parent()
-            .map(|p| p.to_path_buf())
-            .unwrap_or_else(|| runtime::runtime_root().join("node"));
-        let sys_path = std::env::var("PATH").unwrap_or_default();
-        cmd.env("PATH", format!("{};{}", node_bin.display(), sys_path));
-        cmd.env("DSH_NODE_EXE", node.display().to_string());
+        let _ = suite_node_exe()?;
+        runtime::configure_command(&mut cmd)?;
         // Windows 系统代理（WinINET）注入 HTTPS_PROXY/HTTP_PROXY（2026-09-16 新机故障三段）：
         // release 探针的 PowerShell 兜底能吃系统代理成功，而安装器内的 pnpm 拉 GitHub
         // Release tarball 不读 WinINET——不注入代理 env 时报
@@ -1754,9 +1764,11 @@ fn run_suite_installer(
             .unwrap_or(std::path::Path::new(""))
             .to_path_buf();
         let pid = std::process::id();
-        let js_file = std::env::temp_dir().join(format!("dsh-install-all-{pid}.mjs"));
+        let tmp = runtime::runtime_root().join("cache/tmp");
+        std::fs::create_dir_all(&tmp).map_err(|e| format!("创建安装器临时目录失败：{e}"))?;
+        let js_file = tmp.join(format!("dsh-install-all-{pid}.mjs"));
         std::fs::write(&js_file, js).map_err(|e| format!("写出安装器 JS 失败: {e}"))?;
-        let shim_dir = std::env::temp_dir().join(format!("dsh-cmd-shim-{pid}"));
+        let shim_dir = tmp.join(format!("dsh-cmd-shim-{pid}"));
         let shim_ok = write_cmd_shim(&shim_dir).is_ok();
         let sys_path = std::env::var("PATH").unwrap_or_default();
         let path = if shim_ok {
@@ -1765,6 +1777,7 @@ fn run_suite_installer(
             format!("{}:{}", node_bin.display(), sys_path)
         };
         let mut cmd = std::process::Command::new(&node);
+        runtime::configure_command(&mut cmd)?;
         cmd.arg(&js_file)
             .arg(installer_dir)
             .args(bat_args)
@@ -1789,74 +1802,232 @@ fn run_suite_installer(
     }
 }
 
-/// 确保便携 pnpm 可用（官方安装器与 `dsh plugin` 都依赖它）。缺失时用便携 npm
-/// 装一份到便携运行时（镜像优先，与 dsh 安装同源）——之后 `dsh plugin` 补装路径也
-/// 能找到它（`dsh_cli_command` 的 PATH 前置正是便携 node 目录）。幂等：
-/// PATH 上已有 pnpm 直接返回；失败只报错不抛（安装器自身还有 corepack 兜底）。
-/// Windows 同样生效（2026-09-16 新机故障：核心升级自愈清空 profile 插件目录后，
-/// `dsh plugin install` 因便携 runtime 无 pnpm 而失败）。
+/// 用自带 DSH 的正式 profile API 初始化，不手写清单、不依赖服务曾成功启动。
+/// DSH 0.1.7 已改为运行时解析表，不再物化旧镜像；官方套件安装器仍需要它。
+/// 将解析表中的宿主依赖链接到自有 home，保持版本与物理实例一致，不复制包。
+fn ensure_suite_profile() -> Result<(), String> {
+    let anchor = runtime::dsh_package_dir().ok_or("自带 DSH 未就绪")?.join("package.json");
+    let script = r#"
+import { createRequire } from 'node:module';
+import { pathToFileURL } from 'node:url';
+import { join, relative, isAbsolute } from 'node:path';
+import { mkdirSync, realpathSync, lstatSync, unlinkSync, symlinkSync } from 'node:fs';
+const anchor = process.argv[1], home = process.env.DSH_HOME;
+const boot = await import(pathToFileURL(createRequire(anchor).resolve('@deepseek-ai/dsh-app-boot')).href);
+const profile = boot.loadProfile('dsh', 'web', anchor, home, { userLayer: false });
+const resolveRuntime = boot.createRuntimeResolution ?? boot.createProfileResolutionGeneration;
+if (!resolveRuntime) throw new Error('自带 DSH 缺少 profile 解析 API，请升级运行时');
+const resolution = await resolveRuntime({ installAnchor: anchor, profile, home });
+const owned = realpathSync(process.argv[2]);
+const inside = (base, path) => { const r = relative(base, path); return !isAbsolute(r) && r !== '..' && !r.startsWith('..\\') && !r.startsWith('../'); };
+const modules = join(home, 'profiles', 'node_modules');
+mkdirSync(modules, { recursive: true });
+if (!inside(realpathSync(home), realpathSync(modules))) throw new Error('宿主镜像目录指向应用 home 之外');
+let count = 0;
+for (const entry of resolution.entries.filter(e => e.scope === 'installation')) {
+    const target = realpathSync(entry.packageDir);
+    if (!inside(owned, target)) throw new Error('宿主依赖不在自带运行时内：' + entry.name);
+    const link = join(modules, entry.name);
+    if (!inside(modules, link)) throw new Error('非法宿主包名：' + entry.name);
+    mkdirSync(join(link, '..'), { recursive: true });
+    let existing;
+    try { existing = lstatSync(link); } catch (e) { if (e.code !== 'ENOENT') throw e; }
+    if (existing) {
+        let actual;
+        try { actual = realpathSync(link); } catch (e) { if (e.code !== 'ENOENT') throw e; }
+        if (actual === target) { count++; continue; }
+        if (!existing.isSymbolicLink()) throw new Error('宿主镜像与已有实体目录冲突：' + link);
+        unlinkSync(link);
+    }
+    symlinkSync(target, link, process.platform === 'win32' ? 'junction' : 'dir');
+    count++;
+}
+if (!count) throw new Error('自带 DSH 的宿主依赖解析表为空');
+console.log('[数字分身] web profile 已就绪，自有宿主依赖链接：' + count);
+"#;
+    let mut cmd = Command::new(suite_node_exe()?);
+    cmd.args(["--input-type=module", "-e", script]).arg(anchor).arg(active_root().join("node"));
+    runtime::configure_command(&mut cmd)?;
+    cmd.current_dir(runtime::runtime_root());
+    let output = no_window(&mut cmd).output().map_err(|e| format!("初始化 web profile 失败：{e}"))?;
+    let mut log = runtime::open_log_append();
+    tee_bytes(&mut log, &output.stdout);
+    tee_bytes(&mut log, &output.stderr);
+    if !output.status.success() {
+        return Err(format!("初始化 web profile/宿主依赖失败：{}", readable_output(&output.stderr)));
+    }
+    Ok(())
+}
+
+/// 只检查自带 pnpm 的实体、命令包装器与固定版本；缺失时用自带 npm 安装并复检。
+/// 不把系统 PATH 上的 pnpm 当作就绪，不依赖 corepack 临时补装。
 fn ensure_pnpm_available() -> Result<(), String> {
     let node = suite_node_exe()?;
-    let node_bin = node
-        .parent()
-        .unwrap_or(std::path::Path::new(""))
-        .to_path_buf();
-    // Windows 用 `;` 分隔，且 pnpm 以 pnpm.cmd 形态存在——CreateProcess 只解析
-    // .exe，必须经 cmd /C 才能按 PATH 解析（2026-09-16 新机故障：本函数此前
-    // 仅 macOS 生效，Windows 上便携 runtime 无 pnpm，dsh plugin install 报
-    // "'pnpm' 不是内部或外部命令"）。
-    let sep = if cfg!(windows) { ";" } else { ":" };
-    let path = format!(
-        "{}{}{}",
-        node_bin.display(),
-        sep,
-        std::env::var("PATH").unwrap_or_default()
-    );
-    let has_pnpm = if cfg!(windows) {
-        let mut c = std::process::Command::new("cmd");
-        c.args(["/D", "/C", "pnpm", "--version"]).env("PATH", &path);
-        runtime::no_window(&mut c)
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false)
-    } else {
-        std::process::Command::new("pnpm")
-            .arg("--version")
-            .env("PATH", &path)
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false)
+    let modules = if cfg!(windows) { "node_modules" } else { "lib/node_modules" };
+    let cli = active_root().join("node").join(modules).join("pnpm/bin/pnpm.cjs");
+    let wrapper = portable_node_bin_dir().join(if cfg!(windows) { "pnpm.cmd" } else { "pnpm" });
+    let ready = || -> bool {
+        if !cli.is_file() || !wrapper.is_file() { return false; }
+        let mut cmd = Command::new(&node);
+        cmd.arg(&cli).arg("--version");
+        if runtime::configure_command(&mut cmd).is_err() { return false; }
+        no_window(&mut cmd).output().map(|out| {
+            out.status.success() && String::from_utf8_lossy(&out.stdout).trim() == PNPM_VERSION
+        }).unwrap_or(false)
     };
-    if has_pnpm {
-        return Ok(());
-    }
+    if ready() { return Ok(()); }
     let mut last_err = String::new();
     for registry in npm_registry() {
-        let Ok(mut cmd) = npm_command() else {
-            return Err("便携 npm 不可用".to_string());
-        };
-        cmd.args(["install", "-g", "pnpm@latest", "--prefix"])
-            .arg(active_root().join("node"))
-            .arg(&registry)
-            .env("PATH", &path);
-        match runtime::no_window(&mut cmd).output() {
-            Ok(o) if o.status.success() => {
-                if let Some(mut log) = runtime::open_log_append() {
-                    use std::io::Write;
-                    let _ = writeln!(log, "[数字分身] 已为套件安装准备 pnpm（{registry}）");
-                }
-                return Ok(());
-            }
-            Ok(o) => last_err = format!("npm 退出码 {:?}（{registry}）", o.status.code()),
+        let mut cmd = npm_command()?;
+        cmd.args(["install", "-g", &format!("pnpm@{PNPM_VERSION}"), "--prefix"])
+            .arg(active_root().join("node")).arg(&registry);
+        match no_window(&mut cmd).output() {
+            Ok(o) if o.status.success() && ready() => return Ok(()),
+            Ok(o) => last_err = format!("npm 退出码 {:?}，自带 pnpm 校验未通过：{}", o.status.code(), readable_output(&o.stderr)),
             Err(e) => last_err = format!("npm 启动失败: {e}"),
         }
     }
-    Err(format!("pnpm 安装失败：{last_err}"))
+    Err(format!("应用自带 pnpm 安装失败：{last_err}"))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 需显式提供只读 Node 发行版目录；全部安装与缓存写入 target/test-data。
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "需要 DSH_TEST_NODE_ROOT 指向完整 Node 发行版，并联网准备自带 pnpm"]
+    fn owned_toolchain_smoke_without_system_path() {
+        let Some(dir) = runtime::tests::isolated_case("install::tests::owned_toolchain_smoke_without_system_path", |dir| {
+            fn copy_tree(src: &std::path::Path, dst: &std::path::Path) {
+                std::fs::create_dir_all(dst).unwrap();
+                for entry in std::fs::read_dir(src).unwrap() {
+                    let entry = entry.unwrap();
+                    if entry.path().is_dir() { copy_tree(&entry.path(), &dst.join(entry.file_name())); }
+                    else { std::fs::copy(entry.path(), dst.join(entry.file_name())).unwrap(); }
+                }
+            }
+            let source = PathBuf::from(std::env::var_os("DSH_TEST_NODE_ROOT").expect("缺少测试 Node 发行版路径"));
+            let target = runtime::tests::data_base(dir).join("dsh-desktop-app-data/node");
+            std::fs::create_dir_all(&target).unwrap();
+            std::fs::copy(source.join("node.exe"), target.join("node.exe")).unwrap();
+            copy_tree(&source.join("node_modules/npm"), &target.join("node_modules/npm"));
+        }) else { return };
+        // 子进程内只留下 OS 工具目录，系统 Node/npm/pnpm 一律不可见。
+        let windows = PathBuf::from(std::env::var_os("SystemRoot").unwrap());
+        std::env::set_var("PATH", std::env::join_paths([
+            windows.join("System32"), windows.join("System32/WindowsPowerShell/v1.0"), windows,
+        ]).unwrap());
+        assert!(suite_node_exe().unwrap().starts_with(&dir));
+        let mut npm = npm_command().unwrap();
+        npm.args(["config", "get", "prefix"]);
+        let output = no_window(&mut npm).output().unwrap();
+        assert!(output.status.success(), "{}", readable_output(&output.stderr));
+        assert_eq!(std::path::Path::new(String::from_utf8_lossy(&output.stdout).trim()), active_root().join("node"));
+        ensure_pnpm_available().expect("无系统 pnpm 时必须安装并校验自带 pnpm");
+        ensure_pnpm_available().expect("重复准备必须幂等");
+
+        let mut pnpm = Command::new("cmd");
+        pnpm.args(["/D", "/C", "pnpm", "store", "path"]);
+        runtime::configure_command(&mut pnpm).unwrap();
+        let output = no_window(&mut pnpm).output().unwrap();
+        assert!(output.status.success(), "{}", readable_output(&output.stderr));
+        let store = String::from_utf8_lossy(&output.stdout);
+        assert!(std::path::Path::new(store.trim()).starts_with(runtime::runtime_root()), "pnpm store 泄漏到系统目录：{store}");
+
+        let installer = dir.join("installer with spaces");
+        std::fs::create_dir_all(&installer).unwrap();
+        let bat = installer.join("install-all.bat");
+        std::fs::write(&bat, b"@echo off\r\n\"%DSH_NODE_EXE%\" -e \"console.log(JSON.stringify({node:process.execPath,home:process.env.DSH_HOME,cache:process.env.npm_config_cache}))\"\r\nif errorlevel 1 exit /b 1\r\ncall pnpm --version\r\n").unwrap();
+        let output = run_suite_installer(&installer, &bat, &["-Release"]).unwrap();
+        assert!(output.status.success(), "{}", readable_output(&output.stderr));
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let observed: serde_json::Value = serde_json::from_str(stdout.lines().next().unwrap()).unwrap();
+        assert_eq!(std::path::Path::new(observed["node"].as_str().unwrap()), suite_node_exe().unwrap());
+        assert_eq!(observed["home"], runtime::app_home().to_str().unwrap());
+        assert!(stdout.contains(PNPM_VERSION));
+
+        let fetched = dir.join("fetched");
+        assert!(fetch_suite_installer(&fetched, &["data:text/plain,//==JS-START==".into()]).is_err(), "截断安装器不能算下载成功");
+        fetch_suite_installer(&fetched, &["data:text/plain,//==JS-START==%0Aconsole.log(1)%0A//==JS-END==".into()]).unwrap();
+        assert!(fetched.join("install-all.bat").is_file());
+
+        npm_install_dsh(DSH_VERSION).expect("在私有目录安装 DSH 基线");
+        assert!(runtime::ready_root().is_some());
+        let manifest = runtime::app_home().join("profiles/web/package.json");
+        assert!(!manifest.exists(), "只安装 DSH 包不会创建 web profile");
+        ensure_suite_profile().expect("首次安装套件必须自动初始化 profile");
+        {
+            use std::time::{Duration, Instant};
+            let log_path = runtime::runtime_root().join("profile-init-test.log");
+            let log = std::fs::File::create(&log_path).unwrap();
+            let mut command = dsh_cli_command().unwrap();
+            command.args(["web", "--no-open", "--port", "0"])
+                .stdin(std::process::Stdio::null())
+                .stderr(log.try_clone().unwrap()).stdout(log);
+            let mut child = no_window(&mut command).spawn().unwrap();
+            let deadline = Instant::now() + Duration::from_secs(120);
+            let result = loop {
+                let text = std::fs::read_to_string(&log_path).unwrap_or_default();
+                if text.lines().any(|line| line.contains("dsh web: http://127.0.0.1:")) { break Ok(()); }
+                if child.try_wait().unwrap().is_some() || Instant::now() >= deadline {
+                    break Err(format!("profile 初始化未就绪：{text}"));
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            };
+            supervisor::kill_tree(child.id());
+            let _ = child.wait();
+            result.expect("准备后的 DSH 服务必须能正常启动");
+        }
+        assert!(manifest.is_file(), "套件安装前缺少 web profile 清单");
+        assert!(runtime::app_home().join("profiles/node_modules/@deepseek-ai/dsh/package.json").is_file(),
+            "套件安装前缺少宿主依赖镜像");
+        let before = std::fs::read(&manifest).unwrap();
+        ensure_suite_profile().expect("已有 profile 时必须幂等");
+        assert_eq!(std::fs::canonicalize(runtime::app_home().join("profiles/node_modules/@deepseek-ai/dsh")).unwrap(),
+            std::fs::canonicalize(runtime::dsh_package_dir().unwrap()).unwrap(), "不能另复制一套宿主包");
+        assert_eq!(std::fs::read(&manifest).unwrap(), before);
+
+        if std::env::var_os("DSH_TEST_INSTALL_RELEASE").is_some() {
+            let dir = runtime::runtime_root().join("suite-installer");
+            fetch_suite_installer(&dir, &SuiteChannel::Release.installer_urls()).unwrap();
+            let output = run_suite_installer(&dir, &dir.join("install-all.bat"), &["-Release"]).unwrap();
+            let mut log = runtime::open_log_append();
+            tee_bytes(&mut log, &output.stdout);
+            tee_bytes(&mut log, &output.stderr);
+            assert!(output.status.success(), "真实 GitHub 套件安装失败：{}\n{}",
+                readable_output(&output.stdout), readable_output(&output.stderr));
+            assert!(probe_suite_plugins(&runtime::app_home()).is_empty(), "真实套件的导入探针失败");
+        }
+    }
+
+    #[test]
+    fn suite_node_never_falls_back_to_system() {
+        let Some(_) = runtime::tests::isolated_case("install::tests::suite_node_never_falls_back_to_system", |_| {}) else { return };
+        assert!(suite_node_exe().is_err(), "自带 Node 缺失时不得借用系统 Node");
+    }
+
+    #[test]
+    fn npm_command_keeps_configuration_inside_application() {
+        let Some(_) = runtime::tests::isolated_case("install::tests::npm_command_keeps_configuration_inside_application", |dir| {
+            let root = runtime::tests::data_base(dir).join("dsh-desktop-app-data/node");
+            let modules = if cfg!(windows) { "node_modules" } else { "lib/node_modules" };
+            for file in [root.join(if cfg!(windows) { "node.exe" } else { "bin/node" }),
+                root.join(modules).join("npm/bin/npm-cli.js"), root.join("npm.cmd")] {
+                std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+                std::fs::write(file, "测试占位").unwrap();
+            }
+        }) else { return };
+        let cmd = npm_command().unwrap();
+        assert_eq!(cmd.get_program(), runtime::node_exe().as_os_str());
+        let env: std::collections::HashMap<_, _> = cmd.get_envs().collect();
+        for key in ["npm_config_cache", "npm_config_prefix", "npm_config_userconfig", "npm_config_globalconfig", "PNPM_HOME", "COREPACK_HOME"] {
+            let value = env.get(std::ffi::OsStr::new(key)).and_then(|v| *v)
+                .unwrap_or_else(|| panic!("未隔离 {key}"));
+            assert!(std::path::Path::new(value).starts_with(runtime::runtime_root()), "{key} 必须在应用目录内");
+        }
+    }
 
     /// 行尾规范化：LF-only 就地改写成 CRLF（cmd 需要）；已是 CRLF 时幂等不动。
     #[test]
@@ -2174,6 +2345,7 @@ npm warn allow-scripts Run `npm install -g --allow-scripts=@deepseek-ai/dsh-subp
         // 0.1.7 系列放行（2026-09-23 真机实证：启动/认证/事件流/keep-alive 锚点全通过）
         assert!(version_triple("0.1.7-alpha.1").unwrap() <= DSH_MAX_ADAPTED);
         assert!(version_triple("0.1.7-alpha.2").unwrap() <= DSH_MAX_ADAPTED);
+        assert!(version_triple("0.1.7-rc.2").unwrap() <= DSH_MAX_ADAPTED);
         assert!(version_triple("0.1.7").unwrap() <= DSH_MAX_ADAPTED);
         // 预发布段按其所属三元组参与比较：0.1.8-alpha 起视为需要壳配套适配——必须拦
         assert!(version_triple("0.1.8-alpha.1").unwrap() > DSH_MAX_ADAPTED);
@@ -2200,6 +2372,19 @@ npm warn allow-scripts Run `npm install -g --allow-scripts=@deepseek-ai/dsh-subp
         // 旧 0.1.1.x 也放行
         assert!(version_triple("0.1.1-rc.3").unwrap() <= DSH_MAX_ADAPTED);
         assert!(version_triple("0.1.1").unwrap() <= DSH_MAX_ADAPTED);
+    }
+
+    /// 基线常量必须落在壳适配线内——否则全新首装/强制重装会装出被 supervisor
+    /// 启动预检拦截的运行时（打不开，见 docs/lessons/2026-09-15）。基线 bump 时
+    /// 此断言防止只改 DSH_VERSION 却漏抬 DSH_MAX_ADAPTED 的漂移。
+    #[test]
+    fn baseline_version_within_adapted_line() {
+        let triple = version_triple(DSH_VERSION)
+            .unwrap_or_else(|| panic!("基线版本无法解析三元组: {DSH_VERSION}"));
+        assert!(
+            triple <= DSH_MAX_ADAPTED,
+            "基线 {DSH_VERSION} 超出壳适配线 {DSH_MAX_ADAPTED:?}，需同步抬升 DSH_MAX_ADAPTED"
+        );
     }
 
     /// 2026-09-16 真实故障回归：Windows 曾误前置 `node\bin`（不存在的目录），

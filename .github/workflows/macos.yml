@@ -23,22 +23,17 @@ jobs:
       - name: Build (debug)
         run: cargo build --manifest-path src-tauri/Cargo.toml
 
-      - name: Install Node 24 + dsh for smoke test
-        uses: actions/setup-node@v4
-        with:
-          node-version: 24
-
-      - name: Install dsh
-        run: |
-          npm install -g "@deepseek-ai/dsh@0.1.2-alpha.5"
-          dsh --version
+      - name: Unit and runtime isolation tests
+        run: cargo test --manifest-path src-tauri/Cargo.toml
 
       - name: Smoke test (boot → ready → graceful exit, no orphans)
         env:
-          DSH_HOME: ${{ runner.temp }}/dsh-smoke-home
+          HOME: ${{ runner.temp }}/dsh-smoke-home
         run: |
-          mkdir -p "$DSH_HOME"
-          src-tauri/target/debug/dsh-desktop --quit-after-secs 240 &
+          mkdir -p "$HOME"
+          # 仅保留 OS 工具，验证应用自行准备 Node/npm/DSH。
+          export PATH=/usr/bin:/bin:/usr/sbin:/sbin
+          src-tauri/target/debug/dsh-desktop --quit-after-secs 900 &
           APP_PID=$!
           wait $APP_PID
           EXIT=$?
@@ -47,7 +42,11 @@ jobs:
           if ! grep -qE 'dsh web: http://127\.0\.0\.1:[0-9]+' "$LOG"; then
             echo "smoke: no URL line in log"; exit 1
           fi
-          echo "smoke OK"
+          ROOT="$HOME/Library/Application Support/dsh-desktop-app-data"
+          test -f "$ROOT/node/bin/node"
+          test -f "$ROOT/node/lib/node_modules/npm/bin/npm-cli.js"
+          test -f "$ROOT/node/lib/node_modules/@deepseek-ai/dsh/lib/bin.js"
+          echo "owned-runtime smoke OK"
 
   release:
     if: startsWith(github.ref, 'refs/tags/v')

@@ -9,7 +9,7 @@ DeepSeek Harness（dsh）的桌面应用：Tauri 2 原生窗口 + 受监督的 H
 - **进程模型**：壳进程拉起 `dsh web --no-open`（端口默认随机：`--port 0` 由 OS 分配，零冲突；配置页可设固定端口——`launcher.json` 持久化，被占用自动回退随机并留证日志），从子进程 stdout 的 `dsh web: http://127.0.0.1:<port>` 行解析实际地址，再做真实 HTTP GET 健康检查后才把窗口导航过去。异常退出自动重启（上限 3 次），退出应用时整树击杀（`taskkill /T` / 进程组信号），不留孤儿 node。
 - **WebView 加固**：程序化建窗挂导航守卫——只放行本地加载页与**当前** Harness origin（随机端口，重启后自动更新放行目标；前缀匹配校验边界字符防端口伪装）；其余 http(s) 交给系统浏览器。Harness 页面**零 Tauri IPC 授权**（capabilities 仅 `local: true` 给加载页；自定义命令在命令层校验调用方 URL）。
 - **原生集成（服务端→壳单向）**：壳按端点连通性自适应订阅事件流（双协议，不做版本判断）：dsh ≤0.1.1 走 `events.mux` 免认证 WebSocket；≥0.1.2 走 `/api/remote.mux` + 一次性 token 换签名 cookie——（世代号防止重启后重复通知），`turn/end` / `approval/requested` / `question/requested` → OS 原生通知 + 任务栏闪烁（窗口未聚焦时弹通知）。
-- **运行时管理**：优先使用 `%LOCALAPPDATA%\dsh-desktop-app-data\node` 便携运行时（Node 24 + 固定版本 dsh；旧 `dsh-desktop` 目录自动迁移，避免与 NSIS 卸载目录冲突），否则回退系统 `node`/`dsh`；全新机器在加载页一键「安装运行环境」（npmmirror 镜像下载 Node → npm 装基线版本 dsh → 自动启动）；npm ≥10 拦截依赖安装脚本时自动解析拦截清单并以 `npm rebuild --allow-scripts` 补跑（保障 koffi/node-pty 等原生模块完整）。托盘「升级 DSH 运行时」= alpha/latest/next 三 tag 预发布感知择新（既有用户可升到最新预发布，基线仅约束全新安装）。
+- **运行时管理**：仅使用应用自有的 Node 24/npm/DSH，安装版固定在 `%LOCALAPPDATA%\dsh-desktop-app-data\node`（macOS 为 `~/Library/Application Support/dsh-desktop-app-data/node`），便携版在 exe 同级 `Data/node`。不迁移、复用旧安装目录，不回退系统 Node/npm/pnpm/DSH，不修改用户或系统 PATH。安装版缺少 Node、npm CLI 或 DSH 时自动准备独立运行时，也可在加载页点击「安装运行环境」（镜像下载 Node → 自带 npm 装基线 DSH → 启动）；npm ≥10 拦截依赖安装脚本时自动解析拦截清单并以 `npm rebuild --allow-scripts` 补跑（保障 koffi/node-pty 等原生模块完整）。托盘「升级 DSH 运行时」= alpha/latest/next 三 tag 预发布感知择新（既有用户可升到最新预发布，基线仅约束全新安装）。
 - **桌面语义**：关闭=最小化到托盘（IM 渠道/长任务不中断）、托盘菜单按「窗口 / 服务 / 模式与实例 / 数字分身 / 日志与诊断 / 设置 / 关于 / 退出」分组（2026-09-10 重组：更新类收拢服务段，双通道安装收进数字分身子菜单，日志/目录/诊断归拢，关于独立底部）、单实例二次启动聚焦。
 - **无边框窗口**：decorum 保留式顶栏带（Windows 去原生边框 + 扁平自绘最小化/最大化/关闭按钮，保留 Snap Layout；macOS Overlay 红绿灯）。Harness 页面经初始化脚本让出顶部 40px 独占带：`html/body` 高度收缩 + `body transform` 平移（fixed/absolute 定位的 overlay——模式角标、dockkit 浮窗——一并下移；dsh 前端是 `html,body,#root{height:100%}` 链，收缩后正好铺满带下，底部零裁切），decorum 条带反向平移回窗口顶、整带为拖拽区、底色继承 app `--dsw-alias-bg-base` 随深浅主题。2026-09-09 由 overlay 改回让位：dsh 0.1.5+ 右侧栏 dockkit 条带专职占据窗口右上角，overlay 窗控钮与其结构性重叠（视觉上两套 ✕ 叠加，点击被劫持——点「开始」tab=最小化窗口、点侧栏收起=关窗口）。设计文档：`docs/plans/2026-09-09-titlebar-right-sidebar-collision-design.md`。Harness 页面（本地回环或已配对远程 origin）经 `http://*:* ` 通配 capability 仅授予窗口控制最小权限集（无文件/系统访问；能加载的页面由导航守卫约束）。关闭按钮走 `CloseRequested` → 语义仍为最小化到托盘。设置 / 关于窗为无边框自绘标题栏的**暖窗常驻**（`CloseRequested` 拦截为隐藏 + 启动 3 秒后台预热）——打开零渲染进程孵化（懒创建+销毁式打开在 Windows 上要孵化 WebView2 渲染进程 1~3s，杀软扫描加重）。
 - **DSH_HOME 完全独立**：dsh 使用专属 home（安装版 `%LOCALAPPDATA%\dsh-desktop-app-data\home`，便携版包内 `Data\home`），profile/预设/技能/凭证/会话全在里面随包走，**与 `~/.dsh` 零依赖**——绝不读写系统 dsh/persona 的共享目录（多版本交叉污染是历史真实故障源；旧版的一次性自动迁移已删除）。分身技能目录也在 home 内（`home/skills`）。
@@ -50,6 +50,7 @@ curl -X POST http://127.0.0.1:3080/dsh-remote/api/pairing
 
 两通道共用同一套安全网：
 
+- **自有环境前置检查**：获取安装器前检查并准备 Node/npm/DSH、固定版本 pnpm 10.34.5，以及 web profile/宿主依赖；缺失的 profile 通过自带 DSH 的正式 profile API 初始化，安装器所需的宿主镜像通过链接指向同一份自有依赖，不要求用户另装系统工具链。npm/pnpm 的 prefix、配置、缓存、store 和子进程临时目录均位于应用数据目录；
 - **装前快照** `profiles/web/package.json` + `pnpm-lock.yaml`（`suite-install-backup/`）；脚本失败或校验失败即回滚，绝不把半成品 manifest 留给下次启动（2026-09-10 真实事故：装完重启撞 `ERR_MODULE_NOT_FOUND` 把服务打崩）；
 - **装后探针**：对清单里的套件依赖逐个用宿主 Node import 其主机侧入口（复现 dsh 启动加载路径），把「装完才发现解析断裂」拦在重启之前；失败则回滚 + 精确报错 + 不重启；
 - **宿主锚定**（生产通道）：安装器把宿主已有的 `@deepseek-ai/*` 全钉到宿主版本（pnpm ≥10 的设置新家是 `pnpm-workspace.yaml`——`package.json` 的 `pnpm` 字段已不被读取，2026-09-10 实测 pnpm 12 overrides 静默失效 + 构建脚本默认拦截；overrides 与 `allowBuilds`/`onlyBuiltDependencies` 统一写 workspace yaml，pnpm 9/11/12 兼容）——dsh 0.1.x 全在预发布标签上，插件 manifest 的普通 semver 区间（如 `^0.1.2`）匹配不到任何预发布版本会直接 `ERR_PNPM_NO_MATCHING_VERSION`；锚定后解析恒成立、版本与宿主一致、pnpm 复用宿主同一 store 实体；
@@ -69,7 +70,7 @@ cargo build --release
 
 调试期冒烟：`cargo run -- --quit-after-secs 60`（到时走真实退出路径，含整树清理）。
 
-环境变量（可选）：`DSH_DESKTOP_NODE_MIRROR`（自定义 Node 镜像前缀）、`DSH_DESKTOP_NPM_REGISTRY`（npm 源）、`DSH_DESKTOP_DSH_VERSION`（固定升级目标版本）、`DSH_HOME`（传给子进程）。
+环境变量（可选）：`DSH_DESKTOP_NODE_MIRROR`（自定义 Node 镜像前缀）、`DSH_DESKTOP_NPM_REGISTRY`（npm 源）、`DSH_DESKTOP_DSH_VERSION`（固定升级目标版本）。子进程 `DSH_HOME` 由应用设置为自有 home，不继承系统 DSH 的位置。
 
 命令行参数：`--quit-after-secs N`（到时走真实退出路径，CI 冒烟用）、`--upgrade-dsh`（检查并升级 DSH 后退出）。
 
@@ -105,7 +106,7 @@ cargo build --release
 
 - macOS：已有实机迭代（WebKit 垫片、套件双通道适配、401 自愈），但未做全量回归；Linux 有路径代码与发行版矩阵，未出 CI 产物。
 - 同一会话不要在网页版与桌面版并发发消息（回合会交错写入同一会话流）。
-- `升级 DSH` 作用于便携运行时；使用系统 `dsh` 回退启动时不升级系统安装。
+- `升级 DSH` 仅作用于应用自有运行时；系统 Node/DSH 不参与运行、安装或升级。安装版首次准备运行时需要联网；便携包缺件时明确提示修复，不切换到宿主机环境。
 - 远程模式通知事件流已带壳内退避重连守护（0.1.17：2s→30s 封顶持续重试，模式切换/重连即时让位）；页面断连仍需手动「重连远程实例」或错误态「重试」。
 
 ## 安全边界

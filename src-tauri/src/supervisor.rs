@@ -403,26 +403,6 @@ pub fn spawn_dsh(app: &tauri::AppHandle, launch: Launch) -> Result<Running, Stri
             }
             c
         }
-        Launch::System => {
-            // 系统 node + 全局 dsh 包：直接 node + bin.js，避免 cmd.exe /C dsh.cmd
-            // 启动期弹窗闪烁（v0.1.28 修复）。node / bin.js 路径由 runtime 探测并缓存。
-            let node = runtime::find_system_node().ok_or_else(|| {
-                "未在 PATH 上找到 node，请先安装 Node.js 后重试".to_string()
-            })?;
-            let bin = runtime::find_system_dsh_bin().ok_or_else(|| {
-                "未找到 @deepseek-ai/dsh 全局安装，请执行 npm install -g @deepseek-ai/dsh".to_string()
-            })?;
-            let mut c = Command::new(node);
-            // 同便携分支：兜底 webview cookie jar 积累导致的 431（见上文注释）
-            c.arg("--max-http-header-size=131072");
-            c.arg(bin).arg("web");
-            // 容错：镜像旧包可能缺 --no-open，按实际能力决定是否传，避免「unknown option」崩溃
-            if install::web_supports_no_open() {
-                c.arg("--no-open");
-            }
-            c.args(["--port", &spawn_port.to_string()]);
-            c
-        }
     };
     // 多 Agent 设备消毒：opencode 安装器会把 opencode 的御符 agent token 写进
     // 用户级环境变量 YUYI_TOKEN（HKCU\Environment）。凭证服务（dsh-credentials-local）
@@ -431,6 +411,7 @@ pub fn spawn_dsh(app: &tauri::AppHandle, launch: Launch) -> Result<Running, Stri
     // 错配、吊销联动失效）。dsh 适配器 token 的正确来源是 dsh 凭证库（设置 UI 录入）
     // 或 ~/.yuyi/dsh-token（Yuyi 安装器 dsh 分支写入），绝不继承用户级 YUYI_TOKEN。
     // YUYI_HUB / YUYI_DEVICE / YUYI_YUFU_URL 是设备级公共配置（安装器语义），保留继承。
+    runtime::configure_command(&mut cmd)?;
     cmd.env_remove("YUYI_TOKEN");
     cmd.stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -589,14 +570,10 @@ pub fn spawn_dsh(app: &tauri::AppHandle, launch: Launch) -> Result<Running, Stri
     Ok(Running { child, base_url, launch_url, startup_tail: tail })
 }
 
-/// 读取已记录的启动方式；无记录时重新探测。
-/// 自愈机制：当 bootstrap_runtime 返回 NEED_AUTO_REPAIR 信号（系统 Node 版本不兼容），
-/// 自动安装便携运行时并修复插件符号链接，然后以 Portable 模式启动。
+/// 每轮启动重新检查应用自带运行时；不完整时锁内自愈，再复检后启动。
 fn resolve_launch(app: &tauri::AppHandle) -> Result<Launch, String> {
     let state: tauri::State<AppState> = app.state();
-    if let Some(l) = *state.launch.lock().unwrap() {
-        return Ok(l);
-    }
+    // 每轮重新检查，不能让缓存掩盖运行时在安装/卸载后发生的变化。
     match runtime::bootstrap_runtime() {
         Ok(launch) => {
             *state.launch.lock().unwrap() = Some(launch);
@@ -604,14 +581,15 @@ fn resolve_launch(app: &tauri::AppHandle) -> Result<Launch, String> {
         }
         Err(e) if e.starts_with(runtime::NEED_AUTO_REPAIR) => {
             // 自愈流程：自动安装便携运行时 + 修复插件符号链接
-            status::set(app, "检测到运行时不兼容，正在自动修复…");
+            status::set(app, "应用自带运行时不完整，正在自动修复…");
             if let Some(mut log) = runtime::open_log_append() {
                 use std::io::Write;
                 let _ = writeln!(log, "[自愈] 触发原因: {e}");
             }
             install::ensure_runtime_locked(app)?;
-            *state.launch.lock().unwrap() = Some(Launch::Portable);
-            Ok(Launch::Portable)
+            let launch = runtime::bootstrap_runtime()?;
+            *state.launch.lock().unwrap() = Some(launch);
+            Ok(launch)
         }
         Err(e) => Err(e),
     }
@@ -625,7 +603,7 @@ fn resolve_launch(app: &tauri::AppHandle) -> Result<Launch, String> {
 fn start_service_locked(app: &tauri::AppHandle) -> Result<(), String> {
     let state: tauri::State<AppState> = app.state();
     let launch = resolve_launch(app)?;
-    // 核心版本预检（仅便携运行时；System 回退由用户自管）：运行时核心若为
+    // 自带核心版本预检：运行时核心若为
     // 超出壳适配线（DSH_MAX_ADAPTED）的版本（如上游已发布 0.1.3+ 但壳尚未放行），
     // 插件 API 代际可能不匹配——与其让服务崩溃后报「180 秒未报告监听地址」，
     // 不如启动前给出可操作文案（0.1.18 真实故障复盘）。解析失败不拦截（宽容：
