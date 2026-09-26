@@ -389,10 +389,22 @@
     };
 
     /* ── 配置模态层 ── */
-    function renderConfig(cfg) {
+    function renderConfig(raw) {
       cfgEl.innerHTML = '';
       cfgEl.classList.toggle('open', cfgOpen);
       if (!cfgOpen) return;
+      // 入参是嵌套结构 {enabled, auto_fix, llm:{...}}（与 Rust GuardianCfg 对应），
+      // 拍平成渲染用的 key——直接读 cfg.base_url 会拿到 undefined（实机反馈
+      // 2026-09-26：保存成功但重开模态显示为空）
+      const llm = raw.llm || {};
+      const cfg = {
+        enabled: !!raw.enabled,
+        auto_fix: !!raw.auto_fix,
+        llm_enabled: !!llm.enabled,
+        base_url: llm.base_url || '',
+        model: llm.model || '',
+        api_key: llm.api_key || ''
+      };
       const el = (tag, cls, text) => {
         const e = document.createElement(tag);
         if (cls) e.className = cls;
@@ -405,7 +417,9 @@
         return t;
       };
       const switchInput = (key) => {
-        const sw = el('label', 'switch');
+        // span 而非 label：label 的原生激活会让 checkbox 翻转两次（与行点击手动
+        // 翻转抵消），开关表现为「拨不动」——实机反馈 2026-09-26
+        const sw = el('span', 'switch');
         const i = document.createElement('input');
         i.type = 'checkbox'; i.checked = !!cfg[key]; i.dataset.k = key;
         sw.appendChild(i); sw.appendChild(el('i'));
@@ -500,7 +514,7 @@
     maskEl.onclick = closeCfg;
     document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && cfgOpen) closeCfg(); });
 
-    if (listen) { listen('guardian-updated', () => refresh()); }
+    if (listen) { listen('guardian-updated', () => refresh()).catch(() => {}); }
     refresh();
   </script>
 </body>

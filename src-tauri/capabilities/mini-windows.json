@@ -1,0 +1,10 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "mini-windows",
+  "description": "壳级 mini 窗（守护报告窗 guardian / 通知中心 notifications）：仅授予事件监听权限（页面经 listen 接收刷新事件）；自定义命令不受 capabilities 约束，无需在此列出",
+  "local": true,
+  "windows": ["guardian", "notifications"],
+  "permissions": [
+    "core:event:default"
+  ]
+}
