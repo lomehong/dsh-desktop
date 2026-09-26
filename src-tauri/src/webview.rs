@@ -1,5 +1,6 @@
 //! 主窗口与 WebView 加固：导航只放行 本地加载页 与 当前 Harness origin（随机端口），
-//! 其余 http(s) 一律交给系统浏览器；Harness 页面不持有任何 Tauri IPC 权限。
+//! 其余 http(s) 一律交给系统浏览器；Harness 页面仅持有 capabilities/remote-harness.json
+//! 放行的最小窗口控制/事件通道（decorum 窗控钮依赖），自定义命令另以调用方守卫约束。
 use tauri::Manager;
 
 use crate::runtime;
@@ -14,6 +15,52 @@ pub fn is_local_url(u: &str) -> bool {
         || u == "about:blank"
 }
 
+/// 顶条菜单命令通道的保留 host（RFC 2606 `.invalid` 永不解析；导航在 WebView2 的
+/// NavigationStarting 阶段就被 on_navigation 拦截取消，早于 DNS，零网络请求）。
+/// 用导航通道兜底而非依赖 IPC：harness 远程页调用自定义命令受 capabilities 语义
+/// 影响，导航拦截不经过 IPC 面，天然可达。
+pub const DESKTOP_CMD_HOST: &str = "dsh-desktop.invalid";
+
+/// 顶条「应用」菜单的动作集。
+#[derive(Debug, Clone, Copy)]
+pub enum DesktopCmd {
+    About,
+    Settings,
+    Quit,
+}
+
+/// 解析命令通道 URL `http://dsh-desktop.invalid/cmd/<name>`（纯函数便于单测）。
+/// 仅认精确 host + `/cmd/` 前缀 + 白名单动作名；其余一律 None，走原有放行/外开
+/// 逻辑。查询串/锚点容忍（name 截断在 `?`/`#`）。
+fn desktop_cmd_of(url: &str) -> Option<DesktopCmd> {
+    let rest = url.strip_prefix("http://")?;
+    let (host, path) = rest.split_once('/')?;
+    if host != DESKTOP_CMD_HOST {
+        return None;
+    }
+    let name = path.strip_prefix("cmd/")?.split(['?', '#']).next()?;
+    match name {
+        "about" => Some(DesktopCmd::About),
+        "settings" => Some(DesktopCmd::Settings),
+        "quit" => Some(DesktopCmd::Quit),
+        _ => None,
+    }
+}
+
+/// 分发菜单命令。on_navigation 回调可能不在主线程，建窗统一投递主线程执行。
+fn run_desktop_cmd(handle: &tauri::AppHandle, cmd: DesktopCmd) {
+    let h = handle.clone();
+    let _ = handle.run_on_main_thread(move || match cmd {
+        DesktopCmd::About => {
+            let _ = crate::about::open_about_window(&h);
+        }
+        DesktopCmd::Settings => {
+            let _ = crate::settings::open_settings_window(&h);
+        }
+        DesktopCmd::Quit => h.exit(0),
+    });
+}
+
 /// 前缀必须是完整 origin：后面只能跟结尾、路径、查询或锚点，
 /// 防止 `http://127.0.0.1:44182.evil.com` 这类前缀伪装。
 fn same_origin(u: &str, origin: &str) -> bool {
@@ -25,6 +72,9 @@ fn same_origin(u: &str, origin: &str) -> bool {
 
 /// 无边框窗口：保留式顶栏带（v2，2026-09-09）。decorum 顶栏（全宽拖拽层 +
 /// 三个 58×32 窗控钮）独占窗口顶部 40px，harness 页面整体让位到带下。
+/// 【2026-09-25 起仅 macOS 沿用本方案】Windows 改走官方同款标题栏模式
+/// （WINDOWS_TITLEBAR_MODE_JS）：页面自带 [data-windows-titlebar] 规则接管布局，
+/// 外观对齐官方桌面客户端（侧栏色顶条 + 主内容 16px 圆角卡片 + 应用/编辑菜单）。
 ///
 /// 为什么从 overlay 改回让位：0.1.11 曾以「主界面顶到 y=0」为由移除让位，当时
 /// dsh 顶部两角没有功能 UI，overlay 相安无事；dsh 0.1.5+ 右侧栏的 dockkit 条带
@@ -54,6 +104,9 @@ fn same_origin(u: &str, origin: &str) -> bool {
 /// 脚本自带端口守卫（协议 http 且带端口即生效，本地回环与远程网关一视同仁）：
 /// 能加载进壳的页面只有导航守卫放行的已配对 origin，因此无需再校验具体 hostname；
 /// tauri.localhost 加载页（非 http 协议）仍是空操作。
+/// 仅 macOS 注册（Windows 走 WINDOWS_TITLEBAR_MODE_JS，此常量在 Windows 构建下
+/// 为死代码故允许 dead_code；契约测试两平台都跑，需保持定义）。
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 pub const TITLEBAR_INSET_CSS: &str = r##"
 (function () {
   // 端口守卫：任意带端口的 http 页面即视为守卫放行的 harness origin（本地回环或远程网关）。
@@ -90,6 +143,285 @@ pub const TITLEBAR_INSET_CSS: &str = r##"
 })();
 "##;
 
+/// Windows 官方同款标题栏模式（v3，2026-09-25）。Windows 专用；macOS 沿用上面的
+/// 让位带方案（TITLEBAR_INSET_CSS，红绿灯布局不同）。
+///
+/// 目标外观（对照官方桌面客户端截图）：无边框窗口顶部一条 40px 顶条，左侧是侧栏
+/// 折叠钮 + 「应用/编辑」菜单，右侧是窗控钮；主内容区是一块左上角 16px 圆角的
+/// 卡片，衬在侧栏色的窗底上，侧栏与顶条连成一体。
+///
+/// 官方机制（deepseek-harness apps/desktop）：Electron preload（preload-windows.ts）
+/// 给 html 打 `data-windows-titlebar` + `--dsh-windows-titlebar-height`，此后 dsh
+/// 前端自带的 `[data-windows-titlebar]` 规则接管一切布局——frame 顶垫 40px 且整窗
+/// 涂 sidebar-fill、顶条由 frame::before 画出（-webkit-app-region 拖拽）、中央列
+/// 变 `border-radius:16px 0 0 0` 卡片、侧栏去分隔线、logo 行下沉、折叠钮进顶条。
+/// 我们运行时安装的就是同一套前端包（规则已在产物 bundle 中实证），所以壳只负责
+/// 「打开关」+ 补 Electron 有而 wry 没有的三件事：
+///
+/// 1. 属性点亮：初始化脚本运行于文档创建期，documentElement 可能尚未生成——
+///    setInterval(0) 在解析间隙重试（官方 preload 同款「立刻 + DOMContentLoaded」
+///    分段）。必须赶在页面脚本之前：AppFrame 渲染时读 hasAttribute 决定布局。
+/// 2. decorum 容器收缩为右上窗控钮：透明底（透出页面涂的 sidebar-fill 顶条）、
+///    去 hairline（官方顶条无分隔线）、无反向平移（body 不再让位）。绝不能保留
+///    全宽容器：全宽拖拽层会劫持顶条上的折叠钮/菜单点击（v0.1.11 同款教训，
+///    见 TITLEBAR_INSET_CSS 文档）；拖拽职责移交给第 3 条。
+/// 3. 拖拽区：wry/WebView2 不支持 -webkit-app-region，官方顶条 ::before 的拖拽
+///    声明在壳内无效。改打 Tauri 的 data-tauri-drag-region：该机制只在「事件
+///    target 恰为带属性元素」时触发，AppFrame 根元素（内联
+///    `--dsh-windows-sidebar-width` 样式变量是其唯一标记，仅标题栏模式下存在）
+///    的 padding 区即顶条，点击 target 就是根元素本身；折叠钮/菜单/内容等子元素
+///    不受影响。权限经 capabilities/remote-harness.json 的 start-dragging /
+///    toggle-maximize 放行（decorum 同款通道，双击最大化由 Tauri 拖拽区自带）。
+/// 4. 「应用/编辑」顶条菜单：对齐官方 preload-menu.ts——shadow DOM 隔离、
+///    mousedown preventDefault 不把焦点拽出编辑器（官方注释原话 "without moving
+///    focus out of the active editor"，编辑项的 execCommand 才有选区可用）。
+///    「应用」三项命令双通道：首选 IPC（shell_open_about / shell_open_settings /
+///    shell_quit 自定义命令，命令侧以「仅 main 窗」降级守卫）；远程页调用被拒或
+///    IPC 不可达时回退导航命令通道（DESKTOP_CMD_HOST，on_navigation 拦截分发）。
+pub const WINDOWS_TITLEBAR_MODE_JS: &str = r##"
+(function () {
+  // 端口守卫：同旧顶栏带方案——能加载进壳的 http 页面只有导航守卫放行的已配对
+  // origin（本地回环或远程网关）；加载页 tauri.localhost 非 http 协议，天然空操作。
+  if (location.protocol !== 'http:' || location.port === '') return;
+  // 官方 preload-windows.ts 仅 win32 生效；macOS 红绿灯布局不同，壳侧不注册本脚本。
+  if (!/Windows/i.test(navigator.userAgent)) return;
+
+  // ── decorum 收缩 + 拖拽区 + 菜单（属性打上后执行一次）──
+  var rest = function () {
+    var de = document.documentElement;
+    // decorum 顶栏收缩为右上窗控钮：透明底、去 hairline、无反向平移（body 不让位）
+    var s = document.createElement('style');
+    s.id = 'dsh-desktop-titlebar-mode';
+    s.textContent =
+      '[data-tauri-decorum-tb]{position:fixed !important;top:0 !important;right:0 !important;' +
+      'left:auto !important;width:auto !important;height:40px !important;box-sizing:border-box !important;' +
+      'align-items:flex-start !important;background:transparent !important;border-bottom:none !important;' +
+      'transform:none !important;z-index:2147483647 !important}';
+    (document.head || de).appendChild(s);
+
+    // 拖拽区：AppFrame 根元素打 data-tauri-drag-region（React 挂载后才有，观察 DOM）
+    var marked = null;
+    var mark = function () {
+      if (marked && marked.isConnected) return true;
+      var el = document.querySelector('[style*="--dsh-windows-sidebar-width"]');
+      if (!el) {
+        var rootEl = document.getElementById('root');
+        el = rootEl && rootEl.firstElementChild;
+      }
+      if (!el) return false;
+      el.setAttribute('data-tauri-drag-region', '');
+      marked = el;
+      return true;
+    };
+    if (!mark()) {
+      var mo = new MutationObserver(function () {
+        if (mark()) mo.disconnect();
+      });
+      mo.observe(de, { childList: true, subtree: true });
+    }
+
+    // dockkit 停靠面板（右侧栏层，套件插件注册的顶条 tab / 悬浮把手都在这层）：
+    // position:absolute;top:0;right:0;bottom:0 锚在 frame 的 **padding 盒顶**——
+    // 绝对定位偏移不吃 padding，标题栏模式下会顶进 40px 顶条与窗控钮重叠
+    // （v0.1.5-0.1.10 实测过同款冲突）。旧让位方案靠 body 平移顺带修掉，新方案
+    // 显式下移。面板类名是 CSS Modules 哈希（随版本变），用子元素 data-* 反查
+    // 最近的三边贴边容器改内联 top；插件加载晚于首帧，定时窗口内重试。
+    var dockFix = function () {
+      var el = document.querySelector(
+        '[data-dockkit-tab],[data-dockkit-host],[data-dockkit-pane],[data-dockkit-empty]'
+      );
+      if (!el) return false;
+      var p = el.parentElement;
+      while (p && p !== document.body) {
+        var cs = getComputedStyle(p);
+        if ((cs.position === 'absolute' || cs.position === 'fixed') &&
+            cs.top === '0px' && cs.right === '0px' && cs.bottom === '0px') {
+          p.style.setProperty('top', 'var(--dsh-windows-titlebar-height)');
+          return true;
+        }
+        p = p.parentElement;
+      }
+      return false;
+    };
+    if (!dockFix()) {
+      var dockTries = 0;
+      var dockTimer = setInterval(function () {
+        dockTries += 1;
+        if (dockFix() || dockTries > 30) clearInterval(dockTimer);
+      }, 1000);
+    }
+
+    // 「应用/编辑」顶条菜单
+    installMenubar();
+  };
+
+  // ── 应用/编辑菜单：shadow DOM 隔离页面样式；mousedown preventDefault 保焦点 ──
+  var installMenubar = function () {
+    // 「应用」菜单命令：首选 IPC（自定义命令不受 capabilities 约束）；远程页调用被
+    // 拒/不可达时回退导航通道——location 指向保留 host（RFC 2606 .invalid 永不解析），
+    // 壳的 on_navigation 在 DNS 之前分发命令并取消导航，页面原地不动、零网络请求
+    // （harness 产物未注册 beforeunload，回退不会触发离页确认）。
+    var sendCmd = function (name) {
+      var fallback = function () {
+        location.href = 'http://dsh-desktop.invalid/cmd/' + name;
+      };
+      try {
+        var i = window.__TAURI_INTERNALS__;
+        if (i && typeof i.invoke === 'function') {
+          Promise.resolve(i.invoke('shell_' + name)).catch(fallback);
+          return;
+        }
+      } catch (e) { /* IPC 不可达：走导航回退 */ }
+      fallback();
+    };
+    var edit = function (name, arg) {
+      try { document.execCommand(name, false, arg || null); } catch (e) {}
+    };
+    var paste = function () {
+      try {
+        if (navigator.clipboard && navigator.clipboard.readText) {
+          navigator.clipboard.readText().then(function (t) {
+            if (t) edit('insertText', t);
+          }).catch(function () { /* 剪贴板读取被拒：静默 */ });
+        }
+      } catch (e) {}
+    };
+    var host = document.createElement('div');
+    host.id = 'dsh-desktop-menubar-host';
+    // left 跟随前端变量：侧栏收起时官方 SidebarRoot.module.css 会把它从默认
+    // 48px 改成 84px（给收起态顶条的「新会话」钮让位），写死 48px 会与之重叠
+    host.style.cssText = 'position:fixed;top:0;left:var(--dsh-windows-menu-start,48px);height:40px;z-index:2147483646;pointer-events:none;';
+    var sr = host.attachShadow({ mode: 'open' });
+    var st = document.createElement('style');
+    st.textContent =
+      '.bar{display:flex;gap:2px;height:40px;align-items:center;position:relative;pointer-events:auto;}' +
+      '.btn{appearance:none;border:0;background:none;height:28px;padding:0 10px;border-radius:6px;' +
+      'font:13px/28px var(--dsw-font-family,system-ui,"Microsoft YaHei",sans-serif);' +
+      'color:var(--dsw-alias-label-secondary,#b8bdc7);cursor:default;user-select:none;}' +
+      '.btn:hover,.btn[data-open]{color:var(--dsw-alias-label-primary,#e8ecf1);' +
+      'background:var(--dsw-alias-interactive-bg-hover,rgba(255,255,255,.08));}' +
+      '.wrap{position:relative;}' +
+      '.panel{position:absolute;top:34px;left:0;min-width:208px;padding:5px;box-sizing:border-box;' +
+      'background:var(--dsw-specific-menu,#2c2c2e);' +
+      // 官方菜单底色 token 本身带 alpha（浅色 #f8f9faf0），靠毛玻璃糊掉背后内容；
+      // 不加 backdrop-filter 会透出页面文字（实机反馈 2026-09-26）
+      'backdrop-filter:var(--dsw-menu-backdrop-filter,blur(40px) saturate(150%));' +
+      'border:1px solid var(--dsw-alias-border-l2,rgba(255,255,255,.1));' +
+      'border-radius:12px;box-shadow:0 12px 40px rgba(0,0,0,.35);pointer-events:auto;}' +
+      '.item{height:32px;line-height:32px;padding:0 10px;border-radius:8px;font-size:13px;' +
+      'color:var(--dsw-alias-label-primary,#e8e8e8);white-space:nowrap;cursor:default;user-select:none;}' +
+      '.item:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(255,255,255,.08));}' +
+      '.sep{height:1px;margin:4px 6px;background:var(--dsw-alias-border-l1,rgba(255,255,255,.08));}';
+    sr.appendChild(st);
+    var bar = document.createElement('div');
+    bar.className = 'bar';
+    bar.setAttribute('role', 'menubar');
+    sr.appendChild(bar);
+    var openWrap = null, openBtn = null;
+    var closeAll = function () {
+      if (openWrap && openWrap.parentNode) openWrap.parentNode.removeChild(openWrap);
+      if (openBtn) openBtn.removeAttribute('data-open');
+      openWrap = null;
+      openBtn = null;
+    };
+    var toggle = function (btn, fill) {
+      var wrap = btn.parentNode;
+      if (openBtn === btn) { closeAll(); return; }
+      closeAll();
+      var panel = document.createElement('div');
+      panel.className = 'panel';
+      panel.setAttribute('role', 'menu');
+      fill(panel);
+      wrap.appendChild(panel);
+      btn.setAttribute('data-open', '');
+      openWrap = panel;
+      openBtn = btn;
+    };
+    var item = function (label, fn) {
+      var el = document.createElement('div');
+      el.className = 'item';
+      el.setAttribute('role', 'menuitem');
+      el.textContent = label;
+      el.addEventListener('click', function () { closeAll(); fn(); });
+      return el;
+    };
+    var sep = function () {
+      var el = document.createElement('div');
+      el.className = 'sep';
+      return el;
+    };
+    var button = function (label, fill) {
+      var wrap = document.createElement('span');
+      wrap.className = 'wrap';
+      var btn = document.createElement('button');
+      btn.className = 'btn';
+      btn.textContent = label;
+      btn.setAttribute('role', 'menuitem');
+      btn.setAttribute('aria-haspopup', 'menu');
+      // 官方同款：mousedown preventDefault，焦点不离开编辑器，选区/撤销栈不丢
+      btn.addEventListener('mousedown', function (e) { e.preventDefault(); });
+      btn.addEventListener('click', function () { toggle(btn, fill); });
+      wrap.appendChild(btn);
+      return wrap;
+    };
+    bar.appendChild(button('应用', function (panel) {
+      panel.appendChild(item('关于 DSH Desktop', function () { sendCmd('about'); }));
+      panel.appendChild(item('设置', function () { sendCmd('settings'); }));
+      panel.appendChild(sep());
+      panel.appendChild(item('退出', function () { sendCmd('quit'); }));
+    }));
+    bar.appendChild(button('编辑', function (panel) {
+      panel.appendChild(item('撤销', function () { edit('undo'); }));
+      panel.appendChild(item('重做', function () { edit('redo'); }));
+      panel.appendChild(sep());
+      panel.appendChild(item('剪切', function () { edit('cut'); }));
+      panel.appendChild(item('复制', function () { edit('copy'); }));
+      panel.appendChild(item('粘贴', paste));
+      panel.appendChild(sep());
+      panel.appendChild(item('全选', function () { edit('selectAll'); }));
+    }));
+    // 点外面 / Esc 收起（capture：先于页面内可能的 stopPropagation）
+    document.addEventListener('pointerdown', function (e) {
+      if (openBtn && !(e.target && host.contains(e.target))) closeAll();
+    }, true);
+    document.addEventListener('keydown', function (e) {
+      if (e.key === 'Escape' && openBtn) closeAll();
+    }, true);
+    var mount = function () {
+      if (!document.body || document.getElementById('dsh-desktop-menubar-host')) return;
+      document.body.appendChild(host);
+    };
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', mount);
+    } else {
+      mount();
+    }
+  };
+
+  // ── 属性点亮：必须赶在页面脚本（React 首帧）之前。初始化脚本运行于文档创建期，
+  // documentElement 可能尚未生成——setInterval(0) 在解析间隙重试（官方 preload
+  // 同款「立刻 + 稍后」分段；带 10s 上限兜底，防止异常页空转）。
+  var markAttr = function () {
+    if (!document.documentElement) return false;
+    document.documentElement.dataset.windowsTitlebar = '';
+    document.documentElement.style.setProperty('--dsh-windows-titlebar-height', '40px');
+    return true;
+  };
+  if (markAttr()) {
+    rest();
+  } else {
+    var t0 = setInterval(function () {
+      if (markAttr()) {
+        clearInterval(t0);
+        rest();
+      }
+    }, 0);
+    setTimeout(function () { clearInterval(t0); }, 10000);
+  }
+})();
+"##;
+
+
 /// decorum 顶栏按钮原本用 Segoe Fluent Icons 的 PUA 字符（\uE921 最小化、
 /// \uE922/\uE923 最大化、\uE8BB 关闭），该字体在很多机器上不命中而显示豆腐块。
 /// 替换策略：保持 decorum 自己注入 PUA 字符不变（最大化按钮在窗口最大化时
@@ -102,11 +434,11 @@ pub const DECORUM_ICON_CSS: &str = r##"
     s.textContent =
       '.decorum-tb-btn{font-size:10px !important;line-height:1;display:flex !important;' +
       'align-items:center !important;justify-content:center !important;' +
-      'color:#9aa3af !important;' +
+      'color:var(--dsw-alias-label-tertiary,#9aa3af) !important;' +
       // decorum 默认 font-family: 'Segoe Fluent Icons', 'Segoe MDL2 Assets'
       // 缺一即豆腐块；改为多级回退链确保任意 Windows 都命中（Segoe MDL2 Assets 至少 Win7+ 必有）
       'font-family:"Segoe Fluent Icons","Segoe MDL2 Assets","SegoeIcons","Segoe Symbol","Segoe UI Symbol",sans-serif !important}' +
-      '.decorum-tb-btn:hover{color:#e8ecf1 !important}' +
+      '.decorum-tb-btn:hover{color:var(--dsw-alias-label-primary,#e8ecf1) !important}' +
       '#decorum-tb-close:hover{background-color:rgba(232,17,35,0.85) !important;color:#fff !important}';
     (document.head || document.documentElement).appendChild(s);
   };
@@ -380,8 +712,10 @@ pub const MODE_BADGE_JS: &str = r##"
 "##;
 
 /// 创建主窗口（程序化创建以挂导航守卫；配置文件中 windows 留空）。
-/// 无边框：decorum 覆盖式标题栏（Windows 悬浮原生风格按钮；macOS Overlay 红绿灯），
-/// Harness 页面经 TITLEBAR_INSET_CSS 下移，不被悬浮条遮挡。
+/// 无边框：decorum 覆盖式标题栏（Windows 悬浮原生风格按钮；macOS Overlay 红绿灯）。
+/// 标题栏注入脚本按平台分叉：Windows 走官方同款标题栏模式（WINDOWS_TITLEBAR_MODE_JS，
+/// 侧栏色顶条 + 圆角内容卡片 + 应用/编辑菜单）；macOS 沿用让位带（TITLEBAR_INSET_CSS，
+/// Harness 页面整体下移 40px，不被红绿灯/悬浮条遮挡）。
 /// 脚本自带端口守卫（任意带端口的 http 页面生效——能加载进壳的只有导航守卫放行的
 /// 已配对 origin，本地回环或远程网关皆适用），对 tauri.localhost
 /// 加载页是空操作——v0.1.5 曾误判它会折坏加载页改为导航后 250ms eval 注入，
@@ -409,15 +743,24 @@ pub fn create_main_window(app: &tauri::AppHandle) -> tauri::Result<()> {
             .title_bar_style(tauri::TitleBarStyle::Overlay)
             .hidden_title(true);
     }
+    // 标题栏注入脚本按平台分叉（Windows 官方模式 v3 / macOS 让位带 v2）
+    #[cfg(windows)]
+    let builder = builder.initialization_script(WINDOWS_TITLEBAR_MODE_JS);
+    #[cfg(not(windows))]
+    let builder = builder.initialization_script(TITLEBAR_INSET_CSS);
     let window = builder
         .initialization_script(MODE_BADGE_JS)
         .initialization_script(SUITE_PROGRESS_JS)
         .initialization_script(SECURE_CONTEXT_SHIM_JS)
         .initialization_script(WEBKIT_ES2025_SHIM_JS)
-        .initialization_script(TITLEBAR_INSET_CSS)
         .initialization_script(DECORUM_ICON_CSS)
         .on_navigation(move |url| {
             let u = url.as_str().to_string();
+            // 顶条菜单命令通道（保留 host，DNS 之前拦截取消，页面原地不动）
+            if let Some(cmd) = desktop_cmd_of(&u) {
+                run_desktop_cmd(&handle, cmd);
+                return false;
+            }
             if is_local_url(&u) {
                 return true;
             }
@@ -698,10 +1041,30 @@ mod tests {
         assert!(build_auth_cookie(url, "=v1.x").is_none());
     }
 
-    /// 顶栏带 v2 契约：页面让位（100% 链收缩 + body transform）、decorum 容器反向
-    /// 平移回窗口顶并保持最高层。任一断言失败都会让 dsh 右侧栏 dockkit 条带
-    /// （0.1.5+ 专职占据窗口右上角）重新与窗控钮/拖拽层重叠——点「开始」tab 会
-    /// 最小化窗口、点侧栏收起会关窗口。设计文档：
+    /// 命令通道 URL 解析：精确 host + 白名单动作；伪装 host/非 http/动作名外一律 None。
+    #[test]
+    fn desktop_cmd_channel_parses_reserved_host_only() {
+        use DesktopCmd::{About, Quit, Settings};
+        assert!(matches!(desktop_cmd_of("http://dsh-desktop.invalid/cmd/about"), Some(About)));
+        assert!(matches!(
+            desktop_cmd_of("http://dsh-desktop.invalid/cmd/settings?x=1#frag"),
+            Some(Settings)
+        ));
+        assert!(matches!(desktop_cmd_of("http://dsh-desktop.invalid/cmd/quit"), Some(Quit)));
+        // 动作白名单外
+        assert!(desktop_cmd_of("http://dsh-desktop.invalid/cmd/other").is_none());
+        // host 伪装 / 非 http / 裸 host
+        assert!(desktop_cmd_of("http://evil.invalid/cmd/about").is_none());
+        assert!(desktop_cmd_of("http://dsh-desktop.invalid.evil.com/cmd/about").is_none());
+        assert!(desktop_cmd_of("https://dsh-desktop.invalid/cmd/about").is_none());
+        assert!(desktop_cmd_of("http://dsh-desktop.invalid").is_none());
+    }
+
+    /// 顶栏带 v2 契约（macOS 沿用；Windows 已改走 WINDOWS_TITLEBAR_MODE_JS）：
+    /// 页面让位（100% 链收缩 + body transform）、decorum 容器反向平移回窗口顶并
+    /// 保持最高层。任一断言失败都会让 dsh 右侧栏 dockkit 条带（0.1.5+ 专职占据
+    /// 窗口右上角）重新与窗控钮/拖拽层重叠——点「开始」tab 会最小化窗口、点侧栏
+    /// 收起会关窗口。设计文档：
     /// docs/plans/2026-09-09-titlebar-right-sidebar-collision-design.md
     #[test]
     fn titlebar_inset_css_reserves_titlebar_band() {
@@ -740,6 +1103,75 @@ mod tests {
         assert!(
             s.contains("box-sizing:border-box"),
             "分隔线会画到带外（应含在 40px 带内）"
+        );
+    }
+
+    /// Windows 官方标题栏模式契约（v3）：属性点亮 + decorum 收缩 + 拖拽区 +
+    /// 应用/编辑菜单。对应官方 apps/desktop 的 preload-windows.ts / preload-menu.ts。
+    #[test]
+    fn windows_titlebar_mode_js_lights_official_mode() {
+        let s = WINDOWS_TITLEBAR_MODE_JS;
+        // 端口守卫必须保留：加载页（tauri.localhost，非 http 或无端口）是空操作
+        assert!(
+            s.contains("location.protocol !== 'http:' || location.port === ''"),
+            "缺少端口守卫"
+        );
+        // 点亮 dsh 前端自带的 [data-windows-titlebar] 布局（与官方 preload 对齐）
+        assert!(
+            s.contains("dataset.windowsTitlebar = ''"),
+            "未打 data-windows-titlebar 属性"
+        );
+        assert!(
+            s.contains("'--dsh-windows-titlebar-height', '40px'"),
+            "缺少标题栏高度变量"
+        );
+        // decorum 收缩为右上窗控钮：透明底透出页面 sidebar-fill 顶条；hairline 移除
+        assert!(
+            s.contains("right:0 !important") && s.contains("width:auto !important"),
+            "decorum 容器未收缩到右上角（全宽会劫持顶条折叠钮/菜单，v0.1.11 教训）"
+        );
+        assert!(
+            s.contains("background:transparent !important"),
+            "decorum 容器未透明（会盖住页面顶条底色）"
+        );
+        assert!(
+            !s.contains("border-bottom:1px solid"),
+            "官方顶条无分隔线，hairline 应移除"
+        );
+        // 拖拽区：AppFrame 根元素标记 + data-tauri-drag-region（wry 不认 app-region）
+        assert!(
+            s.contains("data-tauri-drag-region"),
+            "缺少拖拽区标记"
+        );
+        assert!(
+            s.contains("--dsh-windows-sidebar-width"),
+            "缺少 AppFrame 根元素定位标记（仅标题栏模式下内联存在）"
+        );
+        // dockkit 面板下移（absolute top:0 锚 frame padding 盒顶，不处理会顶进顶条）
+        assert!(
+            s.contains("data-dockkit-tab") && s.contains("var(--dsh-windows-titlebar-height)"),
+            "缺少 dockkit 停靠面板下移兜底"
+        );
+        // 应用/编辑菜单：shadow DOM + 保焦点 + 命令通道 + 编辑命令。
+        // 命令双通道：IPC 首选（shell_<name>），被拒回退导航通道（保留 .invalid host）
+        for needle in [
+            "attachShadow",
+            "'应用'", "'编辑'", "'关于 DSH Desktop'", "'设置'", "'退出'",
+            "'撤销'", "'重做'", "'剪切'", "'复制'", "'粘贴'", "'全选'",
+            "'shell_' + name", "dsh-desktop.invalid/cmd/", "sendCmd",
+            "document.execCommand", "preventDefault",
+        ] {
+            assert!(s.contains(needle), "菜单缺少 {needle}");
+        }
+        // 菜单起始位置跟随前端变量（侧栏收起时官方规则把 48px 改 84px，写死会重叠）
+        assert!(
+            s.contains("var(--dsh-windows-menu-start,48px)"),
+            "菜单 left 未跟随 --dsh-windows-menu-start"
+        );
+        // 下拉底色 = 官方半透明 token + 毛玻璃（官方菜单靠 backdrop-filter 保证可读）
+        assert!(
+            s.contains("backdrop-filter:var(--dsw-menu-backdrop-filter"),
+            "下拉面板缺少毛玻璃（半透明底会透出页面文字）"
         );
     }
 

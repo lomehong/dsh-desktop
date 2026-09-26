@@ -57,6 +57,8 @@ struct AppState {
 }
 
 /// 自定义命令只服务本地加载页；Harness 远程页面调用一律拒绝（IPC 零授权边界在命令层再拦一道）。
+/// 唯一例外：shell_open_about / shell_open_settings / shell_quit（顶条「应用」菜单，
+/// 调用方是 harness 远程页），守卫降级为「仅 main 窗」——见命令处文档。
 pub(crate) fn caller_is_local(window: &tauri::WebviewWindow) -> bool {
     window
         .url()
@@ -98,6 +100,34 @@ fn open_runtime_dir(window: tauri::WebviewWindow, _app: tauri::AppHandle) {
         return;
     }
     webview::open_external(&runtime::runtime_root().display().to_string());
+}
+
+/// 顶条「应用/编辑」菜单动作（WINDOWS_TITLEBAR_MODE_JS，调用方是 harness 远程页）：
+/// 不能用 caller_is_local（那会把远程 origin 一律拒掉），守卫降级为「仅 main 窗」——
+/// 能进 main 窗的页面都经导航守卫放行（只认已配对 origin），且这三个动作仅开本地
+/// 窗/退出进程，无文件与系统面。
+#[tauri::command]
+fn shell_open_about(window: tauri::WebviewWindow, app: tauri::AppHandle) {
+    if window.label() != "main" {
+        return;
+    }
+    let _ = about::open_about_window(&app);
+}
+
+#[tauri::command]
+fn shell_open_settings(window: tauri::WebviewWindow, app: tauri::AppHandle) {
+    if window.label() != "main" {
+        return;
+    }
+    let _ = settings::open_settings_window(&app);
+}
+
+#[tauri::command]
+fn shell_quit(window: tauri::WebviewWindow, app: tauri::AppHandle) {
+    if window.label() != "main" {
+        return;
+    }
+    app.exit(0);
 }
 
 /// 首启安装引导：下载便携 Node + 安装固定版本 dsh，完成后自动启动服务。
@@ -611,7 +641,10 @@ fn main() {
             about::about_info,
             about::about_check_update,
             about::about_install_update,
-            about::about_open_repo
+            about::about_open_repo,
+            shell_open_about,
+            shell_open_settings,
+            shell_quit
         ])
         .setup(|app| {
             let handle = app.handle().clone();
