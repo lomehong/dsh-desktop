@@ -46,6 +46,24 @@ pub fn list() -> Vec<NoticeRecord> {
     HISTORY.lock().unwrap().clone()
 }
 
+/// 完整提醒链（语义对齐 events.rs 的 present）：历史 + 主窗未聚焦时闪烁任务栏
+/// + OS 原生通知 + 托盘角标。供守护 Agent 等非事件流来源使用——半自动模式下
+/// 立案提醒靠它保证可见性。
+pub fn present(app: &tauri::AppHandle, title: &str, body: &str) {
+    use tauri_plugin_notification::NotificationExt;
+    record(app, title, body);
+    let Some(w) = app.get_webview_window("main") else { return };
+    let focused = w.is_focused().unwrap_or(false);
+    let visible = w.is_visible().unwrap_or(false);
+    if !focused {
+        let _ = w.request_user_attention(Some(tauri::UserAttentionType::Informational));
+    }
+    if !(visible && focused) {
+        let _ = app.notification().builder().title(title).body(body).show();
+        crate::tray::bump_unread(app);
+    }
+}
+
 pub fn clear() {
     HISTORY.lock().unwrap().clear();
 }

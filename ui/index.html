@@ -4,154 +4,201 @@
 <meta charset="UTF-8" />
 <title>DSH Desktop</title>
 <style>
+  /* ── 启动控制台：这个页面是进程监督器，不是海报。
+     视觉锚定它几秒后要交棒的 harness 深色界面（#151517 / deepseek 蓝），
+     用等宽日志行呈现真实启动阶段，状态色只出现在状态上。 ── */
+  :root {
+    --bg: #131417;
+    --line: rgba(255, 255, 255, 0.08);
+    --t1: #e6e9ee;
+    --t2: #9aa3ae;
+    --t3: #737d89;
+    --accent: #4176e6;
+    --ok: #3fbf7f;
+    --err: #e5645c;
+    --mono: "Cascadia Mono", "JetBrains Mono", Consolas, "Courier New", monospace;
+  }
   * { margin: 0; padding: 0; box-sizing: border-box; }
   html, body { height: 100%; }
   body {
-    font-family: "Microsoft YaHei", "PingFang SC", system-ui, sans-serif;
-    background: linear-gradient(135deg, #1c2431 0%, #2b3a55 60%, #33475f 100%);
-    color: #e8ecf1;
-    display: flex; flex-direction: column; align-items: center; justify-content: center;
-    gap: 22px; user-select: none;
-  }
-  /* v0.1.4 引入向导时把启动页元素包进 #boot 但漏了样式迁移：
-     居中/垂直分布/gap 原先定义在 body 上（元素是 body 直接子级），
-     包裹层一加布局全部失效——内容堆成一坨。样式必须跟到 #boot 上。 */
-  #boot {
-    display: flex; flex-direction: column; align-items: center; justify-content: center;
-    gap: 22px; width: 100%; height: 100%;
-  }
-  .logo {
-    width: 84px; height: 84px; border-radius: 22px;
-    background: linear-gradient(135deg, #4a6cf7, #7b5cf0);
+    font-family: "Segoe UI", "Microsoft YaHei", "PingFang SC", system-ui, sans-serif;
+    background: var(--bg); color: var(--t1);
     display: flex; align-items: center; justify-content: center;
-    font-size: 38px; font-weight: 700;
-    box-shadow: 0 10px 30px rgba(74, 108, 247, 0.35);
-    animation: breathe 3.2s ease-in-out infinite;
+    user-select: none;
   }
-  @keyframes breathe {
-    0%, 100% { box-shadow: 0 10px 30px rgba(74, 108, 247, 0.35); }
-    50% { box-shadow: 0 10px 42px rgba(123, 92, 240, 0.55); }
+  .col { width: min(600px, calc(100% - 64px)); }
+  .brand {
+    font-size: 12px; color: var(--t3); letter-spacing: 0.02em;
+    margin-bottom: 40px; display: flex; align-items: baseline; gap: 10px;
   }
-  .title { font-size: 20px; font-weight: 600; letter-spacing: 1px; }
-  .spinner {
-    width: 26px; height: 26px; border-radius: 50%;
-    border: 3px solid rgba(255,255,255,0.18); border-top-color: #7b9bff;
-    animation: spin 0.9s linear infinite;
+  .brand b { color: var(--t2); font-weight: 600; }
+
+  /* ── 启动阶段轨：真实流程序列，完成打勾、当前亮行带光标 ── */
+  #boot { display: flex; flex-direction: column; width: 100%; }
+  #log { font-family: var(--mono); font-size: 13px; }
+  .stage {
+    display: flex; align-items: center; gap: 12px;
+    height: 30px; color: var(--t3);
   }
-  @keyframes spin { to { transform: rotate(360deg); } }
-  #status { font-size: 13px; color: #aeb9c8; min-height: 20px; max-width: 560px; text-align: center; white-space: pre-wrap; }
-  #status.error { color: #ff8f8f; }
-  /* v0.1.29+ C4：阶段进度条。宽度由 JS 按状态文案关键字映射（0~100），
-     就绪/错误态分别变色；未映射阶段保持当前宽度不回退。 */
+  .stage .mark {
+    width: 18px; flex: none; text-align: center;
+    color: var(--t3); font-size: 12px;
+  }
+  .stage.done { color: var(--t3); }
+  .stage.done .mark { color: var(--ok); }
+  .stage.now { color: var(--t1); }
+  .stage.now .mark::after {
+    content: ""; display: inline-block;
+    width: 7px; height: 13px; margin-top: 2px;
+    background: var(--accent);
+    animation: caret 1.05s steps(1) infinite;
+  }
+  @keyframes caret { 50% { opacity: 0; } }
+  /* 尾行 = 监督器的原文（等宽，逐字来自状态机） */
+  #status {
+    font-family: var(--mono); font-size: 12px; color: var(--t2);
+    margin-top: 14px; min-height: 18px;
+    white-space: pre-wrap; word-break: break-all;
+  }
+  #status.error { color: var(--err); }
+
+  /* 进度：2px 精细轨道，纯色填充；错误红 / 就绪绿 */
   #bar-wrap {
-    width: 340px; height: 4px; border-radius: 2px;
-    background: rgba(255,255,255,0.10); overflow: hidden; display: none;
+    width: 100%; height: 2px; border-radius: 1px;
+    background: var(--line); overflow: hidden; display: none;
+    margin-top: 18px;
   }
   #bar-wrap.show { display: block; }
   #bar {
     height: 100%; width: 0%;
-    background: linear-gradient(90deg, #4a6cf7, #7b5cf0);
-    border-radius: 2px;
+    background: var(--accent); border-radius: 1px;
     transition: width .45s ease;
   }
-  #bar-wrap.error #bar { background: #ff6b6b; }
-  #bar-wrap.ready #bar { background: linear-gradient(90deg, #46b98a, #4a6cf7); }
-  .hint { font-size: 12px; color: #6d7a8a; }
-  .actions, #remote-actions { display: none; gap: 12px; flex-wrap: wrap; justify-content: center; }
+  #bar-wrap.error #bar { background: var(--err); }
+  #bar-wrap.ready #bar { background: var(--ok); }
+
+  .hint { font-size: 11px; color: var(--t3); margin-top: 14px; }
+
+  /* 恢复动作：控制台式描边按钮；「安装运行环境」是主路径，实心 accent */
+  .actions, #remote-actions { display: none; gap: 10px; flex-wrap: wrap; margin-top: 22px; }
   .actions button, #remote-actions button {
-    padding: 8px 18px; border-radius: 8px; border: 1px solid rgba(255,255,255,0.25);
-    background: rgba(255,255,255,0.08); color: #e8ecf1; font-size: 13px; cursor: pointer;
+    font: inherit; font-size: 13px; cursor: pointer;
+    padding: 8px 16px; border-radius: 8px;
+    border: 1px solid rgba(255,255,255,0.16);
+    background: transparent; color: var(--t1);
+    transition: border-color .15s, background .15s;
   }
-  .actions button:hover, #remote-actions button:hover { background: rgba(255,255,255,0.16); }
+  .actions button:hover, #remote-actions button:hover {
+    border-color: rgba(255,255,255,0.34); background: rgba(255,255,255,0.05);
+  }
+  #btn-install {
+    background: var(--accent); border-color: var(--accent); color: #fff;
+  }
+  #btn-install:hover { background: #4d80f0; border-color: #4d80f0; }
+
   /* ── 分身信息向导（便携版首启）与远程连接屏共用同套表单样式 ── */
-  #wizard, #connect { display: none; flex-direction: column; gap: 10px; width: 560px; max-height: 62vh; }
+  #wizard, #connect { display: none; flex-direction: column; gap: 10px; width: min(600px, calc(100% - 64px)); max-height: 74vh; }
   #wizard.open, #connect.open { display: flex; }
-  #wizard h2, #connect h2 { font-size: 16px; font-weight: 600; text-align: center; }
-  #wizard .subtitle, #connect .subtitle { font-size: 12px; color: #8b98ab; text-align: center; margin-bottom: 4px; }
-  #wizard .grid, #connect .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 14px; overflow-y: auto; padding-right: 4px; }
-  #wizard .field, #connect .field { display: flex; flex-direction: column; gap: 3px; }
+  #wizard h2, #connect h2 { font-size: 16px; font-weight: 600; }
+  #wizard .subtitle, #connect .subtitle { font-size: 12px; color: var(--t2); margin-bottom: 8px; }
+  #wizard .grid, #connect .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px 14px; overflow-y: auto; padding-right: 4px; }
+  #wizard .field, #connect .field { display: flex; flex-direction: column; gap: 4px; }
   #wizard .field.wide, #connect .field.wide { grid-column: 1 / -1; }
-  #wizard label, #connect label { font-size: 12px; color: #aeb9c8; }
+  #wizard label, #connect label { font-size: 12px; color: var(--t2); }
   #wizard input, #wizard textarea, #connect input {
-    font: inherit; font-size: 13px; color: #e8ecf1;
-    background: rgba(255,255,255,0.07); border: 1px solid rgba(255,255,255,0.18);
-    border-radius: 7px; padding: 7px 10px; outline: none;
+    font: inherit; font-size: 13px; color: var(--t1);
+    background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.14);
+    border-radius: 8px; padding: 8px 10px; outline: none;
+    transition: border-color .15s;
   }
-  #wizard input:focus, #wizard textarea:focus, #connect input:focus { border-color: #7b9bff; }
+  #wizard input:focus, #wizard textarea:focus, #connect input:focus { border-color: var(--accent); }
   #wizard textarea { resize: vertical; min-height: 56px; }
-  #wizard .row-end, #connect .row-end { display: flex; gap: 12px; justify-content: flex-end; margin-top: 4px; }
+  #wizard .row-end, #connect .row-end { display: flex; gap: 12px; justify-content: flex-end; margin-top: 6px; align-items: center; }
   #wizard button.primary, #connect button.primary {
     padding: 9px 26px; border-radius: 8px; border: none; cursor: pointer;
-    background: linear-gradient(135deg, #4a6cf7, #7b5cf0); color: #fff; font-size: 14px;
+    background: var(--accent); color: #fff; font-size: 14px;
+    transition: background .15s;
   }
+  #wizard button.primary:hover, #connect button.primary:hover { background: #4d80f0; }
   #wizard button.primary:disabled, #connect button.primary:disabled { opacity: 0.5; cursor: wait; }
-  #wizard .skip, #connect .skip { font-size: 12px; color: #6d7a8a; background: none; border: none; cursor: pointer; padding: 9px 6px; }
-  #wizard .cred-title { grid-column: 1 / -1; font-size: 12px; color: #8b98ab; margin-top: 6px;
-    border-top: 1px dashed rgba(255,255,255,0.15); padding-top: 10px; }
+  #wizard .skip, #connect .skip { font-size: 12px; color: var(--t3); background: none; border: none; cursor: pointer; padding: 9px 6px; }
+  #wizard .skip:hover, #connect .skip:hover { color: var(--t2); }
+  #wizard .cred-title { grid-column: 1 / -1; font-size: 12px; color: var(--t2); margin-top: 6px;
+    border-top: 1px solid var(--line); padding-top: 10px; }
   /* 连接屏表单内的动态状态行（配对链接解析失败 / 连接错误提示） */
-  #connect-status { font-size: 12px; color: #ff8f8f; min-height: 16px; text-align: center; white-space: pre-wrap; }
+  #connect-status { font-size: 12px; color: var(--err); min-height: 16px; white-space: pre-wrap; }
+
+  @media (prefers-reduced-motion: reduce) {
+    .stage.now .mark::after { animation: none; }
+    #bar, .actions button, #remote-actions button { transition: none; }
+  }
 </style>
 </head>
 <body>
-  <div id="boot">
-    <div class="logo">DSH</div>
-    <div class="title">DSH Desktop</div>
-    <div class="spinner" id="spinner"></div>
-    <div id="status">正在启动运行时…</div>
-    <div id="bar-wrap"><div id="bar"></div></div>
-    <div class="actions" id="actions">
-      <button id="btn-install">安装运行环境</button>
-      <button id="btn-log">打开日志</button>
-      <button id="btn-dir">打开数据目录</button>
+  <div class="col">
+    <div class="brand"><b>DSH Desktop</b><span>本地运行环境</span></div>
+
+    <!-- v0.1.4 引入向导时把启动页元素包进 #boot 但漏了样式迁移：
+         居中/垂直分布/gap 原先定义在 body 上（元素是 body 直接子级），
+         包裹层一加布局全部失效——内容堆成一坨。样式必须跟到容器上。 -->
+    <div id="boot" data-state="running">
+      <div id="log"></div>
+      <div id="status">正在检查运行环境</div>
+      <div id="bar-wrap"><div id="bar"></div></div>
+      <div class="actions" id="actions">
+        <button id="btn-install">安装运行环境</button>
+        <button id="btn-log">打开日志</button>
+        <button id="btn-dir">打开数据目录</button>
+      </div>
+      <!-- 远程模式错误态按钮组（s.remote && s.error 时替换 #actions；日志/数据目录两模式都有） -->
+      <div class="actions" id="remote-actions">
+        <button id="btn-retry">重试</button>
+        <button id="btn-edit-remote">修改远程配置</button>
+        <button id="btn-tolocal">回到本地模式</button>
+        <button id="btn-log-remote">打开日志</button>
+        <button id="btn-dir-remote">打开数据目录</button>
+      </div>
+      <div class="hint" id="hint">首次启动需要下载运行环境，约 10~60 秒</div>
     </div>
-    <!-- 远程模式错误态按钮组（s.remote && s.error 时替换 #actions；日志/数据目录两模式都有） -->
-    <div class="actions" id="remote-actions">
-      <button id="btn-retry">重试</button>
-      <button id="btn-edit-remote">修改远程配置</button>
-      <button id="btn-tolocal">回到本地模式</button>
-      <button id="btn-log-remote">打开日志</button>
-      <button id="btn-dir-remote">打开数据目录</button>
-    </div>
-    <div class="hint">首次启动约需 10~60 秒，请稍候</div>
+
+    <form id="wizard" autocomplete="off">
+      <h2>数字分身 · 分身信息配置</h2>
+      <div class="subtitle">保存后立即启动分身；之后可从托盘菜单「重新运行分身向导」修改</div>
+      <div class="grid">
+        <div class="field"><label>主人姓名</label><input name="owner" required></div>
+        <div class="field"><label>职务 / 角色</label><input name="ownerTitle"></div>
+        <div class="field"><label>人设定位（AI 与主人的关系）</label><input name="ownerStance"></div>
+        <div class="field"><label>称呼习惯（分身对主人的称呼）</label><input name="ownerAddress"></div>
+        <div class="field wide"><label>分管领域 / 工作范围</label><input name="ownerScope"></div>
+        <div class="field"><label>分身名字（分身的自称）</label><input name="twinName"></div>
+        <div class="field"><label>分身别名（逗号分隔，哪些称呼指它自己）</label><input name="twinAliases"></div>
+        <div class="field wide"><label>工作习惯 / 沟通风格</label><textarea name="ownerStyle"></textarea></div>
+        <div class="cred-title">企业微信（可选，也可之后在 设置 → 手机连接 配置）</div>
+        <div class="field"><label>BotID</label><input name="botId" placeholder="可选"></div>
+        <div class="field"><label>Secret</label><input name="secret" type="password" placeholder="可选"></div>
+      </div>
+      <div class="row-end">
+        <button type="button" class="skip" id="btn-skip">暂不配置，直接启动</button>
+        <button type="submit" class="primary" id="btn-save">保存并启动</button>
+      </div>
+    </form>
+
+    <!-- 连接远程实例：地址 + 配对码；配对码栏可直接粘贴整条配对链接自动拆填 -->
+    <form id="connect" autocomplete="off">
+      <h2>连接远程实例</h2>
+      <div class="subtitle">配对成功后本壳将切换为远端分身；凭据保存在本机</div>
+      <div class="grid">
+        <div class="field wide"><label>远程地址</label><input name="remoteAddr" placeholder="192.168.1.146:3090"></div>
+        <div class="field wide"><label>配对码</label><input name="remoteCode" placeholder="粘贴配对链接或输入配对码"></div>
+      </div>
+      <div class="subtitle">（配对码从远端 dsh 设置页「远程访问」Tab 生成，10 分钟内有效、仅可用一次）</div>
+      <div id="connect-status"></div>
+      <div class="row-end">
+        <button type="button" class="skip" id="btn-connect-cancel">取消</button>
+        <button type="submit" class="primary" id="btn-connect">连接</button>
+      </div>
+    </form>
   </div>
-
-  <form id="wizard" autocomplete="off">
-    <h2>数字分身 · 分身信息配置</h2>
-    <div class="subtitle">保存后立即启动分身；之后可从托盘菜单「重新运行分身向导」修改</div>
-    <div class="grid">
-      <div class="field"><label>主人姓名</label><input name="owner" required></div>
-      <div class="field"><label>职务 / 角色</label><input name="ownerTitle"></div>
-      <div class="field"><label>人设定位（AI 与主人的关系）</label><input name="ownerStance"></div>
-      <div class="field"><label>称呼习惯（分身对主人的称呼）</label><input name="ownerAddress"></div>
-      <div class="field wide"><label>分管领域 / 工作范围</label><input name="ownerScope"></div>
-      <div class="field"><label>分身名字（分身的自称）</label><input name="twinName"></div>
-      <div class="field"><label>分身别名（逗号分隔，哪些称呼指它自己）</label><input name="twinAliases"></div>
-      <div class="field wide"><label>工作习惯 / 沟通风格</label><textarea name="ownerStyle"></textarea></div>
-      <div class="cred-title">企业微信（可选，也可之后在 设置 → 手机连接 配置）</div>
-      <div class="field"><label>BotID</label><input name="botId" placeholder="可选"></div>
-      <div class="field"><label>Secret</label><input name="secret" type="password" placeholder="可选"></div>
-    </div>
-    <div class="row-end">
-      <button type="button" class="skip" id="btn-skip">暂不配置，直接启动</button>
-      <button type="submit" class="primary" id="btn-save">保存并启动</button>
-    </div>
-  </form>
-
-  <!-- 连接远程实例：地址 + 配对码；配对码栏可直接粘贴整条配对链接自动拆填 -->
-  <form id="connect" autocomplete="off">
-    <h2>连接远程实例</h2>
-    <div class="subtitle">配对成功后本壳将切换为远端分身；凭据保存在本机</div>
-    <div class="grid">
-      <div class="field wide"><label>远程地址</label><input name="remoteAddr" placeholder="192.168.1.146:3090"></div>
-      <div class="field wide"><label>配对码</label><input name="remoteCode" placeholder="粘贴配对链接或输入配对码"></div>
-    </div>
-    <div class="subtitle">（配对码从远端 dsh 设置页「远程访问」Tab 生成，10 分钟内有效、仅可用一次）</div>
-    <div id="connect-status"></div>
-    <div class="row-end">
-      <button type="button" class="skip" id="btn-connect-cancel">取消</button>
-      <button type="submit" class="primary" id="btn-connect">连接</button>
-    </div>
-  </form>
 
   <script>
     const boot = document.getElementById('boot');
@@ -168,6 +215,42 @@
     let stopped = false;
     let wizardMode = false;
     let connectMode = false;
+
+    /* ── 启动阶段轨：五段是 supervisor 的真实流程（自检→运行时→服务→探活→换证加载）。
+       关键字映射与进度条共用一套词表；阶段只前进不回退。 ── */
+    const STAGES = ['环境自检', '运行时就绪', '启动服务', '就绪探活', '凭证与界面'];
+    const logEl = document.getElementById('log');
+    let stage = 0;
+
+    function stageIndex(text) {
+      const t = text || '';
+      if (t.includes('下载') || t.includes('解压') || t.includes('安装 DSH') || t.includes('正在安装')
+        || t.includes('自愈') || t.includes('修复') || t.includes('迁移')) return 1;
+      if (t.includes('重启服务') || t.includes('切换到本地') || t.includes('重连远程') || t.includes('正在启动')) return 2;
+      if (t.includes('等待服务就绪') || t.includes('配对成功')) return 3;
+      if (t.includes('连接远程实例')) return 4;
+      return 0;
+    }
+
+    function renderStages(text, isErr, isReady) {
+      const target = isReady ? STAGES.length : stageIndex(text);
+      if (target > stage) stage = target;
+      logEl.innerHTML = '';
+      STAGES.forEach((name, i) => {
+        const done = isReady || i < stage;
+        const now = !isReady && i === stage;
+        const row = document.createElement('div');
+        row.className = 'stage' + (done ? ' done' : now ? ' now' : '');
+        const mark = document.createElement('span');
+        mark.className = 'mark';
+        mark.textContent = done ? '✓' : now ? '' : '·';
+        row.appendChild(mark);
+        row.appendChild(document.createTextNode(name));
+        logEl.appendChild(row);
+      });
+      // 状态供 CSS 区分：光标只在 running 态闪烁，error/ready 静止
+      boot.dataset.state = isErr ? 'error' : isReady ? 'ready' : 'running';
+    }
 
     // ── C4 阶段进度条：状态文案关键字 → 进度百分比。单调不回退（进行中阶段只前进）；
     //    错误/就绪是终态（错误停在当前宽度并变红，就绪推满并变绿）。
@@ -273,6 +356,7 @@
         el.classList.add('error'); spinner.style.display = 'none';
         stopped = true;
         setProgress(s.text, true, false);
+        renderStages(s.text, true, false);
         // 远程模式错误态：本地语义的「安装运行环境」不适用，换远程按钮组；
         // 打开日志/打开数据目录两种模式都保留
         actions.style.display = s.remote ? 'none' : 'flex';
@@ -283,10 +367,17 @@
         actions.style.display = 'none'; remoteActions.style.display = 'none'; stopped = false;
         progress = 0; // 新一轮流程：进度重新起步
         setProgress(s.text, false, false);
+        renderStages(s.text, false, false);
       } else {
         setProgress(s.text, false, !!s.ready);
+        renderStages(s.text, false, !!s.ready);
       }
-      if (s.ready) { stopped = true; spinner.style.display = 'none'; }
+      if (s.ready) {
+        stopped = true; spinner.style.display = 'none';
+        // 就绪后「首次启动需下载运行环境」的提示已过时，隐藏
+        const hint = document.getElementById('hint');
+        if (hint) hint.style.display = 'none';
+      }
     }
 
     function collectFields() {

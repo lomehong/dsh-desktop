@@ -1,0 +1,410 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<title>DSH 守护 Agent</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    font-family: "Microsoft YaHei", "PingFang SC", system-ui, sans-serif;
+    background: #1c2431; color: #e8ecf1;
+    display: flex; flex-direction: column;
+    user-select: none;
+  }
+  header {
+    display: flex; align-items: center; gap: 8px;
+    padding: 10px 14px; border-bottom: 1px solid rgba(255,255,255,0.08);
+    flex: none;
+  }
+  header h1 { font-size: 14px; font-weight: 600; letter-spacing: 0.5px; flex: none; }
+  #status {
+    font-size: 11px; color: #8b98a9; display: flex; align-items: center; gap: 5px;
+    flex: 1; min-width: 0; overflow: hidden; white-space: nowrap;
+  }
+  #status .dot { width: 7px; height: 7px; border-radius: 50%; flex: none; }
+  #status .dot.on { background: #3ddc97; box-shadow: 0 0 6px rgba(61,220,151,0.7); }
+  #status .dot.off { background: #6b7686; }
+  header button {
+    font-size: 12px; color: #aeb9c8; background: rgba(255,255,255,0.07);
+    border: 1px solid rgba(255,255,255,0.15); border-radius: 6px;
+    padding: 4px 10px; cursor: pointer; flex: none;
+  }
+  header button:hover { background: rgba(255,255,255,0.14); color: #fff; }
+  header button.primary { color: #fff; background: #4a6cf7; border-color: #4a6cf7; }
+  header button.primary:hover { background: #5b7cf8; }
+  #mask {
+    position: fixed; inset: 0; z-index: 10; display: none;
+    background: rgba(8,12,18,0.55); backdrop-filter: blur(3px);
+  }
+  #mask.open { display: block; }
+  #modal {
+    position: fixed; z-index: 11; left: 50%; top: 50%; transform: translate(-50%, -50%);
+    width: min(440px, calc(100% - 36px)); max-height: calc(100% - 56px);
+    background: #222b3a; border: 1px solid rgba(255,255,255,0.1); border-radius: 14px;
+    box-shadow: 0 18px 50px rgba(0,0,0,0.5);
+    display: none; flex-direction: column; overflow: hidden;
+  }
+  #modal.open { display: flex; }
+  .m-head {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 13px 16px; border-bottom: 1px solid rgba(255,255,255,0.08); flex: none;
+  }
+  .m-head .m-t { font-size: 13px; font-weight: 600; color: #dfe6ef; }
+  .m-body { overflow-y: auto; padding: 2px 16px 16px; }
+  #config { display: none; flex-direction: column; }
+  #config.open { display: flex; }
+  .cfg-sec { margin-top: 14px; }
+  .cfg-sec .sec-t {
+    display: flex; align-items: center; gap: 7px;
+    font-size: 12px; font-weight: 600; color: #dfe6ef; margin-bottom: 8px;
+  }
+  .cfg-sec .sec-t::before {
+    content: ''; width: 3px; height: 12px; border-radius: 2px;
+    background: linear-gradient(180deg, #4a6cf7, #7b5cf0);
+  }
+  .cfg-sec .sec-t .tag {
+    font-size: 10px; font-weight: 400; color: #8b98a9;
+    background: rgba(255,255,255,0.07); padding: 1px 7px; border-radius: 7px;
+  }
+  .sw-row {
+    display: flex; align-items: center; justify-content: space-between; gap: 10px;
+    padding: 9px 11px; margin-top: 7px;
+    background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.07);
+    border-radius: 10px; cursor: pointer; transition: background .15s, border-color .15s;
+  }
+  .sw-row:hover { background: rgba(255,255,255,0.06); border-color: rgba(255,255,255,0.12); }
+  .sw-row .t { font-size: 12px; font-weight: 600; color: #dfe6ef; }
+  .sw-row .d { font-size: 11px; color: #8b98a9; margin-top: 2px; }
+  .switch { position: relative; width: 38px; height: 21px; flex: none; cursor: pointer; }
+  .switch input { display: none; }
+  .switch i {
+    position: absolute; inset: 0; border-radius: 11px;
+    background: rgba(255,255,255,0.16); transition: background .18s;
+  }
+  .switch i::after {
+    content: ''; position: absolute; top: 2px; left: 2px; width: 17px; height: 17px;
+    border-radius: 50%; background: #c7d0dc; transition: transform .18s, background .18s;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.35);
+  }
+  .switch input:checked + i { background: #4a6cf7; }
+  .switch input:checked + i::after { transform: translateX(17px); background: #fff; }
+  .field { margin-top: 9px; }
+  .field .f-l { font-size: 11px; color: #8b98a9; margin-bottom: 4px; }
+  .field input {
+    width: 100%; font-size: 12px; color: #e8ecf1;
+    background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.13);
+    border-radius: 8px; padding: 7px 10px; outline: none; transition: border-color .15s, background .15s;
+  }
+  .field input:focus { border-color: #4a6cf7; background: rgba(74,108,247,0.09); }
+  .field input::placeholder { color: #5d6875; }
+  .cfg-foot { display: flex; align-items: center; gap: 10px; margin-top: 14px; }
+  .cfg-foot button { font: inherit; }
+  .cfg-foot .btn-primary {
+    font-size: 12px; font-weight: 600; padding: 7px 22px; border-radius: 8px;
+    border: none; cursor: pointer; color: #fff;
+    background: linear-gradient(135deg, #4a6cf7, #7b5cf0);
+    transition: opacity .15s, transform .1s;
+  }
+  .cfg-foot .btn-primary:hover { opacity: 0.9; }
+  .cfg-foot .btn-primary:active { transform: scale(0.97); }
+  .cfg-foot .btn-ghost {
+    font-size: 12px; padding: 7px 16px; border-radius: 8px; cursor: pointer;
+    color: #aeb9c8; background: rgba(255,255,255,0.07); border: 1px solid rgba(255,255,255,0.14);
+    transition: background .15s, color .15s;
+  }
+  .cfg-foot .btn-ghost:hover { background: rgba(255,255,255,0.13); color: #fff; }
+  .cfg-foot .msg { font-size: 11px; color: #3ddc97; }
+  .cfg-foot .hint { font-size: 10px; color: #5d6875; flex: 1; }
+  #list { flex: 1; overflow-y: auto; padding: 8px 12px; display: flex; flex-direction: column; gap: 8px; }
+  .item {
+    background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.08);
+    border-radius: 10px; padding: 10px 12px; cursor: pointer;
+  }
+  .item .row { display: flex; align-items: center; gap: 8px; }
+  .item .sev { width: 8px; height: 8px; border-radius: 50%; flex: none; }
+  .item .sev.error { background: #e5544b; box-shadow: 0 0 6px rgba(229,84,75,0.6); }
+  .item .sev.warn { background: #e8b04b; }
+  .item .cat { font-size: 12px; font-weight: 600; color: #dfe6ef; flex: 1; min-width: 0;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .item .out { font-size: 10px; padding: 1px 7px; border-radius: 8px; flex: none; }
+  .out.pending { color: #e8b04b; background: rgba(232,176,75,0.14); }
+  .out.fixing { color: #7aa8ff; background: rgba(122,168,255,0.14); }
+  .out.resolved { color: #3ddc97; background: rgba(61,220,151,0.14); }
+  .out.failed { color: #ff8a80; background: rgba(255,138,128,0.14); }
+  .item .time { font-size: 11px; color: #6d7a8a; flex: none; }
+  .item .diag { font-size: 12px; color: #aeb9c8; margin-top: 5px; white-space: pre-wrap; word-break: break-all; }
+  .item .detail { display: none; margin-top: 8px; border-top: 1px solid rgba(255,255,255,0.07); padding-top: 8px; cursor: default; }
+  .item.open .detail { display: block; }
+  .detail .lbl { font-size: 10px; color: #6d7a8a; margin-bottom: 3px; }
+  .detail pre {
+    font-size: 11px; color: #93a1b3; background: rgba(0,0,0,0.28);
+    border-radius: 6px; padding: 7px 8px; white-space: pre-wrap; word-break: break-all;
+    max-height: 120px; overflow-y: auto; user-select: text;
+  }
+  .detail .advice { font-size: 12px; color: #c9d4e0; margin-top: 6px; white-space: pre-wrap; }
+  .detail .btns { display: flex; gap: 8px; margin-top: 9px; }
+  .detail .btns button {
+    font-size: 12px; padding: 4px 12px; border-radius: 6px; cursor: pointer;
+    color: #dfe6ef; background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.16);
+  }
+  .detail .btns button:hover { background: rgba(255,255,255,0.16); }
+  .detail .btns button.fix { color: #fff; background: #4a6cf7; border-color: #4a6cf7; }
+  .detail .btns button:disabled { opacity: 0.45; cursor: default; }
+  .empty {
+    flex: 1; display: flex; align-items: center; justify-content: center;
+    color: #6d7a8a; font-size: 13px; flex-direction: column; gap: 8px;
+  }
+  .empty .icon { font-size: 34px; opacity: 0.5; }
+</style>
+</head>
+<body>
+  <header>
+    <h1>守护 Agent</h1>
+    <div id="status"></div>
+    <button id="btn-scan" class="primary">立即巡检</button>
+    <button id="btn-cfg">配置</button>
+  </header>
+  <div id="mask"></div>
+  <div id="modal">
+    <div class="m-head">
+      <span class="m-t">守护设置</span>
+    </div>
+    <div class="m-body"><div id="config"></div></div>
+  </div>
+  <div id="list"></div>
+  <script>
+    const listEl = document.getElementById('list');
+    const statusEl = document.getElementById('status');
+    const cfgEl = document.getElementById('config');
+    const invoke = window.__TAURI__ && window.__TAURI__.core && window.__TAURI__.core.invoke;
+    const listen = window.__TAURI__ && window.__TAURI__.event && window.__TAURI__.event.listen;
+    let snapshot = null;
+    let cfgOpen = false;
+
+    const CAT_ZH = {
+      service_unreachable: '服务无响应', node_crash: '服务进程崩溃', profile_bundle: '插件失联',
+      plugin_dep_missing: '插件缺依赖', module_missing: '模块缺失', port_in_use: '端口被占',
+      auth_401: '凭证失效', npm_error: 'npm 异常', restart_exhausted: '重启已放弃'
+    };
+    const OUT_ZH = { pending: '待处置', fixing: '修复中', resolved: '已解决', failed: '修复失败' };
+    const ACTION_ZH = {
+      RestartService: '重启服务', ClearFixedPort: '换随机端口', RefreshProfilePlugins: '补装插件',
+      RepairRuntime: '修复运行时', ReinstallOfficial: '官方源重装'
+    };
+
+    function fmtTime(unix) {
+      if (!unix) return '';
+      const d = new Date(unix * 1000);
+      const pad = n => String(n).padStart(2, '0');
+      return (d.getMonth() + 1) + '/' + d.getDate() + ' ' + pad(d.getHours()) + ':' + pad(d.getMinutes());
+    }
+
+    function renderStatus(s) {
+      const on = !!s.enabled;
+      const tick = s.last_tick ? fmtTime(s.last_tick) : '—';
+      statusEl.innerHTML = '';
+      const dot = document.createElement('span');
+      dot.className = 'dot ' + (on ? 'on' : 'off');
+      statusEl.appendChild(dot);
+      statusEl.appendChild(document.createTextNode((on ? '运行中 · 上次巡检 ' : '已关闭 · 上次巡检 ') + tick));
+    }
+
+    function esc(s) { const d = document.createElement('div'); d.textContent = s == null ? '' : String(s); return d.innerHTML; }
+
+    function render(s) {
+      snapshot = s;
+      renderStatus(s);
+      if (!s.issues.length) {
+        listEl.innerHTML = '<div class="empty"><div class="icon">🛡️</div><div>暂无问题记录，一切正常</div></div>';
+        return;
+      }
+      listEl.innerHTML = '';
+      for (const it of s.issues) {
+        const div = document.createElement('div');
+        div.className = 'item';
+        const head = document.createElement('div');
+        head.className = 'row';
+        const sev = document.createElement('span');
+        sev.className = 'sev ' + (it.severity === 'error' ? 'error' : 'warn');
+        const cat = document.createElement('span');
+        cat.className = 'cat';
+        cat.textContent = '#' + it.id + ' ' + (CAT_ZH[it.category] || it.category) + '：' + (it.diagnosis || '');
+        const out = document.createElement('span');
+        out.className = 'out ' + (it.outcome || 'pending');
+        out.textContent = OUT_ZH[it.outcome] || it.outcome;
+        const time = document.createElement('span');
+        time.className = 'time';
+        time.textContent = fmtTime(it.at);
+        head.appendChild(sev); head.appendChild(cat); head.appendChild(out); head.appendChild(time);
+        const diag = document.createElement('div');
+        diag.className = 'diag';
+        diag.textContent = it.action ? ('建议动作：' + (ACTION_ZH[it.action] || it.action)) : '';
+        div.appendChild(head);
+        if (it.action) div.appendChild(diag);
+
+        const detail = document.createElement('div');
+        detail.className = 'detail';
+        if (it.evidence) {
+          const lbl = document.createElement('div'); lbl.className = 'lbl'; lbl.textContent = '证据'; 
+          const pre = document.createElement('pre'); pre.textContent = it.evidence;
+          detail.appendChild(lbl); detail.appendChild(pre);
+        }
+        if (it.advice) {
+          const lbl2 = document.createElement('div'); lbl2.className = 'lbl'; lbl2.textContent = '建议';
+          const adv = document.createElement('div'); adv.className = 'advice'; adv.textContent = it.advice;
+          detail.appendChild(lbl2); detail.appendChild(adv);
+        }
+        const btns = document.createElement('div');
+        btns.className = 'btns';
+        if (it.action && (it.outcome === 'pending' || it.outcome === 'failed')) {
+          const fix = document.createElement('button');
+          fix.className = 'fix'; fix.textContent = '执行修复';
+          fix.onclick = async (e) => {
+            e.stopPropagation(); fix.disabled = true;
+            try { await invoke('guardian_fix', { id: it.id }); } catch (err) { alert(err); fix.disabled = false; }
+          };
+          btns.appendChild(fix);
+        }
+        if (s.llm_enabled) {
+          const ai = document.createElement('button');
+          ai.textContent = 'AI 诊断';
+          ai.onclick = async (e) => {
+            e.stopPropagation(); ai.disabled = true; ai.textContent = '诊断中…';
+            try { await invoke('guardian_diagnose', { id: it.id }); }
+            catch (err) { alert(err); ai.disabled = false; ai.textContent = 'AI 诊断'; }
+          };
+          btns.appendChild(ai);
+        }
+        if (btns.children.length) detail.appendChild(btns);
+        div.appendChild(detail);
+        div.onclick = () => div.classList.toggle('open');
+        listEl.appendChild(div);
+      }
+    }
+
+    async function refresh() {
+      if (!invoke) return;
+      try { render(await invoke('guardian_state')); } catch (e) {}
+    }
+
+    /* ── 配置面板 ── */
+    function renderConfig(cfg) {
+      cfgEl.innerHTML = '';
+      cfgEl.classList.toggle('open', cfgOpen);
+      if (!cfgOpen) return;
+      const el = (tag, cls, text) => {
+        const e = document.createElement(tag);
+        if (cls) e.className = cls;
+        if (text !== undefined) e.textContent = text;
+        return e;
+      };
+      const secTitle = (title, tag) => {
+        const t = el('div', 'sec-t', title);
+        if (tag) t.appendChild(el('span', 'tag', tag));
+        return t;
+      };
+      const switchInput = (key) => {
+        const sw = el('label', 'switch');
+        const i = document.createElement('input');
+        i.type = 'checkbox'; i.checked = !!cfg[key]; i.dataset.k = key;
+        sw.appendChild(i); sw.appendChild(el('i'));
+        return sw;
+      };
+      const switchRow = (key, title, desc) => {
+        const row = el('div', 'sw-row');
+        const txt = el('div');
+        txt.appendChild(el('div', 't', title));
+        txt.appendChild(el('div', 'd', desc));
+        row.appendChild(txt); row.appendChild(switchInput(key));
+        row.onclick = (e) => {
+          if (e.target.tagName === 'INPUT') return;
+          const box = row.querySelector('input');
+          box.checked = !box.checked;
+        };
+        return row;
+      };
+      const field = (label, key, placeholder, pwd) => {
+        const f = el('div', 'field');
+        f.appendChild(el('div', 'f-l', label));
+        const i = document.createElement('input');
+        i.type = pwd ? 'password' : 'text';
+        i.value = cfg[key] || ''; i.dataset.k = key; i.placeholder = placeholder || '';
+        f.appendChild(i);
+        return f;
+      };
+
+      const s1 = el('div', 'cfg-sec');
+      s1.appendChild(secTitle('守护行为'));
+      s1.appendChild(switchRow('enabled', '启用守护', '关闭后不做任何巡检与修复'));
+      s1.appendChild(switchRow('auto_fix', '全自动修复', '关闭 = 半自动：检测到异常仅提醒，由你决定是否修复'));
+      cfgEl.appendChild(s1);
+
+      const s2 = el('div', 'cfg-sec');
+      s2.appendChild(secTitle('AI 诊断增强', '可选'));
+      s2.appendChild(switchRow('llm_enabled', '启用 AI 诊断', '规则未覆盖的问题交大模型分析（OpenAI 兼容接口）'));
+      s2.appendChild(field('接口地址', 'base_url', '如 https://open.bigmodel.cn/api/paas/v4'));
+      s2.appendChild(field('模型', 'model', '如 glm-4-flash'));
+      s2.appendChild(field('API Key', 'api_key', '', true));
+      cfgEl.appendChild(s2);
+
+      const foot = el('div', 'cfg-foot');
+      const hint = el('span', 'hint', '配置存储于本机 guardian.json');
+      const msg = el('span', 'msg');
+      const cancel = el('button', 'btn-ghost', '取消');
+      const save = el('button', 'btn-primary', '保存');
+      foot.appendChild(hint); foot.appendChild(msg); foot.appendChild(cancel); foot.appendChild(save);
+      cancel.onclick = (e) => { e.stopPropagation(); closeCfg(); };
+      save.onclick = async (e) => {
+        e.stopPropagation();
+        const q = k => cfgEl.querySelector('[data-k=' + k + ']');
+        const llm = {
+          enabled: q('llm_enabled').checked,
+          base_url: q('base_url').value.trim(),
+          model: q('model').value.trim(),
+          api_key: q('api_key').value
+        };
+        try {
+          await invoke('guardian_config_save', { cfg: {
+            enabled: q('enabled').checked,
+            auto_fix: q('auto_fix').checked,
+            llm
+          } });
+          msg.textContent = '已保存 ✓'; msg.style.color = '#3ddc97';
+          setTimeout(() => { closeCfg(); refresh(); }, 700);
+        } catch (err) {
+          msg.textContent = '保存失败：' + err; msg.style.color = '#ff8a80';
+        }
+      };
+      foot.onclick = (e) => e.stopPropagation();
+      cfgEl.appendChild(foot);
+    }
+
+    document.getElementById('btn-scan').onclick = async () => {
+      if (invoke) { try { await invoke('guardian_run_once'); } catch (e) {} }
+    };
+    const maskEl = document.getElementById('mask');
+    const modalEl = document.getElementById('modal');
+    function closeCfg() {
+      cfgOpen = false;
+      maskEl.classList.remove('open');
+      modalEl.classList.remove('open');
+      document.getElementById('config').classList.remove('open');
+    }
+    document.getElementById('btn-cfg').onclick = async () => {
+      if (cfgOpen) { closeCfg(); return; }
+      cfgOpen = true;
+      maskEl.classList.add('open');
+      modalEl.classList.add('open');
+      if (invoke) {
+        try { renderConfig(await invoke('guardian_config_load')); } catch (e) { renderConfig({}); }
+      } else renderConfig({});
+    };
+    maskEl.onclick = closeCfg;
+    document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && cfgOpen) closeCfg(); });
+
+    if (listen) { listen('guardian-updated', () => refresh()); }
+    refresh();
+  </script>
+</body>
+</html>

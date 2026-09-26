@@ -172,7 +172,8 @@ fn with_tail(msg: &str, tail: &str) -> String {
 /// 识别 Node.js 致命错误横幅（纯函数便于单测）。崩溃 stderr 以
 /// `Node.js v<semver>` 整行收尾（行首 `[err] ` 前缀容忍）；错误信息中途出现
 /// 「Node.js」字样不算。摘要把手在 stderr 读线程：横幅前最近一条 `Error:` 行。
-fn crash_banner(line: &str) -> Option<String> {
+/// guardian 的运行期规则表复用同一判定（pub(crate)）。
+pub(crate) fn crash_banner(line: &str) -> Option<String> {
     let t = line.trim_start_matches("[err] ").trim();
     if t.starts_with("Node.js v") && t["Node.js v".len()..].starts_with(|c: char| c.is_ascii_digit()) {
         Some(t.to_string())
@@ -185,8 +186,8 @@ fn crash_banner(line: &str) -> Option<String> {
 /// cordis-plugin-loader 对 link: 到 profile 之外的插件不做裸导入重映射，按插件
 /// 真实路径解析依赖——dev 仓库没装依赖就 ERR_MODULE_NOT_FOUND（真实故障：digital-twin
 /// 套件 link: 安装后 Cannot find package '@deepseek-ai/schemastery'）。提示直接给出
-/// 修复动作，错误页不再只有堆栈。
-fn local_plugin_hint(line: &str) -> Option<String> {
+/// 修复动作，错误页不再只有堆栈。guardian 运行期规则表复用同一判定（pub(crate)）。
+pub(crate) fn local_plugin_hint(line: &str) -> Option<String> {
     const PKG_MARK: &str = "Cannot find package '";
     const FROM_MARK: &str = "imported from ";
     let pkg_i = line.find(PKG_MARK)? + PKG_MARK.len();

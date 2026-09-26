@@ -7,6 +7,7 @@
 mod about;
 mod diagnostics;
 mod events;
+mod guardian;
 mod i18n;
 mod install;
 mod jumplist;
@@ -128,6 +129,75 @@ fn shell_quit(window: tauri::WebviewWindow, app: tauri::AppHandle) {
         return;
     }
     app.exit(0);
+}
+
+/* ── 守护 Agent（guardian）：全部仅本地页可调；config/state 会带出 API key，守卫不豁免 ── */
+
+#[tauri::command]
+fn guardian_state(window: tauri::WebviewWindow) -> Result<guardian::Snapshot, String> {
+    if !caller_is_local(&window) {
+        return Err("无权限".into());
+    }
+    Ok(guardian::snapshot())
+}
+
+#[tauri::command]
+fn guardian_toggle(window: tauri::WebviewWindow, enabled: bool) -> Result<(), String> {
+    if !caller_is_local(&window) {
+        return Err("无权限".into());
+    }
+    guardian::set_enabled(enabled);
+    Ok(())
+}
+
+#[tauri::command]
+fn guardian_run_once(window: tauri::WebviewWindow, app: tauri::AppHandle) -> Result<(), String> {
+    if !caller_is_local(&window) {
+        return Err("无权限".into());
+    }
+    guardian::run_once(app);
+    Ok(())
+}
+
+#[tauri::command]
+fn guardian_fix(window: tauri::WebviewWindow, app: tauri::AppHandle, id: u64) -> Result<(), String> {
+    if !caller_is_local(&window) {
+        return Err("无权限".into());
+    }
+    guardian::fix_issue(app, id)
+}
+
+#[tauri::command]
+fn guardian_diagnose(window: tauri::WebviewWindow, app: tauri::AppHandle, id: u64) -> Result<(), String> {
+    if !caller_is_local(&window) {
+        return Err("无权限".into());
+    }
+    guardian::diagnose_async(app, id);
+    Ok(())
+}
+
+#[tauri::command]
+fn guardian_config_load(window: tauri::WebviewWindow) -> Result<guardian::GuardianCfg, String> {
+    if !caller_is_local(&window) {
+        return Err("无权限".into());
+    }
+    Ok(guardian::config())
+}
+
+#[tauri::command]
+fn guardian_config_save(window: tauri::WebviewWindow, cfg: guardian::GuardianCfg) -> Result<(), String> {
+    if !caller_is_local(&window) {
+        return Err("无权限".into());
+    }
+    guardian::save_config(&cfg)
+}
+
+#[tauri::command]
+fn guardian_open(window: tauri::WebviewWindow, app: tauri::AppHandle) -> Result<(), String> {
+    if !caller_is_local(&window) {
+        return Err("无权限".into());
+    }
+    guardian::open_window(&app).map_err(|e| e.to_string())
 }
 
 /// 首启安装引导：下载便携 Node + 安装固定版本 dsh，完成后自动启动服务。
@@ -644,12 +714,22 @@ fn main() {
             about::about_open_repo,
             shell_open_about,
             shell_open_settings,
-            shell_quit
+            shell_quit,
+            guardian_state,
+            guardian_toggle,
+            guardian_run_once,
+            guardian_fix,
+            guardian_diagnose,
+            guardian_config_load,
+            guardian_config_save,
+            guardian_open
         ])
         .setup(|app| {
             let handle = app.handle().clone();
             webview::create_main_window(&handle)?;
             tray::build_tray(&handle)?;
+            // 守护 Agent：加载问题台账 + 起守护线程（独立于 dsh 运行时的壳内巡检）
+            guardian::spawn(handle.clone());
             // D3b：Windows 任务栏右键任务列表（尽力而为，失败仅记日志）
             jumplist::update(&handle);
             // 预热「设置 / 关于」窗：启动 3 秒后隐藏建窗（渲染进程孵化 1~3s 挪到

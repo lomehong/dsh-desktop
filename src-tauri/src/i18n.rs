@@ -63,6 +63,7 @@ fn zh(key: &str) -> Option<&'static str> {
         "menu.show" => "显示 / 隐藏",
         "menu.open_main" => "打开主页面",
         "menu.notifications" => "通知中心",
+        "menu.guardian" => "守护 Agent",
         "menu.copy_address" => "复制当前地址",
         "menu.restart_local" => "重启服务",
         "menu.restart_remote" => "重连远程实例",
@@ -108,6 +109,7 @@ fn en(key: &str) -> Option<&'static str> {
         "menu.open_main" => "Open Main Window",
         "menu.copy_address" => "Copy Address",
         "menu.notifications" => "Notification Center",
+        "menu.guardian" => "Guardian Agent",
         "menu.restart_local" => "Restart Service",
         "menu.restart_remote" => "Reconnect Remote",
         "menu.connect" => "Connect to Remote…",
@@ -153,7 +155,7 @@ mod tests {
     #[test]
     fn zh_table_has_all_menu_keys() {
         for k in [
-            "menu.show", "menu.open_main", "menu.notifications", "menu.copy_address", "menu.restart_local",
+            "menu.show", "menu.open_main", "menu.notifications", "menu.guardian", "menu.copy_address", "menu.restart_local",
             "menu.restart_remote", "menu.connect", "menu.tolocal", "menu.upgrade",
             "menu.wizard", "menu.check_app_update", "menu.check_dsh_update",
             "menu.openlog", "menu.opendir", "menu.usb_opendir", "menu.saved_instances",

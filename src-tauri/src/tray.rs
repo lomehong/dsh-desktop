@@ -419,6 +419,7 @@ fn spec_for_remote(ctx: &MenuContext) -> MenuSpec {
                     MenuEntry::Item { id: "open-main", label: t("menu.open_main").into() },
                     MenuEntry::Item { id: "copy-address", label: t("menu.copy_address").into() },
                     MenuEntry::Item { id: "notifications", label: t("menu.notifications").into() },
+                    MenuEntry::Item { id: "guardian", label: t("menu.guardian").into() },
                 ],
             },
             // 2. 远程实例
@@ -536,6 +537,7 @@ fn spec_for_local(ctx: &MenuContext) -> MenuSpec {
                     MenuEntry::Item { id: "show", label: t("menu.show").into() },
                     MenuEntry::Item { id: "open-main", label: t("menu.open_main").into() },
                     MenuEntry::Item { id: "notifications", label: t("menu.notifications").into() },
+                    MenuEntry::Item { id: "guardian", label: t("menu.guardian").into() },
                 ],
             },
             // 2. 服务
@@ -842,6 +844,15 @@ pub fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
                     if let Some(mut log) = crate::runtime::open_log_append() {
                         use std::io::Write;
                         let _ = writeln!(log, "[通知] 打开通知中心失败: {e}");
+                    }
+                }
+            }
+            "guardian" => {
+                // 守护报告窗：台账是持续状态，不清通知未读（那是通知中心的语义）
+                if let Err(e) = crate::guardian::open_window(app) {
+                    if let Some(mut log) = crate::runtime::open_log_append() {
+                        use std::io::Write;
+                        let _ = writeln!(log, "[守护] 打开守护报告窗失败: {e}");
                     }
                 }
             }
