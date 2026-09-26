@@ -1108,19 +1108,19 @@ pub fn set_enabled(enabled: bool) -> GuardianCfg {
     cfg
 }
 
-/// 立即巡检一次（命令触发：专用线程，绝不卡 UI）。
-pub fn run_once(app: tauri::AppHandle) {
-    std::thread::spawn(move || {
-        let cfg = config();
-        if !cfg.enabled {
-            return;
-        }
-        let now = runtime::unix_now();
-        inspect(&app, &cfg, now);
-        process_pending(&app, &cfg, now);
-        rt().lock().unwrap().last_tick = Some(runtime::unix_now());
-        let _ = app.emit_guardian_refresh();
-    });
+/// 立即巡检一次（阻塞执行：inspect + 待决处置 + 刷新事件）。
+/// 调用方（tauri async 命令）负责放到阻塞线程池——探活/日志读取有秒级等待，
+/// 不能占主线程；阻塞语义让命令层可以 await 完成后给 UI 明确反馈。
+pub fn run_once(app: &tauri::AppHandle) {
+    let cfg = config();
+    if !cfg.enabled {
+        return;
+    }
+    let now = runtime::unix_now();
+    inspect(app, &cfg, now);
+    process_pending(app, &cfg, now);
+    rt().lock().unwrap().last_tick = Some(runtime::unix_now());
+    let _ = app.emit_guardian_refresh();
 }
 
 /// 手动执行某案的建议动作（绕过 auto_fix 开关，不绕过安全阀冷却）。

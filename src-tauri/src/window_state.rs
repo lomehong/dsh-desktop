@@ -41,6 +41,7 @@ pub trait WindowLike {
     fn outer_position(&self) -> tauri::Result<PhysicalPosition<i32>>;
     fn inner_size(&self) -> tauri::Result<PhysicalSize<u32>>;
     fn is_maximized(&self) -> tauri::Result<bool>;
+    fn is_minimized(&self) -> tauri::Result<bool>;
     fn available_monitors(&self) -> tauri::Result<Vec<tauri::Monitor>>;
     fn current_monitor(&self) -> tauri::Result<Option<tauri::Monitor>>;
     fn set_position(&self, position: tauri::Position) -> tauri::Result<()>;
@@ -57,6 +58,9 @@ impl<R: tauri::Runtime> WindowLike for tauri::Window<R> {
     }
     fn is_maximized(&self) -> tauri::Result<bool> {
         tauri::Window::is_maximized(self)
+    }
+    fn is_minimized(&self) -> tauri::Result<bool> {
+        tauri::Window::is_minimized(self)
     }
     fn available_monitors(&self) -> tauri::Result<Vec<tauri::Monitor>> {
         tauri::Window::available_monitors(self)
@@ -84,6 +88,9 @@ impl<R: tauri::Runtime> WindowLike for tauri::WebviewWindow<R> {
     }
     fn is_maximized(&self) -> tauri::Result<bool> {
         tauri::WebviewWindow::is_maximized(self)
+    }
+    fn is_minimized(&self) -> tauri::Result<bool> {
+        tauri::WebviewWindow::is_minimized(self)
     }
     fn available_monitors(&self) -> tauri::Result<Vec<tauri::Monitor>> {
         tauri::WebviewWindow::available_monitors(self)
@@ -152,8 +159,18 @@ pub fn save(state: &WindowState) {
 
 /// 从 webview 读当前状态（outer_position / inner_size / is_maximized / current_monitor）。
 /// 失败返回 None（窗口已销毁等场景），调用方按未变化处理。
+/// **最小化态返回 None 不落盘**：Windows 最小化窗口的 outer_position 是
+/// (-32000,-32000) 幽灵坐标——把最小化时的窗口保存下来，下次启动就会
+/// 「整个窗口贴在左上角」（2026-09-26 实机反馈）。
 pub fn from_window<W: WindowLike + ?Sized>(window: &W) -> Option<WindowState> {
+    if window.is_minimized().unwrap_or(false) {
+        return None;
+    }
     let pos = window.outer_position().ok()?;
+    // 双保险：hide/最小化竞态瞬间 is_minimized 可能漏报，幽灵特征值再拦一道
+    if pos.x < -20000 || pos.y < -20000 {
+        return None;
+    }
     let size = window.inner_size().ok()?;
     let maximized = window.is_maximized().unwrap_or(false);
     let (monitor_index, monitor_name) = current_monitor_identity(window);
@@ -206,19 +223,62 @@ pub fn apply<W: WindowLike + ?Sized>(window: &W, state: &WindowState) -> ApplyOu
     let width = state.width.max(min_size.width).min(mon_size.width);
     let height = state.height.max(min_size.height).min(mon_size.height);
     let _ = window.set_size(Size::Physical(PhysicalSize::new(width, height)));
-    // 位置夹到显示器可见区域（至少 100x100 露在屏内）
-    let min_visible = 100i32;
-    let x_min = mon_pos.x - (width as i32 - min_visible);
-    let x_max = mon_pos.x + (mon_size.width as i32 - min_visible);
-    let y_min = mon_pos.y - (height as i32 - min_visible);
-    let y_max = mon_pos.y + (mon_size.height as i32 - min_visible);
-    let x = state.x.clamp(x_min, x_max);
-    let y = state.y.clamp(y_min, y_max);
+    let (x, y) = resolved_position(
+        state.x,
+        state.y,
+        mon_pos.x,
+        mon_pos.y,
+        mon_size.width as i32,
+        mon_size.height as i32,
+        width as i32,
+        height as i32,
+    );
     let _ = window.set_position(Position::Physical(PhysicalPosition::new(x, y)));
     if state.maximized {
         let _ = window.maximize();
     }
     ApplyOutcome::Applied
+}
+
+/// 纯函数便于单测：把保存坐标解析为恢复坐标。
+/// - 屏内 / 拖出屏幕一小段（露出 ≥100px 的夹紧范围内）：尊重保存值——用户可能
+///   有意把窗口拖出一半；
+/// - 越界量超过一个窗宽/窗高（最小化幽灵坐标、跨屏残留等病态值）：不再贴边
+///   露缝，回退到该显示器内居中（用户预期：无效状态 = 默认居中）。
+fn resolved_position(
+    x: i32,
+    y: i32,
+    mon_x: i32,
+    mon_y: i32,
+    mon_w: i32,
+    mon_h: i32,
+    w: i32,
+    h: i32,
+) -> (i32, i32) {
+    let min_visible = 100i32;
+    let x_min = mon_x - (w - min_visible);
+    let x_max = mon_x + (mon_w - min_visible);
+    let y_min = mon_y - (h - min_visible);
+    let y_max = mon_y + (mon_h - min_visible);
+    let overshoot_x = if x < x_min {
+        x_min - x
+    } else if x > x_max {
+        x - x_max
+    } else {
+        0
+    };
+    let overshoot_y = if y < y_min {
+        y_min - y
+    } else if y > y_max {
+        y - y_max
+    } else {
+        0
+    };
+    let center_x = mon_x + (((mon_w - w) / 2).max(0));
+    let center_y = mon_y + (((mon_h - h) / 2).max(0));
+    let rx = if overshoot_x > w { center_x } else { x.max(x_min).min(x_max) };
+    let ry = if overshoot_y > h { center_y } else { y.max(y_min).min(y_max) };
+    (rx, ry)
 }
 
 /// 解析当前显示器在 available_monitors 列表里的位置与名字。
@@ -307,5 +367,28 @@ mod tests {
         let s: WindowState = serde_json::from_str(raw).unwrap();
         assert!(s.monitor_name.is_empty());
         assert!(s.maximized);
+    }
+
+    /* ── 恢复位置解析：最小化幽灵坐标回退居中（2026-09-26 实机「左上角」事故） ── */
+    #[test]
+    fn resolved_position_keeps_in_range_and_clamps_slight_overflow() {
+        let (mx, my, mw, mh, w, h) = (0, 0, 1920, 1080, 1280, 800);
+        // 屏内：原样保留
+        assert_eq!(resolved_position(300, 200, mx, my, mw, mh, w, h), (300, 200));
+        // 拖出一半（-640）：在「露 100px」夹紧范围内，保留用户意图
+        assert_eq!(resolved_position(-640, 200, mx, my, mw, mh, w, h), (-640, 200));
+        // 略微越界：夹到露 100px（旧行为保留）
+        assert_eq!(resolved_position(-1500, 200, mx, my, mw, mh, w, h), (-1180, 200));
+    }
+
+    #[test]
+    fn resolved_position_centers_on_pathological_minimized_artifact() {
+        let (mx, my, mw, mh, w, h) = (0, 0, 1920, 1080, 1280, 800);
+        // Windows 最小化幽灵坐标 (-32000,-32000)：越界量远超窗宽 → 居中而非贴边露缝
+        let (x, y) = resolved_position(-32000, -32000, mx, my, mw, mh, w, h);
+        assert_eq!(x, (1920 - 1280) / 2, "x 应回退显示器内居中");
+        assert_eq!(y, (1080 - 800) / 2, "y 应回退显示器内居中");
+        // 副屏在负坐标区是正常形态：起点 -1920 的屏，窗口在其可见范围内应原样保留
+        assert_eq!(resolved_position(-2000, 100, -1920, 0, 1920, 1080, 1280, 800), (-2000, 100));
     }
 }

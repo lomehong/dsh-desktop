@@ -150,13 +150,16 @@ fn guardian_toggle(window: tauri::WebviewWindow, enabled: bool) -> Result<(), St
     Ok(())
 }
 
-#[tauri::command]
-fn guardian_run_once(window: tauri::WebviewWindow, app: tauri::AppHandle) -> Result<(), String> {
+#[tauri::command(async)]
+async fn guardian_run_once(window: tauri::WebviewWindow, app: tauri::AppHandle) -> Result<(), String> {
     if !caller_is_local(&window) {
         return Err("无权限".into());
     }
-    guardian::run_once(app);
-    Ok(())
+    // 阻塞型巡检（探活有秒级等待）丢进阻塞线程池并等待完成——
+    // 前端 await 到完成点才恢复按钮并给出反馈
+    tauri::async_runtime::spawn_blocking(move || guardian::run_once(&app))
+        .await
+        .map_err(|e| format!("巡检任务失败: {e}"))
 }
 
 #[tauri::command]
