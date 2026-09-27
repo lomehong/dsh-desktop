@@ -743,6 +743,12 @@ pub fn create_main_window(app: &tauri::AppHandle) -> tauri::Result<()> {
             .title_bar_style(tauri::TitleBarStyle::Overlay)
             .hidden_title(true);
     }
+    // 窗口/任务栏图标显式取运行时 bundle 图标（WM_SETICON 实时下发），不依赖
+    // 「exe 资源 + 按路径缓存」通道——后者在覆盖升级后会被 Windows 图标缓存
+    // 卡在旧图上（2026-09-26 实机：任务栏旧紫图标，exe 资源实际已是新鲸鱼）。
+    if let Some(icon) = app.default_window_icon().cloned() {
+        builder = builder.icon(icon)?;
+    }
     // 标题栏注入脚本按平台分叉（Windows 官方模式 v3 / macOS 让位带 v2）
     #[cfg(windows)]
     let builder = builder.initialization_script(WINDOWS_TITLEBAR_MODE_JS);
