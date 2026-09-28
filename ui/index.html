@@ -29,9 +29,17 @@
   .col { width: min(600px, calc(100% - 64px)); }
   .brand {
     font-size: 12px; color: var(--t3); letter-spacing: 0.02em;
-    margin-bottom: 40px; display: flex; align-items: baseline; gap: 10px;
+    margin-bottom: 40px; display: flex; align-items: center; gap: 9px;
   }
   .brand b { color: var(--t2); font-weight: 600; }
+  .brand-mark {
+    width: 26px; height: 26px; border-radius: 7px; flex: none;
+    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.4);
+  }
+  .pane-head {
+    font-family: var(--mono); font-size: 10px; color: var(--t3);
+    text-align: right; margin-bottom: 8px;
+  }
 
   /* ── 启动阶段轨：真实流程序列，完成打勾、当前亮行带光标 ── */
   #boot { display: flex; flex-direction: column; width: 100%; }
@@ -136,12 +144,16 @@
 </head>
 <body>
   <div class="col">
-    <div class="brand"><b>DSH Desktop</b><span>本地运行环境</span></div>
+    <div class="brand">
+      <img class="brand-mark" src="whale.png" alt="" width="26" height="26">
+      <b>DSH Desktop</b><span>本地运行环境</span>
+    </div>
 
     <!-- v0.1.4 引入向导时把启动页元素包进 #boot 但漏了样式迁移：
          居中/垂直分布/gap 原先定义在 body 上（元素是 body 直接子级），
          包裹层一加布局全部失效——内容堆成一坨。样式必须跟到容器上。 -->
     <div id="boot" data-state="running">
+      <div class="pane-head"><span id="elapsed">耗时 0.0s</span></div>
       <div id="log"></div>
       <div id="status">正在检查运行环境</div>
       <div id="bar-wrap"><div id="bar"></div></div>
@@ -221,6 +233,19 @@
     const STAGES = ['环境自检', '运行时就绪', '启动服务', '就绪探活', '凭证与界面'];
     const logEl = document.getElementById('log');
     let stage = 0;
+
+    // 启动耗时：真实监督数据；就绪/出错即冻结为最终耗时
+    const t0 = Date.now();
+    const elapsedEl = document.getElementById('elapsed');
+    let elapsedDone = false;
+    function stopElapsed() {
+      if (elapsedDone) return;
+      elapsedDone = true;
+      elapsedEl.textContent = '耗时 ' + ((Date.now() - t0) / 1000).toFixed(1) + 's';
+    }
+    setInterval(() => {
+      if (!elapsedDone) elapsedEl.textContent = '耗时 ' + ((Date.now() - t0) / 1000).toFixed(1) + 's';
+    }, 100);
 
     function stageIndex(text) {
       const t = text || '';
@@ -357,6 +382,7 @@
         stopped = true;
         setProgress(s.text, true, false);
         renderStages(s.text, true, false);
+        stopElapsed();
         // 远程模式错误态：本地语义的「安装运行环境」不适用，换远程按钮组；
         // 打开日志/打开数据目录两种模式都保留
         actions.style.display = s.remote ? 'none' : 'flex';
@@ -374,6 +400,7 @@
       }
       if (s.ready) {
         stopped = true; spinner.style.display = 'none';
+        stopElapsed();
         // 就绪后「首次启动需下载运行环境」的提示已过时，隐藏
         const hint = document.getElementById('hint');
         if (hint) hint.style.display = 'none';
