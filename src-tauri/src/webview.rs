@@ -221,11 +221,14 @@ pub const WINDOWS_TITLEBAR_MODE_JS: &str = r##"
     }
 
     // dockkit 停靠面板（右侧栏层，套件插件注册的顶条 tab / 悬浮把手都在这层）：
-    // position:absolute;top:0;right:0;bottom:0 锚在 frame 的 **padding 盒顶**——
-    // 绝对定位偏移不吃 padding，标题栏模式下会顶进 40px 顶条与窗控钮重叠
-    // （v0.1.5-0.1.10 实测过同款冲突）。旧让位方案靠 body 平移顺带修掉，新方案
-    // 显式下移。面板类名是 CSS Modules 哈希（随版本变），用子元素 data-* 反查
-    // 最近的三边贴边容器改内联 top；插件加载晚于首帧，定时窗口内重试。
+    // 【2026-09-28 修正：下移量 40px → 0】绝对定位相对包含块的 **padding 盒**定位，
+    // 而 frame 自带 padding-top:40px——abs top:0 本来就落在顶条下方，不会重叠。
+    // 旧的 top:40px 是 overlay 时代（body transform 让位、frame 无 padding）的
+    // 遗留量：在 padding 模式下变成双重偏移，恰好把面板多压低一个标题栏高度。
+    // 它只在面板插件渲染出 abs 图层时命中（该图层的出现与否取决于 CSS 视口
+    // 宽度），这就是用户看到的「偏移随分辨率变化」。归零 = 任何模式下都与
+    // 对话区同顶。面板类名是 CSS Modules 哈希（随版本变），用子元素 data-*
+    // 反查最近的三边贴边容器改内联 top；插件加载晚于首帧，定时窗口内重试。
     var dockFix = function () {
       var el = document.querySelector(
         '[data-dockkit-tab],[data-dockkit-host],[data-dockkit-pane],[data-dockkit-empty]'
@@ -236,7 +239,7 @@ pub const WINDOWS_TITLEBAR_MODE_JS: &str = r##"
         var cs = getComputedStyle(p);
         if ((cs.position === 'absolute' || cs.position === 'fixed') &&
             cs.top === '0px' && cs.right === '0px' && cs.bottom === '0px') {
-          p.style.setProperty('top', 'var(--dsh-windows-titlebar-height)');
+          p.style.setProperty('top', '0px');
           return true;
         }
         p = p.parentElement;
@@ -1208,10 +1211,17 @@ mod tests {
             s.contains("--dsh-windows-sidebar-width"),
             "缺少 AppFrame 根元素定位标记（仅标题栏模式下内联存在）"
         );
-        // dockkit 面板下移（absolute top:0 锚 frame padding 盒顶，不处理会顶进顶条）
+        // dockkit 停靠面板：padding 模式下 abs top:0 已天然落在顶条下方（padding 盒
+        // 语义），下移量必须为 0——旧的 +40px 是 overlay 时代遗留，在 padding 模式
+        // 下变成双重偏移（面板恰好多压低一个标题栏高度，且只在插件渲染出 abs 图层
+        // 的视口宽度下出现 =「偏移随分辨率变化」的根因）
         assert!(
-            s.contains("data-dockkit-tab") && s.contains("var(--dsh-windows-titlebar-height)"),
-            "缺少 dockkit 停靠面板下移兜底"
+            s.contains("'top', '0px'"),
+            "dockFix 下移量不是 0（padding 模式下 +40px 是双重偏移）"
+        );
+        assert!(
+            !s.contains("'top', 'var(--dsh-windows-titlebar-height)'"),
+            "dockFix 仍在叠加标题栏高度（双重偏移回归）"
         );
         // 应用/编辑菜单：shadow DOM + 保焦点 + 命令通道 + 编辑命令。
         // 命令双通道：IPC 首选（shell_<name>），被拒回退导航通道（保留 .invalid host）
