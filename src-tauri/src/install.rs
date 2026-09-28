@@ -1383,14 +1383,17 @@ fn snapshot_web_profile(home: &std::path::Path, backup: &std::path::Path) {
 
 /// 失败回滚：只覆盖快照里存在的文件（装前本就没有的文件不造出来）。
 fn restore_web_profile(home: &std::path::Path, backup: &std::path::Path) {
+    use std::io::Write;
+    // 单测会调用本函数（home/backup 是临时目录），但日志走真实 runtime_root：不加隔离
+    // 会把「已回滚」行写进生产日志、进而触发守护「套件安装失败」误立案（2026-09-28）。
+    let mut log = if cfg!(test) { None } else { crate::runtime::open_log_append() };
     for (dst, name) in web_profile_files(home) {
         let b = backup.join(name);
         if !b.is_file() {
             continue;
         }
         let outcome = std::fs::copy(&b, &dst);
-        if let Some(mut log) = crate::runtime::open_log_append() {
-            use std::io::Write;
+        if let Some(log) = log.as_mut() {
             match outcome {
                 Ok(_) => {
                     let _ = writeln!(log, "[数字分身] 已回滚 {name} 至装前快照");
