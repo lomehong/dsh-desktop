@@ -244,7 +244,8 @@
     const CAT_ZH = {
       service_unreachable: '服务无响应', node_crash: '服务进程崩溃', profile_bundle: '插件失联',
       plugin_dep_missing: '插件缺依赖', module_missing: '模块缺失', port_in_use: '端口被占',
-      auth_401: '凭证失效', npm_error: 'npm 异常', restart_exhausted: '重启已放弃'
+      auth_401: '凭证失效', npm_error: 'npm 异常', restart_exhausted: '重启已放弃',
+      suite_install_failed: '套件安装失败'
     };
     const OUT_ZH = { pending: '待处置', fixing: '修复中', resolved: '已解决', failed: '修复失败' };
     const ACTION_ZH = {
@@ -339,6 +340,16 @@
             try { await invoke('guardian_fix', { id: it.id }); } catch (err) { alert(err); fix.disabled = false; }
           };
           btns.appendChild(fix);
+        }
+        if (it.outcome === 'pending' || it.outcome === 'failed') {
+          const done = document.createElement('button');
+          done.textContent = '标记已解决';
+          done.onclick = async (e) => {
+            e.stopPropagation(); done.disabled = true;
+            try { await invoke('guardian_resolve', { id: it.id }); }
+            catch (err) { alert(err); done.disabled = false; }
+          };
+          btns.appendChild(done);
         }
         if (s.llm_enabled) {
           const ai = document.createElement('button');

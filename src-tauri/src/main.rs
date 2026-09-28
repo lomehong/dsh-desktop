@@ -180,6 +180,14 @@ fn guardian_diagnose(window: tauri::WebviewWindow, app: tauri::AppHandle, id: u6
 }
 
 #[tauri::command]
+fn guardian_resolve(window: tauri::WebviewWindow, app: tauri::AppHandle, id: u64) -> Result<(), String> {
+    if !caller_is_local(&window) {
+        return Err("无权限".into());
+    }
+    guardian::resolve_manual(&app, id)
+}
+
+#[tauri::command]
 fn guardian_config_load(window: tauri::WebviewWindow) -> Result<guardian::GuardianCfg, String> {
     if !caller_is_local(&window) {
         return Err("无权限".into());
@@ -723,6 +731,7 @@ fn main() {
             guardian_run_once,
             guardian_fix,
             guardian_diagnose,
+            guardian_resolve,
             guardian_config_load,
             guardian_config_save,
             guardian_open

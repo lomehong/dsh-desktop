@@ -315,14 +315,35 @@ pub struct RuleHit {
 
 /// 单行日志分类。命中即返回；顺序即优先级（越具体的越靠前）。
 pub fn classify_line(line: &str) -> Option<RuleHit> {
-    // Node.js 致命横幅（复用 supervisor 启动期同款判定）
-    if let Some(banner) = crate::supervisor::crash_banner(line) {
+    // Node.js 致命横幅（复用 supervisor 启动期同款判定）。限定服务 stderr（`[err] `
+    // 前缀由 supervisor tee 时添加）——壳侧短命 node 进程（套件安装器/prep/探针）
+    // 的裸输出里也会出现同款横幅，不加限定会被当服务崩溃立案又同秒判自愈
+    // （2026-09-28 实机教训：真正的问题不可见，台账只剩一条无意义假案）。
+    if line.starts_with("[err] ") {
+        if let Some(banner) = crate::supervisor::crash_banner(line) {
+            return Some(RuleHit {
+                category: "node_crash",
+                severity: "error",
+                diagnosis: format!("服务进程崩溃（{banner}）"),
+                action: Some(Action::RestartService),
+                advice: String::new(),
+            });
+        }
+    }
+    // 套件安装失败（壳侧操作）：失败出口只写日志 + status::fail，守护曾完全不可见
+    // （2026-09-28 实机：安装失败而巡检报「无问题」）。无白名单动作，只给重试指引；
+    // 成功收尾由 success_resolve_categories 回写结案。
+    if line.contains("[数字分身]")
+        && (line.contains("失败")
+            || line.contains("已回滚")
+            || (line.contains("退出码=Some(") && !line.contains("退出码=Some(0)")))
+    {
         return Some(RuleHit {
-            category: "node_crash",
+            category: "suite_install_failed",
             severity: "error",
-            diagnosis: format!("服务进程崩溃（{banner}）"),
-            action: Some(Action::RestartService),
-            advice: String::new(),
+            diagnosis: "数字分身套件安装失败（已回滚，详见通知与日志）".into(),
+            action: None,
+            advice: "在托盘重试「安装/更新数字分身套件」；若连续失败，先导出诊断包".into(),
         });
     }
     // profile bundle 失联：核心更新清空/迁移丢失 → 补装 profile 插件。
@@ -503,6 +524,33 @@ fn resolve_issue(app: &tauri::AppHandle, id: u64, note: &str) {
     notifications::record(app, "守护 Agent", &format!("问题 #{id} 已解决：{note}"));
 }
 
+/* ── 成功回写：问题已由后续操作修复（2026-09-28 挂起案教训） ── */
+
+/// 纯函数便于单测：日志行的「后续成功」信号 → 应自动结案的类别。
+/// 例：安装器成功收尾 = 套件与 profile 依赖均已就位，此前立下的失败案必须闭环，
+/// 否则问题被后续操作修好、台账却永久 pending（实机：装成功后 profile_bundle 案挂死）。
+fn success_resolve_categories(line: &str) -> Vec<&'static str> {
+    if line.contains("[install-all] done (") {
+        return vec!["suite_install_failed", "profile_bundle"];
+    }
+    Vec::new()
+}
+
+/// 按类别结掉未决案（只动 pending/failed；修复在途的 fixing 不抢，由执行层收尾）。
+fn resolve_open_by_category(app: &tauri::AppHandle, category: &str, note: &str) {
+    let ids: Vec<u64> = {
+        let ledger = LEDGER.lock().unwrap();
+        ledger
+            .iter()
+            .filter(|i| i.category == category && matches!(i.outcome.as_str(), "pending" | "failed"))
+            .map(|i| i.id)
+            .collect()
+    };
+    for id in ids {
+        resolve_issue(app, id, note);
+    }
+}
+
 fn severity_zh(severity: &str) -> &'static str {
     match severity {
         "error" => "错误",
@@ -611,6 +659,11 @@ fn tail_log(app: &tauri::AppHandle, now: u64) {
         }
     };
     for line in chunk.lines() {
+        // 先处理成功回写再分类：成功行（done）不会命中失败规则，两步互不冲突；
+        // 首帧全量回扫时，历史失败行先立案、更晚的成功行在同一轮把它结掉（自愈闭环）。
+        for category in success_resolve_categories(line) {
+            resolve_open_by_category(app, category, "检测到安装成功，自动结案");
+        }
         if let Some(hit) = classify_line(line) {
             maybe_open_from_rule(app, &hit, line, now);
         }
@@ -1144,6 +1197,23 @@ pub fn fix_issue(app: tauri::AppHandle, id: u64) -> Result<(), String> {
     Ok(())
 }
 
+/// 手动结案（守护报告窗「标记已解决」）：用户确认问题已解决/无需处理——给用户
+/// 最终控制权，兜底无动作案件（如 plugin_dep_missing）没有销案路径的死结。
+pub fn resolve_manual(app: &tauri::AppHandle, id: u64) -> Result<(), String> {
+    let open = {
+        let ledger = LEDGER.lock().unwrap();
+        ledger
+            .iter()
+            .any(|i| i.id == id && matches!(i.outcome.as_str(), "pending" | "fixing" | "failed"))
+    };
+    if !open {
+        return Err(format!("问题 #{id} 不存在或已结案"));
+    }
+    resolve_issue(app, id, "用户手动标记已解决");
+    let _ = app.emit_guardian_refresh();
+    Ok(())
+}
+
 /// 手动 AI 诊断某案（后台执行，完成后刷新）。
 pub fn diagnose_async(app: tauri::AppHandle, id: u64) {
     std::thread::spawn(move || {
@@ -1246,6 +1316,50 @@ mod tests {
         assert!(classify_line("[守护] 立案 #3").is_none());
         // 「Node.js」出现在错误文案中段不算横幅（对齐 supervisor 语义）
         assert!(classify_line("[err] Error: Node.js require failed").is_none());
+    }
+
+    /// 2026-09-28 实机教训：壳侧短命 node 进程（套件安装器/prep/探针）的裸崩溃
+    /// 横幅曾被当服务崩溃立案又秒销——崩溃规则必须限定服务 stderr（`[err] ` 前缀）。
+    #[test]
+    fn crash_banner_requires_service_stderr_prefix() {
+        let hit = classify_line("[err] Node.js v24.19.0").expect("服务 stderr 横幅应命中");
+        assert_eq!(hit.category, "node_crash");
+        assert!(classify_line("Node.js v24.19.0").is_none(), "壳侧裸行不得命中");
+        assert!(classify_line("  Node.js v24.19.0").is_none());
+        assert!(classify_line("[out] Node.js v24.19.0").is_none());
+    }
+
+    /// 套件安装失败（壳侧操作）必须立案：失败出口只写日志，曾对守护完全不可见；
+    /// 成功/预检通过行不得命中（否则每次成功都立假案）。
+    #[test]
+    fn suite_install_failure_is_classified_but_success_is_not() {
+        let hit = classify_line("[数字分身] install-all.bat 退出码=Some(1)").expect("失败退出码应命中");
+        assert_eq!(hit.category, "suite_install_failed");
+        assert_eq!(hit.severity, "error");
+        assert_eq!(hit.action, None);
+        assert!(hit.advice.contains("重试"));
+
+        let hit = classify_line("[数字分身] 准备应用自带运行环境失败：初始化 web profile/宿主依赖失败").unwrap();
+        assert_eq!(hit.category, "suite_install_failed");
+
+        let hit = classify_line("[数字分身] 已回滚 package.json 至装前快照").unwrap();
+        assert_eq!(hit.category, "suite_install_failed");
+
+        assert!(classify_line("[数字分身] install-all.bat 退出码=Some(0)").is_none());
+        assert!(classify_line("[数字分身] 插件校验通过，正在重启 DSH 加载套件…").is_none());
+        assert!(classify_line("[install-all] done (11 links verified)! Restart dsh web to load plugins.").is_none());
+    }
+
+    /// 成功回写：安装器成功收尾 → 失败案与 profile_bundle 未决案自动结案。
+    #[test]
+    fn success_signal_resolves_suite_and_bundle_categories() {
+        let cats = success_resolve_categories(
+            "[install-all] done (11 links verified)! Restart dsh web to load plugins.",
+        );
+        assert!(cats.contains(&"suite_install_failed"));
+        assert!(cats.contains(&"profile_bundle"));
+        assert!(success_resolve_categories("[install-all] release mode: probing GitHub Releases ...").is_empty());
+        assert!(success_resolve_categories("[out] dsh web: http://127.0.0.1:1/").is_empty());
     }
 
     #[test]
