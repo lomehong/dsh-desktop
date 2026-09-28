@@ -19,10 +19,14 @@ use tauri::Manager;
 /// 解析成 alpha.2，缺 watchUserPatches 导出 → SyntaxError 启动即崩）。基线跟进
 /// 最新版 = 主子版本一致。根治需上游 exact 钉版或全局锁文件。
 ///
-/// 当前基线 0.1.7-rc.2（2026-09-24 核对 npm 官方）：主包全部 @deepseek-ai/* 子依赖
-/// 均精确钉在 0.1.7-rc.2，不形成主/子混装树；三元组 (0,1,7) 在 DSH_MAX_ADAPTED 内。
-/// rc.2 的真机启动/认证实证待补——隔离环境跑通前不宣称已验证。
-pub const DSH_VERSION: &str = "0.1.7-rc.2";
+/// 当前基线 0.2.0-rc.1（2026-09-27 核对 npm 官方 + 上游 tag dsh-v0.2.0-rc.1）：
+/// 上游 0.2 起改用 commit-addressed npm baseline，@deepseek-ai/dsh-* 子依赖全部
+/// 精确钉 0.2.0-rc.1（不形成主/子混装树；cordis/schemastery 等第三方仍为范围）。
+/// 静态集成面核查通过：stdout URL 行（web-app/src/index.ts:271）、--no-open、
+/// /api/remote.mux、data-windows-titlebar、renderSlot、`dsh plugin --profile`
+/// 安装命令全部存活。真机冒烟（启动/认证/事件/套件插件/守护误报面）待补——
+/// 跑通前不宣称已验证。
+pub const DSH_VERSION: &str = "0.2.0-rc.1";
 /// 便携 Node 版本（dsh rc.x 的 zstd 要求需要 Node 24）。
 const NODE_VERSION: &str = "24.19.0";
 /// 固定自带包管理器版本，禁止因系统 pnpm 或 latest 跨大版本而改变安装行为。
@@ -33,9 +37,12 @@ const PNPM_VERSION: &str = "10.34.5";
 /// 0.1.7-alpha.2 真机实证（2026-09-23）：启动/URL token 行/token→cookie/GET /、
 /// remote.mux WS（带 cookie 101、无 cookie 401——0.1.6-alpha.2 的静默挂断回归
 /// 已在上游修复）、$events/result、--no-open、keep-alive 补丁锚点全部通过。
-/// 升到 (0,1,7) 放行 0.1.7 系列。npm 超出此版本时仍拒绝升级并引导先升级应用
+/// 0.2.0-rc.1 静态核查（2026-09-27，tag dsh-v0.2.0-rc.1）：dsh-* 子包改精确钉版；
+/// stdout URL 行/--no-open/remote.mux/Set-Cookie 认证/data-windows-titlebar/
+/// renderSlot/plugin--profile 安装命令全部存活；真机冒烟待补。
+/// 升到 (0,2,0) 放行 0.2.0 系列。npm 超出此版本时仍拒绝升级并引导先升级应用
 /// 本体；DSH_DESKTOP_DSH_VERSION 显式指定视为知情强制。
-const DSH_MAX_ADAPTED: (u64, u64, u64) = (0, 1, 7);
+const DSH_MAX_ADAPTED: (u64, u64, u64) = (0, 2, 0);
 
 /// ⚠️ 运行时升级纪律（真实事故两次，教训见 docs/lessons/2026-09-15-runtime-upgrade-whilst-running.md）：
 /// **执行 npm install 升级运行时前，必须确认用户已关闭 dsh-desktop 应用。**
@@ -844,7 +851,7 @@ pub fn upgrade_dsh(app: &tauri::AppHandle) -> Result<String, String> {
         if let Some(t) = version_triple(&target) {
             if t > DSH_MAX_ADAPTED {
                 return Err(format!(
-                    "DSH v{target} 超出当前应用已适配的运行时版本（≤0.{}.{}.x）：该版本线启用了 Web 一次性 token 认证并更换了事件流端点。请先把 dsh-desktop 应用本体升级到配套版本；如确需强制，可设环境变量 DSH_DESKTOP_DSH_VERSION 指定目标版本。",
+                    "DSH v{target} 超出当前应用已适配的运行时版本（≤0.{}.{}.x）：跨版本线可能存在认证/事件流/插件代际变化。请先把 dsh-desktop 应用本体升级到配套版本；如确需强制，可设环境变量 DSH_DESKTOP_DSH_VERSION 指定目标版本。",
                     DSH_MAX_ADAPTED.0, DSH_MAX_ADAPTED.1
                 ));
             }
@@ -2345,16 +2352,18 @@ npm warn allow-scripts Run `npm install -g --allow-scripts=@deepseek-ai/dsh-subp
 
     #[test]
     fn guard_blocks_next_minor_line_allows_current() {
-        // 0.1.7 系列放行（2026-09-23 真机实证：启动/认证/事件流/keep-alive 锚点全通过）
-        assert!(version_triple("0.1.7-alpha.1").unwrap() <= DSH_MAX_ADAPTED);
-        assert!(version_triple("0.1.7-alpha.2").unwrap() <= DSH_MAX_ADAPTED);
+        // 0.2.0 系列放行（2026-09-27 静态核查：dsh-* 子包精确钉版，集成面全存活；
+        // 真机冒烟待补）
+        assert!(version_triple("0.2.0-rc.1").unwrap() <= DSH_MAX_ADAPTED);
+        assert!(version_triple("0.2.0").unwrap() <= DSH_MAX_ADAPTED);
+        // 0.1.x 全系列 ≤ (0,2,0)：放行（历史基线都在适配线内）
         assert!(version_triple("0.1.7-rc.2").unwrap() <= DSH_MAX_ADAPTED);
-        assert!(version_triple("0.1.7").unwrap() <= DSH_MAX_ADAPTED);
-        // 预发布段按其所属三元组参与比较：0.1.8-alpha 起视为需要壳配套适配——必须拦
-        assert!(version_triple("0.1.8-alpha.1").unwrap() > DSH_MAX_ADAPTED);
-        assert!(version_triple("0.1.8").unwrap() > DSH_MAX_ADAPTED);
-        assert!(version_triple("0.2.0").unwrap() > DSH_MAX_ADAPTED);
-        // 0.1.6 系列（含 alpha/正式）≤ 当前适配线 (0,1,6)：放行（2026-09-09 评估
+        assert!(version_triple("0.1.8").unwrap() <= DSH_MAX_ADAPTED);
+        // 预发布段按其所属三元组参与比较：0.2.1-alpha 起视为需要壳配套适配——必须拦
+        assert!(version_triple("0.2.1-alpha.1").unwrap() > DSH_MAX_ADAPTED);
+        assert!(version_triple("0.2.1").unwrap() > DSH_MAX_ADAPTED);
+        assert!(version_triple("0.3.0").unwrap() > DSH_MAX_ADAPTED);
+        // 0.1.6 系列（含 alpha/正式）≤ 当前适配线：放行（2026-09-09 评估
         // 11 个依赖包零 diff，零破坏后放行）
         assert!(version_triple("0.1.6-alpha.1").unwrap() <= DSH_MAX_ADAPTED);
         assert!(version_triple("0.1.6").unwrap() <= DSH_MAX_ADAPTED);
