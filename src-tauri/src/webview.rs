@@ -425,15 +425,25 @@ pub const WINDOWS_TITLEBAR_MODE_JS: &str = r##"
 /// 右侧边栏卡片化（2026-09-27 用户反馈：dockkit 停靠面板平铺无底色，内容首行被
 /// 38px 的 dockkit 条带（文件 tab + 「开始」/分栏/全屏/收起钮）压低，与对话区的
 /// 顶部/高度读作两张不对齐的卡）。壳侧给停靠 pane 补卡片底色：白底 + 12px 圆角 +
-/// 软阴影 + 右侧留边 + 圆角裁剪；条带背景透明融入卡片首行工具栏。效果：侧栏与
-/// 对话区同一内容起点、同一底边——两张卡顶对齐、等高。
+/// 软阴影 + 右侧留边 + 圆角裁剪；条带背景透明融入卡片首行工具栏。
+///
+/// 对齐策略（2026-09-28 二次修正：「高度不同且随分辨率变化」）：**构造性对齐**——
+/// pane 上下不留 inset（margin: 0 12px），顶/底与所在列的内容盒严丝合缝。任何
+/// 环境下（dockFix 内联补丁命中与否、任意分辨率/DPI/窗口尺寸）两侧表面的顶底
+/// 都由同一段布局流决定，不依赖任何常量假设，因此不存在随分辨率变化的偏差。
+///
+/// 圆角：Windows 标题栏模式下官方规则只给中央列 `16px 0 0 0`（左上角），右侧栏
+/// 打开时右上角是原生直角、与卡片语言不配。AppFrame 根元素带稳定内联变量
+/// `--dsh-windows-sidebar-width`（仅标题栏模式存在，dockFix 同款锚点），结构
+/// 选择中央列（最后一个元素子）补全四角 16px。
 ///
 /// 适配纪律（dockFix 同款）：**CSS Modules 类名是哈希、随 dsh 版本变，壳侧规则
-/// 只允许依赖稳定的 data-* 属性与结构关系**——
+/// 只允许依赖稳定的 data-* 属性、内联变量标记与结构关系**——
 /// - pane：`[data-dockkit-pane]`（dockkit 自有属性，dockFix 也在用）；
 /// - 条带：`> [data-dockkit-strip]`（dockkit 自有属性）；
 /// - 内容体：`> :not([data-dockkit-strip])`（pane 的直接子元素只有条带与内容体，
-///   结构关系比哈希类名稳定）。
+///   结构关系比哈希类名稳定）；
+/// - 中央列：AppFrame 根的内联变量标记 + 「最后一个元素子」。
 /// 样式表带 id 防重（对页面运行时 DOM 操作免疫，TITLEBAR_INSET_CSS 同款）；
 /// 纯 CSS 规则（非 inline style），对 React 重渲染免疫，晚挂载的 pane 自动命中。
 /// 浮动面板（float）不带 data-dockkit-pane 属性，天然不受影响（IM 协同弹窗等）。
@@ -446,10 +456,16 @@ pub const SIDEBAR_CARD_CSS: &str = r##"
     var s = document.createElement('style');
     s.id = 'dsh-desktop-sidebar-card';
     s.textContent =
-      '[data-dockkit-pane]{margin:6px 12px 6px 0;border-radius:12px;' +
+      // 停靠 pane 卡片化：上下零 inset（与所在列内容盒严丝合缝，任意分辨率顶底对齐）
+      '[data-dockkit-pane]{margin:0 12px;border-radius:12px;' +
       'background:var(--dsw-alias-bg-layer-1);box-shadow:var(--dsw-elevation-soft);overflow:hidden}' +
       '[data-dockkit-pane] > [data-dockkit-strip]{background:transparent}' +
-      '[data-dockkit-pane] > :not([data-dockkit-strip]){background:transparent}';
+      '[data-dockkit-pane] > :not([data-dockkit-strip]){background:transparent}' +
+      // 中央列四角圆角：官方规则只给左上 16px，右侧栏打开时右上直角与卡片不配。
+      // 实测 AppFrame 有五个子元素（sidebarCol/centerCol/rightbarCol/overlayLayer/
+      // handle），按子元素挑中央列不稳定——直接给 AppFrame 根（稳定内联变量锚点）
+      // 整体 16px 圆角：frame 自带 overflow:hidden，一次把所有子列的外角都裁圆
+      '[data-windows-titlebar] [style*="--dsh-windows-sidebar-width"]{border-radius:16px !important}';
     (document.head || document.documentElement).appendChild(s);
   };
   if (document.readyState === 'loading') {
@@ -1269,7 +1285,7 @@ mod tests {
         );
     }
 
-    /// 右侧边栏卡片化契约（2026-09-27）：停靠 pane 补卡片底色与对话区顶对齐、等高。
+    /// 右侧边栏卡片化契约（2026-09-28）：停靠 pane 补卡片底色与对话区顶对齐、等高。
     /// 适配纪律：dockkit 类名是 CSS Modules 哈希随版本变（dockFix 文档原话），
     /// 壳侧规则只准依赖稳定 data-* 属性与结构关系，禁止出现哈希类名——
     /// 否则 dsh 运行时一更新哈希全变，适配静默失效。
@@ -1313,6 +1329,24 @@ mod tests {
         ] {
             assert!(s.contains(needle), "卡片化缺少 {needle}");
         }
+        // 构造性对齐（二次修正）：pane 上下零 inset——顶/底与所在列内容盒严丝合缝，
+        // 任意分辨率/DPI/窗口尺寸下与对话区顶底对齐，不依赖常量假设
+        assert!(
+            s.contains("margin:0 12px"),
+            "pane 未做上下零 inset（margin:0 12px），对齐仍依赖环境常量"
+        );
+        // 中央列四角圆角：官方只给左上 16px。实测 AppFrame 五个子元素（含
+        // rightbarCol/overlayLayer/handle），按子元素挑中央列不稳定——改在
+        // AppFrame 根（稳定内联变量锚点）整体 16px 圆角，frame 自带
+        // overflow:hidden 裁出所有外角
+        assert!(
+            s.contains("[data-windows-titlebar] [style*=\"--dsh-windows-sidebar-width\"]{border-radius:16px !important}"),
+            "缺少 AppFrame 根整体圆角规则"
+        );
+        assert!(
+            s.contains("border-radius:16px !important"),
+            "中央列圆角未加 important（会被官方规则压回 16px 0 0 0）"
+        );
         // 纪律红线：不得出现 CSS Modules 哈希类名（随版本变，写了必失效）
         assert!(!s.contains("_11olo_"), "出现 dockkit 哈希类名（版本一变即失效）");
         assert!(!s.contains("1h7p4") && !s.contains("dhJKeW"), "出现插件哈希类名");
