@@ -422,6 +422,44 @@ pub const WINDOWS_TITLEBAR_MODE_JS: &str = r##"
 "##;
 
 
+/// 右侧边栏卡片化（2026-09-27 用户反馈：dockkit 停靠面板平铺无底色，内容首行被
+/// 38px 的 dockkit 条带（文件 tab + 「开始」/分栏/全屏/收起钮）压低，与对话区的
+/// 顶部/高度读作两张不对齐的卡）。壳侧给停靠 pane 补卡片底色：白底 + 12px 圆角 +
+/// 软阴影 + 右侧留边 + 圆角裁剪；条带背景透明融入卡片首行工具栏。效果：侧栏与
+/// 对话区同一内容起点、同一底边——两张卡顶对齐、等高。
+///
+/// 适配纪律（dockFix 同款）：**CSS Modules 类名是哈希、随 dsh 版本变，壳侧规则
+/// 只允许依赖稳定的 data-* 属性与结构关系**——
+/// - pane：`[data-dockkit-pane]`（dockkit 自有属性，dockFix 也在用）；
+/// - 条带：`> [data-dockkit-strip]`（dockkit 自有属性）；
+/// - 内容体：`> :not([data-dockkit-strip])`（pane 的直接子元素只有条带与内容体，
+///   结构关系比哈希类名稳定）。
+/// 样式表带 id 防重（对页面运行时 DOM 操作免疫，TITLEBAR_INSET_CSS 同款）；
+/// 纯 CSS 规则（非 inline style），对 React 重渲染免疫，晚挂载的 pane 自动命中。
+/// 浮动面板（float）不带 data-dockkit-pane 属性，天然不受影响（IM 协同弹窗等）。
+pub const SIDEBAR_CARD_CSS: &str = r##"
+(function () {
+  // 端口守卫：同其它注入脚本——加载页 tauri.localhost 非 http 协议，天然空操作。
+  if (location.protocol !== 'http:' || location.port === '') return;
+  var apply = function () {
+    if (document.getElementById('dsh-desktop-sidebar-card')) return;
+    var s = document.createElement('style');
+    s.id = 'dsh-desktop-sidebar-card';
+    s.textContent =
+      '[data-dockkit-pane]{margin:6px 12px 6px 0;border-radius:12px;' +
+      'background:var(--dsw-alias-bg-layer-1);box-shadow:var(--dsw-elevation-soft);overflow:hidden}' +
+      '[data-dockkit-pane] > [data-dockkit-strip]{background:transparent}' +
+      '[data-dockkit-pane] > :not([data-dockkit-strip]){background:transparent}';
+    (document.head || document.documentElement).appendChild(s);
+  };
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', apply);
+  } else {
+    apply();
+  }
+})();
+"##;
+
 /// decorum 顶栏按钮原本用 Segoe Fluent Icons 的 PUA 字符（\uE921 最小化、
 /// \uE922/\uE923 最大化、\uE8BB 关闭），该字体在很多机器上不命中而显示豆腐块。
 /// 替换策略：保持 decorum 自己注入 PUA 字符不变（最大化按钮在窗口最大化时
@@ -755,6 +793,7 @@ pub fn create_main_window(app: &tauri::AppHandle) -> tauri::Result<()> {
     #[cfg(not(windows))]
     let builder = builder.initialization_script(TITLEBAR_INSET_CSS);
     let window = builder
+        .initialization_script(SIDEBAR_CARD_CSS)
         .initialization_script(MODE_BADGE_JS)
         .initialization_script(SUITE_PROGRESS_JS)
         .initialization_script(SECURE_CONTEXT_SHIM_JS)
@@ -1228,5 +1267,54 @@ mod tests {
             s.contains("location.protocol !== 'http:' || location.port === ''"),
             "缺少端口守卫"
         );
+    }
+
+    /// 右侧边栏卡片化契约（2026-09-27）：停靠 pane 补卡片底色与对话区顶对齐、等高。
+    /// 适配纪律：dockkit 类名是 CSS Modules 哈希随版本变（dockFix 文档原话），
+    /// 壳侧规则只准依赖稳定 data-* 属性与结构关系，禁止出现哈希类名——
+    /// 否则 dsh 运行时一更新哈希全变，适配静默失效。
+    #[test]
+    fn sidebar_card_css_targets_stable_attributes_only() {
+        let s = SIDEBAR_CARD_CSS;
+        // 端口守卫必须保留：加载页（tauri.localhost，非 http 或无端口）是空操作
+        assert!(
+            s.contains("location.protocol !== 'http:' || location.port === ''"),
+            "缺少端口守卫"
+        );
+        // 样式表带 id 防重（对页面运行时 DOM 操作免疫，TITLEBAR_INSET_CSS 同款）
+        assert!(
+            s.contains("dsh-desktop-sidebar-card"),
+            "缺少防重 id"
+        );
+        assert!(
+            s.contains("getElementById('dsh-desktop-sidebar-card')"),
+            "缺少防重检查"
+        );
+        // pane 与条带都必须走稳定 data-* 属性选择器
+        assert!(
+            s.contains("[data-dockkit-pane]"),
+            "pane 未用 data-dockkit-pane 属性选择器"
+        );
+        assert!(
+            s.contains("[data-dockkit-strip]"),
+            "条带未用 data-dockkit-strip 属性选择器"
+        );
+        // 内容体用结构关系（pane 直接子元素中非条带者），不依赖哈希
+        assert!(
+            s.contains("> :not([data-dockkit-strip])"),
+            "内容体未用结构关系选择器"
+        );
+        // 卡片化四要素：底色、圆角、阴影、圆角裁剪（缺一读不出卡片）
+        for needle in [
+            "var(--dsw-alias-bg-layer-1)",
+            "border-radius:12px",
+            "var(--dsw-elevation-soft)",
+            "overflow:hidden",
+        ] {
+            assert!(s.contains(needle), "卡片化缺少 {needle}");
+        }
+        // 纪律红线：不得出现 CSS Modules 哈希类名（随版本变，写了必失效）
+        assert!(!s.contains("_11olo_"), "出现 dockkit 哈希类名（版本一变即失效）");
+        assert!(!s.contains("1h7p4") && !s.contains("dhJKeW"), "出现插件哈希类名");
     }
 }

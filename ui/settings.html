@@ -141,6 +141,28 @@
   .msg.err { color: #dc2626; }
   .msg.muted { color: var(--text-3); }
 
+  /* ── 通用行为（开关行） ── */
+  .toggle-row { display: flex; align-items: center; gap: 12px; padding: 9px 4px; border-radius: 8px; }
+  .toggle-row:hover { background: var(--surface-hover); }
+  .toggle-row .grow { flex: 1; min-width: 0; }
+  .toggle-row .name { font-weight: 600; }
+  .toggle-row .desc { color: var(--text-3); font-size: 12px; }
+  .switch { position: relative; flex: none; width: 38px; height: 20px; cursor: pointer; }
+  .switch input { position: absolute; inset: 0; margin: 0; opacity: 0; cursor: pointer; }
+  .switch .knob {
+    position: absolute; inset: 0; border-radius: 999px;
+    background: var(--border-strong); transition: background .15s; pointer-events: none;
+  }
+  .switch .knob::after {
+    content: ""; position: absolute; top: 2px; left: 2px; width: 16px; height: 16px;
+    border-radius: 50%; background: #fff; box-shadow: 0 1px 3px rgba(0, 0, 0, .25);
+    transition: transform .15s;
+  }
+  .switch input:checked + .knob { background: var(--accent); }
+  .switch input:checked + .knob::after { transform: translateX(18px); }
+  .switch input:disabled { cursor: default; }
+  .switch input:disabled + .knob { opacity: .4; }
+
   /* ── 运行时信息（只读行） ── */
   .kv { display: flex; gap: 12px; padding: 7px 4px; border-radius: 8px; }
   .kv:nth-child(odd) { background: var(--surface-hover); }
@@ -209,6 +231,26 @@
     </section>
 
     <section>
+      <div class="sec-h"><h2>通用行为</h2><span class="pill">立即生效</span></div>
+      <div class="card">
+        <div class="toggle-row">
+          <div class="grow">
+            <div class="name">开机自启</div>
+            <div class="desc" id="autostartDesc">登录 Windows 后自动启动 DSH Desktop</div>
+          </div>
+          <label class="switch"><input type="checkbox" id="tglAutostart" /><span class="knob"></span></label>
+        </div>
+        <div class="toggle-row">
+          <div class="grow">
+            <div class="name">关闭按钮 = 最小化到托盘</div>
+            <div class="desc">点 ✕ 时驻留托盘，服务与长任务不中断；关闭后点 ✕ 将直接退出应用</div>
+          </div>
+          <label class="switch"><input type="checkbox" id="tglCloseToTray" /><span class="knob"></span></label>
+        </div>
+      </div>
+    </section>
+
+    <section>
       <div class="sec-h"><h2>运行时</h2><span class="pill">只读</span></div>
       <div class="card">
         <div class="kv"><div class="k">dsh 版本</div><div class="v" id="infoVersion">—</div></div>
@@ -269,6 +311,15 @@
       $('infoVersion').textContent = d.dshVersion ? 'v' + d.dshVersion : '未安装（启动时自动安装）';
       $('infoRoot').textContent = d.runtimeRoot || '—';
       $('infoLog').textContent = d.logFile || '—';
+      // 通用行为开关
+      $('tglCloseToTray').checked = d.closeToTray !== false;
+      $('tglAutostart').checked = !!d.autostart;
+      if (d.portable) {
+        // 便携模式：写宿主自启注册表与 U 盘语义冲突，置灰
+        $('tglAutostart').checked = false;
+        $('tglAutostart').disabled = true;
+        $('autostartDesc').textContent = '便携模式不支持开机自启';
+      }
     } catch (e) {
       msg('配置读取失败：' + String(e), 'err');
     }
@@ -287,6 +338,28 @@
 
   // 端口语义提示：占用也能保存（启动时自动回退），此处仅提示不阻断
   load();
+
+  /* ── 通用行为开关（切换即生效，失败回滚勾选态） ── */
+  $('tglAutostart').onchange = async () => {
+    const enable = $('tglAutostart').checked;
+    try {
+      await invoke('settings_set_autostart', { enable });
+      msg(enable ? '已开启开机自启' : '已关闭开机自启', 'ok');
+    } catch (e) {
+      $('tglAutostart').checked = !enable;
+      msg('切换开机自启失败：' + String(e), 'err');
+    }
+  };
+  $('tglCloseToTray').onchange = async () => {
+    const enable = $('tglCloseToTray').checked;
+    try {
+      await invoke('settings_set_close_to_tray', { enable });
+      msg(enable ? '关闭按钮已设为最小化到托盘' : '关闭按钮已设为直接退出（立即生效）', 'ok');
+    } catch (e) {
+      $('tglCloseToTray').checked = !enable;
+      msg('切换失败：' + String(e), 'err');
+    }
+  };
 </script>
 </body>
 </html>

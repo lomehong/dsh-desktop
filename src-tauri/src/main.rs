@@ -719,6 +719,8 @@ fn main() {
             clear_notifications,
             settings::settings_load,
             settings::settings_save,
+            settings::settings_set_autostart,
+            settings::settings_set_close_to_tray,
             about::about_info,
             about::about_check_update,
             about::about_install_update,
@@ -813,15 +815,20 @@ fn main() {
             Ok(())
         })
         .on_window_event(|window, event| {
-            // 关闭按钮 = 最小化到托盘；服务继续运行（IM 渠道/长任务不中断）
+            // 关闭按钮行为由配置决定（设置页「通用行为」）：默认最小化到托盘（服务继续
+            // 运行，IM 渠道/长任务不中断）；关闭该选项则放行默认关闭——主窗关闭即整树
+            // 退出（RunEvent::Exit 兜底杀树）。配置每次现读：设置页切换立即生效。
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 if window.label() == "main" {
                     // v0.1.28+ 保存窗口状态：hide 之前快照（位置/尺寸/显示器/最大化）
                     if let Some(state) = window_state::from_window(window) {
                         window_state::save(&state);
                     }
-                    api.prevent_close();
-                    let _ = window.hide();
+                    if crate::settings::load().close_to_tray {
+                        api.prevent_close();
+                        let _ = window.hide();
+                    }
+                    // close_to_tray=false：不拦截，走默认关闭 → 应用退出 → RunEvent::Exit 清理
                 }
             }
             // Moved/Resized 也即时刷新状态（不落盘——避免拖拽期频繁 IO；

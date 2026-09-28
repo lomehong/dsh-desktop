@@ -10,11 +10,25 @@ use std::path::PathBuf;
 use tauri::Manager;
 
 /// 壳级配置（持久化于 runtime_root/launcher.json）。
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct LauncherCfg {
     /// 固定服务端口；None = 随机端口（默认）。仅 1024 及以上可保存（避开系统端口）。
     #[serde(default)]
     pub fixed_port: Option<u16>,
+    /// 关闭主窗口 = 最小化到托盘（服务继续运行）。true = 默认；false = 关闭即真退出。
+    #[serde(default = "default_true")]
+    pub close_to_tray: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+/// 手写 Default（derive 会把 bool 给成 false，而「关到托盘」必须是默认行为）。
+impl Default for LauncherCfg {
+    fn default() -> Self {
+        Self { fixed_port: None, close_to_tray: true }
+    }
 }
 
 pub fn config_path() -> PathBuf {
@@ -146,17 +160,24 @@ fn build_settings_window(app: &tauri::AppHandle, visible: bool) -> tauri::Result
 
 /* ── Tauri 命令（配置页调用；自定义命令不受 capabilities 约束，无需列出） ── */
 
-/// 配置 + 只读运行时信息（版本/数据目录/日志路径），配置页首屏一次取齐。
+/// 配置 + 只读运行时信息（版本/数据目录/日志路径/行为开关），配置页首屏一次取齐。
 /// 带 caller_is_local 守卫：自定义命令不受 capabilities 约束，命令层是最后一道边界
 /// （数据目录/版本属主机信息，Harness 页面调用一律拒绝）。
 #[tauri::command]
-pub fn settings_load(window: tauri::WebviewWindow) -> Result<serde_json::Value, String> {
+pub fn settings_load(window: tauri::WebviewWindow, app: tauri::AppHandle) -> Result<serde_json::Value, String> {
     if !crate::caller_is_local(&window) {
         return Err("无权限".into());
     }
     let cfg = load();
+    // 开机自启状态来自 autostart 插件（非 launcher.json）；便携模式不支持（插件注册表
+    // 语义与便携目录漂移冲突），前端按 portable 置灰
+    use tauri_plugin_autostart::ManagerExt;
+    let autostart = app.autolaunch().is_enabled().unwrap_or(false);
     Ok(serde_json::json!({
         "fixedPort": cfg.fixed_port,
+        "closeToTray": cfg.close_to_tray,
+        "autostart": autostart,
+        "portable": crate::runtime::portable_root().is_some(),
         "dshVersion": crate::install::installed_dsh_version(),
         "runtimeRoot": crate::runtime::runtime_root().display().to_string(),
         "logFile": crate::runtime::log_file().display().to_string(),
@@ -169,6 +190,7 @@ pub fn settings_load(window: tauri::WebviewWindow) -> Result<serde_json::Value, 
 pub fn settings_save(
     window: tauri::WebviewWindow,
     fixed_port: Option<u16>,
+    close_to_tray: Option<bool>,
 ) -> Result<(), String> {
     if !crate::caller_is_local(&window) {
         return Err("无权限".into());
@@ -181,10 +203,58 @@ pub fn settings_save(
             return Err(format!("端口 {p} 当前被占用：仍可保存，启动时会自动回退随机端口"));
         }
     }
-    save(&LauncherCfg { fixed_port })?;
+    let mut cfg = load();
+    if let Some(v) = fixed_port {
+        cfg.fixed_port = Some(v);
+    }
+    if let Some(v) = close_to_tray {
+        cfg.close_to_tray = v;
+    }
+    save(&cfg)?;
     if let Some(mut log) = crate::runtime::open_log_append() {
         use std::io::Write;
-        let _ = writeln!(log, "[设置] 端口配置已保存: fixed_port={fixed_port:?}（下次启动服务生效）");
+        let _ = writeln!(
+            log,
+            "[设置] 配置已保存: fixed_port={:?} close_to_tray={:?}（端口下次启动服务生效）",
+            cfg.fixed_port, cfg.close_to_tray
+        );
+    }
+    Ok(())
+}
+
+/// 切换开机自启（原托盘「设置 ▸ 开机自启」迁入配置页；便携模式前端置灰）。
+#[tauri::command]
+pub fn settings_set_autostart(
+    window: tauri::WebviewWindow,
+    app: tauri::AppHandle,
+    enable: bool,
+) -> Result<(), String> {
+    if !crate::caller_is_local(&window) {
+        return Err("无权限".into());
+    }
+    use tauri_plugin_autostart::ManagerExt;
+    let autolaunch = app.autolaunch();
+    let result = if enable { autolaunch.enable() } else { autolaunch.disable() };
+    result.map_err(|e| format!("切换开机自启失败: {e}"))?;
+    if let Some(mut log) = crate::runtime::open_log_append() {
+        use std::io::Write;
+        let _ = writeln!(log, "[设置] 开机自启: {enable}");
+    }
+    Ok(())
+}
+
+/// 切换「关闭按钮 = 最小化到托盘」（立即生效：主窗口 CloseRequested 每次现读配置）。
+#[tauri::command]
+pub fn settings_set_close_to_tray(window: tauri::WebviewWindow, enable: bool) -> Result<(), String> {
+    if !crate::caller_is_local(&window) {
+        return Err("无权限".into());
+    }
+    let mut cfg = load();
+    cfg.close_to_tray = enable;
+    save(&cfg)?;
+    if let Some(mut log) = crate::runtime::open_log_append() {
+        use std::io::Write;
+        let _ = writeln!(log, "[设置] 关闭按钮行为: {}", if enable { "最小化到托盘" } else { "直接退出" });
     }
     Ok(())
 }
@@ -204,12 +274,16 @@ mod tests {
         assert_eq!(load_from(&path), LauncherCfg::default());
 
         // 写入 → 读回一致
-        save_to(&path, &LauncherCfg { fixed_port: Some(3080) }).unwrap();
-        assert_eq!(load_from(&path).fixed_port, Some(3080));
+        save_to(&path, &LauncherCfg { fixed_port: Some(3080), close_to_tray: false }).unwrap();
+        let back = load_from(&path);
+        assert_eq!(back.fixed_port, Some(3080));
+        assert!(!back.close_to_tray);
 
-        // 损坏文件 → 默认而非报错
+        // 损坏文件 → 默认而非报错；默认必须「关到托盘」（历史行为）
         std::fs::write(&path, "{broken").unwrap();
-        assert_eq!(load_from(&path), LauncherCfg::default());
+        let d = load_from(&path);
+        assert_eq!(d, LauncherCfg::default());
+        assert!(d.close_to_tray, "默认必须是关到托盘");
 
         let _ = std::fs::remove_dir_all(&dir);
     }

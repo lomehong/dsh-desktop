@@ -399,7 +399,6 @@ pub struct MenuSpec {
 pub struct MenuContext {
     pub remote: bool,
     pub portable: bool,
-    pub autostart_enabled: bool,
     /// 已保存远程实例（D2 多实例）：本地模式「模式」分组渲染为子菜单。
     pub saved: Vec<(String, String)>,
 }
@@ -419,7 +418,6 @@ fn spec_for_remote(ctx: &MenuContext) -> MenuSpec {
                     MenuEntry::Item { id: "open-main", label: t("menu.open_main").into() },
                     MenuEntry::Item { id: "copy-address", label: t("menu.copy_address").into() },
                     MenuEntry::Item { id: "notifications", label: t("menu.notifications").into() },
-                    MenuEntry::Item { id: "guardian", label: t("menu.guardian").into() },
                 ],
             },
             // 2. 远程实例
@@ -434,7 +432,7 @@ fn spec_for_remote(ctx: &MenuContext) -> MenuSpec {
             MenuSection {
                 items: vec![MenuEntry::Item { id: "tolocal", label: t("menu.tolocal").into() }],
             },
-            // 4. 日志与诊断（子菜单）
+            // 4. 日志与诊断（子菜单；守护 Agent 归入诊断工具组——2026-09-28 用户指定）
             MenuSection {
                 items: vec![MenuEntry::Submenu {
                     id: "logs",
@@ -446,28 +444,14 @@ fn spec_for_remote(ctx: &MenuContext) -> MenuSpec {
                             label: if ctx.portable { t("menu.usb_opendir").into() } else { t("menu.opendir").into() },
                         },
                         MenuEntry::Item { id: "export-diagnostics", label: t("menu.export_diagnostics").into() },
+                        MenuEntry::Item { id: "guardian", label: t("menu.guardian").into() },
                     ],
                 }],
             },
-            // 5. 设置（子菜单）
+            // 5. 设置（直开配置窗，无二级菜单——2026-09-28 用户指定：开机自启与
+            //    关闭按钮行为迁入设置页「通用行为」）
             MenuSection {
-                items: vec![MenuEntry::Submenu {
-                    id: "settings",
-                    label: t("menu.settings").into(),
-                    items: vec![
-                        MenuEntry::Item { id: "settings-window", label: t("menu.open_settings").into() },
-                        MenuEntry::Check {
-                            id: "autostart",
-                            label: t("menu.autostart").into(),
-                            checked: ctx.autostart_enabled && !ctx.portable,
-                        },
-                        MenuEntry::Check {
-                            id: "close-to-tray",
-                            label: t("menu.close_to_tray").into(),
-                            checked: true, // 当前默认行为；预留为可配置项
-                        },
-                    ],
-                }],
+                items: vec![MenuEntry::Item { id: "settings-window", label: t("menu.settings").into() }],
             },
             // 6. 关于
             MenuSection {
@@ -537,7 +521,6 @@ fn spec_for_local(ctx: &MenuContext) -> MenuSpec {
                     MenuEntry::Item { id: "show", label: t("menu.show").into() },
                     MenuEntry::Item { id: "open-main", label: t("menu.open_main").into() },
                     MenuEntry::Item { id: "notifications", label: t("menu.notifications").into() },
-                    MenuEntry::Item { id: "guardian", label: t("menu.guardian").into() },
                 ],
             },
             // 2. 服务
@@ -552,7 +535,7 @@ fn spec_for_local(ctx: &MenuContext) -> MenuSpec {
                     items: suite_items,
                 }],
             },
-            // 5. 日志与诊断（子菜单）
+            // 5. 日志与诊断（子菜单；守护 Agent 归入诊断工具组——2026-09-28 用户指定）
             MenuSection {
                 items: vec![MenuEntry::Submenu {
                     id: "logs",
@@ -561,28 +544,14 @@ fn spec_for_local(ctx: &MenuContext) -> MenuSpec {
                         MenuEntry::Item { id: "openlog", label: t("menu.openlog").into() },
                         MenuEntry::Item { id: "opendir", label: opendir_label },
                         MenuEntry::Item { id: "export-diagnostics", label: t("menu.export_diagnostics").into() },
+                        MenuEntry::Item { id: "guardian", label: t("menu.guardian").into() },
                     ],
                 }],
             },
-            // 6. 设置（子菜单）
+            // 6. 设置（直开配置窗，无二级菜单——2026-09-28 用户指定：开机自启与
+            //    关闭按钮行为迁入设置页「通用行为」）
             MenuSection {
-                items: vec![MenuEntry::Submenu {
-                    id: "settings",
-                    label: t("menu.settings").into(),
-                    items: vec![
-                        MenuEntry::Item { id: "settings-window", label: t("menu.open_settings").into() },
-                        MenuEntry::Check {
-                            id: "autostart",
-                            label: t("menu.autostart").into(),
-                            checked: ctx.autostart_enabled && !ctx.portable,
-                        },
-                        MenuEntry::Check {
-                            id: "close-to-tray",
-                            label: t("menu.close_to_tray").into(),
-                            checked: true, // 当前默认行为；预留为可配置项
-                        },
-                    ],
-                }],
+                items: vec![MenuEntry::Item { id: "settings-window", label: t("menu.settings").into() }],
             },
             // 7. 关于
             MenuSection {
@@ -694,8 +663,6 @@ fn entry_visible(entry: &MenuEntry, ctx: &MenuContext) -> bool {
             "upgrade" => !ctx.remote,
             // 重新运行分身向导：仅便携
             "wizard" => ctx.portable,
-            // 开机自启：便携模式隐藏（写宿主注册表，U盘包不写）
-            "autostart" => !ctx.portable,
             // 检查 DSH 应用更新：仅非便携
             "check-app-update" => !ctx.portable,
             // 立即检查 DSH 运行时更新：仅远程（本地升级走 upgrade 项）
@@ -716,9 +683,7 @@ fn entry_visible(entry: &MenuEntry, ctx: &MenuContext) -> bool {
 }
 
 fn build_menu(app: &tauri::AppHandle, remote: bool) -> tauri::Result<Menu<tauri::Wry>> {
-    use tauri_plugin_autostart::ManagerExt;
     let portable = crate::runtime::portable_root().is_some();
-    let autostart_enabled = app.autolaunch().is_enabled().unwrap_or(false);
     let saved = crate::remote::saved_list()
         .into_iter()
         .map(|s| {
@@ -730,7 +695,7 @@ fn build_menu(app: &tauri::AppHandle, remote: bool) -> tauri::Result<Menu<tauri:
             (s.address, label)
         })
         .collect();
-    let ctx = MenuContext { remote, portable, autostart_enabled, saved };
+    let ctx = MenuContext { remote, portable, saved };
     let spec = if remote { spec_for_remote(&ctx) } else { spec_for_local(&ctx) };
     build_menu_from_spec(app, &ctx, &spec)
 }
@@ -999,21 +964,8 @@ pub fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
                 });
             }
             "close-to-tray" => {
-                // 设置项：当前总是 true（行为硬编码在 main.rs::on_window_event）。预留为可配置项。
-                // 点击切换会写入设置文件并热应用——v0.1.29 接设置持久化后再实现完整逻辑。
-                crate::status::set(app, "关闭按钮行为：最小化到托盘（v0.1.29 起可关闭）");
-            }
-            "autostart" => {
-                use tauri_plugin_autostart::ManagerExt;
-                let autolaunch = app.autolaunch();
-                let enabled = autolaunch.is_enabled().unwrap_or(false);
-                let result = if enabled { autolaunch.disable() } else { autolaunch.enable() };
-                if let Err(e) = result {
-                    eprintln!("切换开机自启失败: {e}");
-                } else {
-                    // 切换后立即重建菜单让勾选状态刷新（rebuild 不重建图标、不闪烁）
-                    rebuild(app);
-                }
+                // 已迁入设置页「通用行为」（2026-09-28）；托盘条目移除后此分支不可达，
+                // 保留空实现仅为防外部残留 id 误配
             }
             id if id.starts_with("saved:") => {
                 // D2 多实例：直连某已保存实例（解密 token → 升为活动 → 远程连接序列）
@@ -1141,7 +1093,7 @@ mod tests {
     /* ── B3：菜单 spec 可见性 ── */
 
     fn ctx(remote: bool, portable: bool) -> MenuContext {
-        MenuContext { remote, portable, autostart_enabled: false, saved: vec![] }
+        MenuContext { remote, portable, saved: vec![] }
     }
 
     fn item(id: &str) -> MenuEntry {
@@ -1156,9 +1108,9 @@ mod tests {
         // 分身向导：仅便携
         assert!(entry_visible(&item("wizard"), &ctx(false, true)));
         assert!(!entry_visible(&item("wizard"), &ctx(false, false)));
-        // 开机自启：非便携
-        assert!(!entry_visible(&item("autostart"), &ctx(false, true)));
-        assert!(entry_visible(&item("autostart"), &ctx(false, false)));
+        // 守护 Agent：总是可见（2026-09-28 已归入「日志与诊断」子菜单）
+        assert!(entry_visible(&item("guardian"), &ctx(false, true)));
+        assert!(entry_visible(&item("guardian"), &ctx(true, false)));
         // 检查 DSH 运行时更新：仅远程
         assert!(entry_visible(&item("check-dsh-update"), &ctx(true, false)));
         assert!(!entry_visible(&item("check-dsh-update"), &ctx(false, false)));
@@ -1167,5 +1119,53 @@ mod tests {
         assert!(!entry_visible(&item("show-qrcode"), &ctx(false, false)));
         // 退出：总是可见
         assert!(entry_visible(&item("quit"), &ctx(true, true)));
+    }
+
+    /// 2026-09-28 重组契约：守护 Agent 归入「日志与诊断」；「设置」不再有二级菜单
+    /// （开机自启/关闭按钮行为迁入设置页「通用行为」，见 settings.rs 命令）。
+    #[test]
+    fn spec_groups_guardian_into_logs_and_flattens_settings() {
+        for spec in [spec_for_local(&ctx(false, false)), spec_for_remote(&ctx(true, false))] {
+            // 顶层不再有 guardian / settings 子菜单
+            let top_ids: Vec<&str> = spec
+                .sections
+                .iter()
+                .flat_map(|s| s.items.iter())
+                .filter_map(|e| match e {
+                    MenuEntry::Item { id, .. } => Some(id.as_ref()),
+                    _ => None,
+                })
+                .collect();
+            assert!(!top_ids.contains(&"guardian"), "guardian 仍挂在顶层");
+            assert!(!top_ids.contains(&"settings"), "settings 仍是子菜单");
+            // 顶层设置项 = 直开配置窗
+            assert!(top_ids.contains(&"settings-window"), "设置应直开配置窗");
+            // 日志与诊断子菜单包含 guardian
+            let logs_has_guardian = spec.sections.iter().flat_map(|s| s.items.iter()).any(|e| match e {
+                MenuEntry::Submenu { id, items, .. } if *id == "logs" => items.iter().any(|i| {
+                    matches!(i, MenuEntry::Item { id, .. } if *id == "guardian")
+                }),
+                _ => false,
+            });
+            assert!(logs_has_guardian, "guardian 未归入日志与诊断子菜单");
+            // 全 spec 无 autostart / close-to-tray 托盘项（已迁设置页）
+            let all_ids: Vec<String> = spec
+                .sections
+                .iter()
+                .flat_map(|s| s.items.iter())
+                .flat_map(|e| match e {
+                    MenuEntry::Item { id, .. } => vec![id.to_string()],
+                    MenuEntry::Check { id, .. } => vec![id.to_string()],
+                    MenuEntry::Submenu { items, .. } => {
+                        items.iter().filter_map(|i| match i {
+                            MenuEntry::Item { id, .. } => Some(id.to_string()),
+                            _ => None,
+                        }).collect()
+                    }
+                    MenuEntry::Sep => vec![],
+                })
+                .collect();
+            assert!(!all_ids.iter().any(|i| i == "autostart" || i == "close-to-tray"), "托盘仍残留行为开关项");
+        }
     }
 }
