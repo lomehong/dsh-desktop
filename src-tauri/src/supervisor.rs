@@ -756,6 +756,12 @@ fn connect_remote_flow_locked(app: &tauri::AppHandle) -> Result<(), String> {
     let state: tauri::State<AppState> = app.state();
     // 收掉上一轮反代（若有）：重连/换实例时旧监听端口与旧 origin 一并作废
     stop_proxy(app);
+    // 清空 webview 浏览数据：cookie 按域名（不含端口）累积，本地会话/历次配对/
+    // 登录的 cookie 全堆在 127.0.0.1 名下，Cookie 头一旦超反代 64KB 上限，代理
+    // 直接断开（远程页一个请求都发不出去）——连接前清一次，所需 cookie 由
+    // pair?token= 与 web-auth 桥在导航中重新种齐；本地会话 cookie 切回本地时
+    // 由壳侧换证自动重种
+    crate::webview::clear_browsing_data(app);
     let cfg = crate::remote::load().ok_or("尚未配对远程实例，请先输入地址与配对码")?;
     // 配置在场但 token 为空 ⇒ remote.json 是 tokenEnc 形状且解密失败（DPAPI 绑定
     // 用户+机器：换账户/重装系统后解不开）。与「尚未配对」区分，给出明确的重配指引。

@@ -768,6 +768,25 @@ pub const MODE_BADGE_JS: &str = r##"
 })();
 "##;
 
+/// 清空 webview 浏览数据（cookie/localStorage 等，全 origin 生效）。
+/// 远程连接前调用：webview 的 cookie 按**域名（不含端口）**存储，本地会话、
+/// 历次配对、历次登录的 cookie 全部堆在 `127.0.0.1` 名下，反复叠加后单个请求的
+/// Cookie 头会超过反代的 64KB 上限（日志实锤：`[代理] 头超过 64KB 上限，断开`），
+/// 远程页面从此一个请求都发不出去——「凭证有效却连不上」的直接死因。
+/// 清空后由连接流程的 `pair?token=` 与 web-auth 桥重新种齐所需 cookie；
+/// 本地会话的 auth cookie 在切回本地时由壳侧换证自动重种，无需用户干预。
+pub fn clear_browsing_data(app: &tauri::AppHandle) {
+    let Some(w) = app.get_webview_window("main") else { return };
+    let result = w.clear_all_browsing_data();
+    if let Some(mut log) = runtime::open_log_append() {
+        use std::io::Write;
+        let _ = match result {
+            Ok(()) => writeln!(log, "[远程] 已清空 webview 浏览数据（Cookie 头瘦身，防 64KB 上限断开）"),
+            Err(e) => writeln!(log, "[warn] 清空 webview 浏览数据失败: {e}"),
+        };
+    }
+}
+
 /// 创建主窗口（程序化创建以挂导航守卫；配置文件中 windows 留空）。
 /// 无边框：decorum 覆盖式标题栏（Windows 悬浮原生风格按钮；macOS Overlay 红绿灯）。
 /// 标题栏注入脚本按平台分叉：Windows 走官方同款标题栏模式（WINDOWS_TITLEBAR_MODE_JS，
