@@ -19,14 +19,14 @@ use tauri::Manager;
 /// 解析成 alpha.2，缺 watchUserPatches 导出 → SyntaxError 启动即崩）。基线跟进
 /// 最新版 = 主子版本一致。根治需上游 exact 钉版或全局锁文件。
 ///
-/// 当前基线 0.2.0-rc.1（2026-09-27 核对 npm 官方 + 上游 tag dsh-v0.2.0-rc.1）：
-/// 上游 0.2 起改用 commit-addressed npm baseline，@deepseek-ai/dsh-* 子依赖全部
-/// 精确钉 0.2.0-rc.1（不形成主/子混装树；cordis/schemastery 等第三方仍为范围）。
-/// 静态集成面核查通过：stdout URL 行（web-app/src/index.ts:271）、--no-open、
-/// /api/remote.mux、data-windows-titlebar、renderSlot、`dsh plugin --profile`
-/// 安装命令全部存活。真机冒烟（启动/认证/事件/套件插件/守护误报面）待补——
-/// 跑通前不宣称已验证。
-pub const DSH_VERSION: &str = "0.2.0-rc.1";
+/// 当前基线 0.2.0-rc.2（2026-09-28 核对 npm 官方 + 上游 tag dsh-v0.2.0-rc.2）：
+/// dsh-* 子依赖精确钉 0.2.0-rc.2 延续；rc.1→rc.2 变更 1022 文件（+33K/−6K），
+/// 壳集成面八项复查全存活：stdout URL 行（web-app/src/index.ts:271 原样）、
+/// --no-open、/api/remote.mux、Set-Cookie 认证、data-windows-titlebar、
+/// renderSlot、`dsh plugin --profile`（README 10 处）、keep-alive 锚点——
+/// 最后者有 0.2.0-rc.1 真机日志实证（[自愈] webserver keepAliveTimeout 5s
+/// -> 65s 多次命中）。真机冒烟延续进行中（守护已在 rc.1 实战检出套件问题）。
+pub const DSH_VERSION: &str = "0.2.0-rc.2";
 /// 便携 Node 版本（dsh rc.x 的 zstd 要求需要 Node 24）。
 const NODE_VERSION: &str = "24.19.0";
 /// 固定自带包管理器版本，禁止因系统 pnpm 或 latest 跨大版本而改变安装行为。
@@ -40,6 +40,8 @@ const PNPM_VERSION: &str = "10.34.5";
 /// 0.2.0-rc.1 静态核查（2026-09-27，tag dsh-v0.2.0-rc.1）：dsh-* 子包改精确钉版；
 /// stdout URL 行/--no-open/remote.mux/Set-Cookie 认证/data-windows-titlebar/
 /// renderSlot/plugin--profile 安装命令全部存活；真机冒烟待补。
+/// 0.2.0-rc.2 复查（2026-09-28，tag dsh-v0.2.0-rc.2，rc.1→rc.2 共 1022 文件
+/// +33K/−6K）：集成面八项全存活；keep-alive 锚点有 0.2.0-rc.1 真机日志实证。
 /// 升到 (0,2,0) 放行 0.2.0 系列。npm 超出此版本时仍拒绝升级并引导先升级应用
 /// 本体；DSH_DESKTOP_DSH_VERSION 显式指定视为知情强制。
 const DSH_MAX_ADAPTED: (u64, u64, u64) = (0, 2, 0);
