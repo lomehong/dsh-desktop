@@ -24,6 +24,7 @@ mod suite_path;
 mod supervisor;
 mod tray;
 mod webview;
+mod whale;
 mod window_state;
 
 use std::process::Child;

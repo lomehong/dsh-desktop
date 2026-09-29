@@ -1,0 +1,182 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<title>DSH 守护 Agent</title>
+<style>
+  /* ── 活鲸覆盖层：透明窗体，屏幕内容原样可见，只渲染鲸鱼本体与文字。
+     鲸鱼 = 从官方图标抠出的纯黑剪影（ui/whale-silhouette.png），
+     载入后做一次最大连通域清理（清掉裁剪角落的方砖圆角残留碎片），
+     再以「竖切片相位波动」技术驱动——身体如活鱼般起伏、振幅向尾递增。 ── */
+  * { margin: 0; box-sizing: border-box; }
+  html, body { height: 100%; overflow: hidden; background: transparent; }
+  body { font-family: "Segoe UI", "Microsoft YaHei", "PingFang SC", system-ui, sans-serif; }
+  #sea {
+    position: fixed; inset: 0; width: 100%; height: 100%;
+    /* 贴边微光：只描轮廓，不产生大范围光晕（此前 22px 柔光把 190px 鲸鱼晕成
+       近 400px 光斑，视觉尺寸翻倍——实机反馈 2026-09-28） */
+    filter: drop-shadow(0 0 3px rgba(200, 220, 255, 0.35));
+  }
+  #textwrap {
+    position: fixed; left: 0; right: 0; top: 64%;
+    display: flex; flex-direction: column; align-items: center; gap: 8px;
+    pointer-events: none;
+  }
+  #txt {
+    font-size: 13px; font-weight: 600; color: #f2f5fa; letter-spacing: 0.06em;
+    text-shadow: 0 1px 8px rgba(0, 0, 0, 0.85), 0 0 18px rgba(0, 0, 0, 0.6);
+  }
+  #txt.ok { color: #7fe0ae; }
+  #txt.bad { color: #ff9c94; }
+  #sub {
+    font-family: "Cascadia Mono", Consolas, monospace; font-size: 11px; color: #d5dce4;
+    text-shadow: 0 1px 6px rgba(0, 0, 0, 0.9);
+  }
+  #ver {
+    position: fixed; right: 8px; bottom: 6px;
+    font-family: var(--mono); font-size: 9px; color: rgba(213, 220, 228, 0.35);
+    pointer-events: none;
+  }
+</style>
+</head>
+<body>
+  <canvas id="sea"></canvas>
+  <div id="textwrap"><div id="txt"></div><div id="sub"></div><div id="ver">W7</div></div>
+  <script>
+    window.__whaleBuild = 'W7';   // 页面版本标记：用户可见（右下角小字），排查"改了没生效"
+  </script>
+  <script>
+    const cvs = document.getElementById('sea');
+    const ctx = cvs.getContext('2d');
+    const reduced = matchMedia('(prefers-reduced-motion: reduce)').matches;
+    let W = 0, H = 0;
+    function resize() { W = innerWidth; H = innerHeight; cvs.width = W; cvs.height = H; }
+    resize(); addEventListener('resize', resize);
+
+    // 清理后的鲸鱼精灵（canvas 即 drawImage 源）
+    const img = new Image();
+    let sprite = null, iw = 0, ih = 0, ready = false;
+    img.onload = () => {
+      // 最大连通域清理：源图四角残留的方砖圆角弧线（透明裁剪后的碎片）
+      // 与鲸鱼主体不连通——BFS 保留最大域，其余 alpha 清零（一次 ~100ms）
+      const c = document.createElement('canvas');
+      c.width = img.naturalWidth; c.height = img.naturalHeight;
+      const cc = c.getContext('2d', { willReadFrequently: true });
+      cc.drawImage(img, 0, 0);
+      const id = cc.getImageData(0, 0, c.width, c.height);
+      const px = id.data;
+      const w = c.width, h = c.height, total = w * h;
+      const label = new Int32Array(total);
+      const stack = new Int32Array(total);
+      const sizes = [0];
+      for (let p = 0; p < total; p++) {
+        if (label[p] !== 0 || px[p * 4 + 3] < 8) continue;
+        const cid = sizes.length;
+        let sp = 0, size = 0;
+        stack[sp++] = p; label[p] = cid;
+        while (sp > 0) {
+          const q = stack[--sp]; size++;
+          const qx = q % w;
+          if (qx > 0 && label[q - 1] === 0 && px[(q - 1) * 4 + 3] >= 8) { label[q - 1] = cid; stack[sp++] = q - 1; }
+          if (qx < w - 1 && label[q + 1] === 0 && px[(q + 1) * 4 + 3] >= 8) { label[q + 1] = cid; stack[sp++] = q + 1; }
+          if (q >= w && label[q - w] === 0 && px[(q - w) * 4 + 3] >= 8) { label[q - w] = cid; stack[sp++] = q - w; }
+          if (q < total - w && label[q + w] === 0 && px[(q + w) * 4 + 3] >= 8) { label[q + w] = cid; stack[sp++] = q + w; }
+        }
+        sizes[cid] = size;
+      }
+      let best = 0, bestSize = 0;
+      for (let cid = 1; cid < sizes.length; cid++) {
+        if (sizes[cid] > bestSize) { bestSize = sizes[cid]; best = cid; }
+      }
+      for (let p = 0; p < total; p++) {
+        if (label[p] !== best) px[p * 4 + 3] = 0;
+      }
+      cc.putImageData(id, 0, 0);
+      sprite = c; iw = c.width; ih = c.height; ready = true;
+    };
+    img.src = 'whale-silhouette.png';
+
+    const N = 46;                       // 竖切片数：头在左、尾在右，波动振幅向尾递增
+    const S = { mode: 'idle', label: '', sub: '' };
+    let fadeTimer = null;
+    window.__whaleState = function (st, text, sub) {
+      S.mode = st || 'idle'; S.label = text || ''; S.sub = sub || '';
+      // 安全阀：本层鼠标穿透、无法手动关闭——异常滞留 300s 自动淡出自愈
+      const stage = document.getElementById('stage');
+      stage.style.transition = ''; stage.style.opacity = '1';
+      if (fadeTimer) clearTimeout(fadeTimer);
+      fadeTimer = setTimeout(() => {
+        stage.style.transition = 'opacity 2s'; stage.style.opacity = '0';
+      }, 300000);
+      renderText();
+    };
+    const txtEl = document.getElementById('txt');
+    const subEl = document.getElementById('sub');
+    function renderText() {
+      txtEl.textContent = S.label;
+      txtEl.className = S.mode === 'done' ? 'ok' : S.mode === 'failed' ? 'bad' : '';
+      subEl.textContent = S.sub;
+    }
+
+    const bubbles = [];                  // 修复形态：尾部上浮的修护泡
+    const rings = [];                    // 诊断形态：头部的声呐环
+    let patrol = 0;                      // 巡游相位：0 = 从屏幕水平中心出场
+    let cx = 0, baseY = 0, dir = 1;
+    const t0 = performance.now();
+
+    function frame(now) {
+      const t = (now - t0) / 1000;
+      ctx.clearRect(0, 0, W, H);
+      if (ready && W > 0) {
+        const drawW = Math.min(150, W * 0.12), drawH = drawW * (ih / iw);
+        const moving = S.mode === 'diagnosing' || S.mode === 'repairing';
+        const speed = reduced ? 0 : (S.mode === 'repairing' ? 0.55 : 0.34);
+        if (moving) patrol += speed * 0.016;
+        const range = Math.max(0, (W - drawW * 0.8) / 2);
+        cx = W / 2 + Math.sin(patrol) * range;
+        dir = Math.cos(patrol) >= 0 ? 1 : -1;
+        baseY = H * 0.42 + Math.sin(patrol * 1.6) * (reduced ? 0 : 22);
+        const ampK = reduced ? 0 : (S.mode === 'repairing' ? 1.25 : S.mode === 'diagnosing' ? 0.8 : 0.5);
+        const freq = S.mode === 'repairing' ? 5.4 : 2.6;
+        ctx.save();
+        ctx.translate(cx, baseY);
+        ctx.scale(dir, 1);
+        for (let i = 0; i < N; i++) {
+          const fx = i / (N - 1);                                // 0=头 1=尾
+          const dy = Math.sin(t * freq + fx * 2.8) * (1 + fx * fx * 7) * ampK;
+          ctx.drawImage(sprite, fx * iw, 0, iw / N + 1, ih,
+                        -drawW / 2 + fx * drawW, -drawH / 2 + dy, drawW / N + 1.5, drawH);
+        }
+        ctx.restore();
+        const headX = cx - dir * drawW / 2;
+        const tailX = cx + dir * drawW / 2;
+        // 诊断：头部声呐环（每 1.1s 一发）
+        if (S.mode === 'diagnosing' && !reduced) {
+          if (!rings.length || t - rings[rings.length - 1].t > 1.1)
+            rings.push({ x: headX, y: baseY, t, r: drawW * 0.1, a: 0.55 });
+          for (let i = rings.length - 1; i >= 0; i--) {
+            const g = rings[i]; g.r += 1.6; g.a -= 0.012;
+            if (g.a <= 0) { rings.splice(i, 1); continue; }
+            ctx.beginPath(); ctx.arc(g.x, g.y, g.r, 0, 6.2832);
+            ctx.strokeStyle = 'rgba(96,150,255,' + g.a + ')'; ctx.lineWidth = 2; ctx.stroke();
+          }
+        }
+        // 修复：尾部上浮的修护泡
+        if (S.mode === 'repairing' && !reduced) {
+          if (bubbles.length < 26 && Math.random() < 0.45)
+            bubbles.push({ x: tailX - Math.random() * drawW * 0.22, y: baseY + 26,
+                           v: 45 + Math.random() * 55, r: 2 + Math.random() * 3, a: 0.85 });
+          for (let i = bubbles.length - 1; i >= 0; i--) {
+            const b = bubbles[i]; b.y -= b.v * 0.016; b.a -= 0.011;
+            if (b.a <= 0) { bubbles.splice(i, 1); continue; }
+            ctx.beginPath(); ctx.arc(b.x, b.y, b.r, 0, 6.2832);
+            ctx.fillStyle = 'rgba(63,191,127,' + b.a + ')'; ctx.fill();
+          }
+        }
+      }
+      requestAnimationFrame(frame);
+    }
+    requestAnimationFrame(frame);
+  </script>
+</body>
+</html>

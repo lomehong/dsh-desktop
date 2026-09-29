@@ -834,7 +834,9 @@ fn wait_service_up(app: &tauri::AppHandle, timeout: Duration) -> bool {
 }
 
 /// 全流程执行一个修复动作：fixing → 动作 → 验证 → resolved/failed → 统计/通知。
-fn execute_fix(app: &tauri::AppHandle, id: u64, action: Action) {
+/// 全流程执行一个修复动作：fixing → 动作 → 验证 → resolved/failed → 统计/通知。
+/// 返回最终验证结果（true=服务恢复），供鲸鱼覆盖层区分收尾形态。
+fn execute_fix(app: &tauri::AppHandle, id: u64, action: Action) -> bool {
     let now = runtime::unix_now();
     set_outcome(id, "fixing", "");
     log_line(&format!("执行修复 #{id}: {}", action.as_str()));
@@ -862,6 +864,7 @@ fn execute_fix(app: &tauri::AppHandle, id: u64, action: Action) {
         set_outcome(id, "failed", &note);
         notifications::record(app, "守护 Agent", &format!("修复 #{id} 未成功：{err}"));
     }
+    verified
 }
 
 /// 纯函数便于单测：该类别的问题症状是否是「服务起不来/无响应」。
@@ -929,7 +932,7 @@ fn process_pending(app: &tauri::AppHandle, cfg: &GuardianCfg, now: u64) {
             set_outcome(id, "pending", &format!("自动修复暂缓：{reason}，可手动执行"));
             continue;
         }
-        execute_fix(app, id, action);
+        let _ = execute_fix(app, id, action);
         return; // 一个 tick 只做一个（阻塞型）
     }
 }
@@ -1191,7 +1194,11 @@ pub fn fix_issue(app: tauri::AppHandle, id: u64) -> Result<(), String> {
         }
     }
     std::thread::spawn(move || {
-        execute_fix(&app, id, action);
+        // 鲸鱼覆盖层：AI 动作期间的可见形态（用户指定 2026-09-28：覆盖整个应用
+        // 屏幕，诊断/修复两种可辨动画状态，完成后区分收尾）
+        crate::whale::show(&app, "repairing", "AI 修复中", "正在执行修复动作…");
+        let ok = execute_fix(&app, id, action);
+        crate::whale::finish(&app, ok, if ok { "修复完成" } else { "修复未成功" });
         let _ = app.emit_guardian_refresh();
     });
     Ok(())
@@ -1217,10 +1224,15 @@ pub fn resolve_manual(app: &tauri::AppHandle, id: u64) -> Result<(), String> {
 /// 手动 AI 诊断某案（后台执行，完成后刷新）。
 pub fn diagnose_async(app: tauri::AppHandle, id: u64) {
     std::thread::spawn(move || {
+        crate::whale::show(&app, "diagnosing", "AI 诊断中", "正在分析问题证据…");
         let result = diagnose_issue(&app, id);
-        if let Err(e) = &result {
-            log_line(&format!("AI 诊断 #{id} 失败: {e}"));
-            notifications::record(&app, "守护 Agent", &format!("AI 诊断失败：{e}"));
+        match &result {
+            Ok(_) => crate::whale::finish(&app, true, "诊断完成"),
+            Err(e) => {
+                log_line(&format!("AI 诊断 #{id} 失败: {e}"));
+                notifications::record(&app, "守护 Agent", &format!("AI 诊断失败：{e}"));
+                crate::whale::finish(&app, false, "诊断失败");
+            }
         }
         let _ = app.emit_guardian_refresh();
     });
