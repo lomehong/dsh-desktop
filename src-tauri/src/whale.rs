@@ -6,6 +6,15 @@
 //! 状态由壳经 eval 调页面上的 window.__whaleState(state, text, sub) 驱动；
 //! 窗口懒创建（首次 show 时主线程建，透明 + 置顶 + 无装饰 + 全屏 + 不进任务栏），
 //! 之后常驻隐藏复用。结束形态播放约 1.4s 后由壳隐藏。
+//!
+//! 平台边界：透明窗在 macOS 需要 tauri feature `macos-private-api`（+ conf
+//! app.macOSPrivateApi）。未启用时 builder 上没有 transparent 方法（E0599，
+//! macOS CI #183 起连红根因，2026-09-30），覆盖层整体不显示——不透明全屏罩
+//! 会遮蔽用户屏幕，宁可没有。启用 feature 后各处门控自动放开。
+#![cfg_attr(
+    all(target_os = "macos", not(feature = "macos-private-api")),
+    allow(dead_code)
+)]
 use tauri::{Manager, WebviewUrl};
 
 const LABEL: &str = "whale";
@@ -69,7 +78,6 @@ fn build_window(
     )
     .title("DSH 守护 Agent")
     .decorations(false)
-    .transparent(true)
     .always_on_top(true)
     .skip_taskbar(true)
     .focused(false)
@@ -79,13 +87,19 @@ fn build_window(
     .shadow(false)
     .visible(false)
     .inner_size(lw, lh)
-    .position(0.0, 0.0)
-    .build()?;
+    .position(0.0, 0.0);
+    // 透明仅 Windows/Linux：macOS 上 builder 无 transparent 方法（tauri 源码
+    // cfg：any(not(macos), feature macos-private-api)），漏门控即 macOS CI
+    // #183 起连红的 E0599（2026-09-30）。启用 feature 后本门控自动放开。
+    #[cfg(any(not(target_os = "macos"), feature = "macos-private-api"))]
+    let w = w.transparent(true);
+    let w = w.build()?;
     let _ = w.set_ignore_cursor_events(true);
     Ok(w)
 }
 
 /// AI 动作开始：以指定状态显示覆盖层（诊断 / 修复两种动画形态）。
+#[cfg(any(not(target_os = "macos"), feature = "macos-private-api"))]
 pub fn show(app: &tauri::AppHandle, state: &str, text: &str, sub: &str) {
     let js = format!(
         "window.__whaleState({},{},{})",
@@ -96,8 +110,15 @@ pub fn show(app: &tauri::AppHandle, state: &str, text: &str, sub: &str) {
     ensure_and_show(app, &js);
 }
 
+/// macOS 未启用 macos-private-api：不透明全屏罩会遮蔽用户屏幕，整层不显示。
+#[cfg(all(target_os = "macos", not(feature = "macos-private-api")))]
+pub fn show(_app: &tauri::AppHandle, _state: &str, _text: &str, _sub: &str) {
+    log_line("macOS 未启用 macos-private-api，鲸鱼覆盖层跳过显示");
+}
+
 /// AI 动作结束：播放完成 / 失败收尾形态，约 1.4s 后自动隐藏（独立线程定时，
 /// 不占主线程）。
+#[cfg(any(not(target_os = "macos"), feature = "macos-private-api"))]
 pub fn finish(app: &tauri::AppHandle, ok: bool, text: &str) {
     let state = if ok { "done" } else { "failed" };
     let js = format!(
@@ -111,6 +132,13 @@ pub fn finish(app: &tauri::AppHandle, ok: bool, text: &str) {
         std::thread::sleep(std::time::Duration::from_millis(1400));
         hide(&handle);
     });
+}
+
+/// macOS 未启用 macos-private-api：覆盖层从未显示，收尾仅留痕。
+#[cfg(all(target_os = "macos", not(feature = "macos-private-api")))]
+pub fn finish(app: &tauri::AppHandle, ok: bool, text: &str) {
+    let _ = app;
+    log_line(&format!("鲸鱼覆盖层收尾（macOS 未显示）：{text}（ok={ok}）"));
 }
 
 pub fn hide(app: &tauri::AppHandle) {

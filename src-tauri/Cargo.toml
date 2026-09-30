@@ -1,8 +1,13 @@
 [package]
 name = "dsh-desktop"
-version = "0.1.69"
+version = "0.1.70"
 description = "DSH Desktop — DeepSeek Harness 桌面应用（Windows / macOS）"
 edition = "2021"
+
+# whale.rs 的平台门控引用了 tauri 的 feature 名，向 unexpected_cfgs lint 声明为已知值
+# （未实际启用该 feature：macOS 透明覆盖层待启用 macos-private-api 后再放开）
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("macos-private-api"))'] }
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
