@@ -790,7 +790,7 @@ fn connect_remote_flow_locked(app: &tauri::AppHandle) -> Result<(), String> {
     if !crate::readiness::gateway_token_ok(&cfg.origin, &cfg.token) {
         stop_proxy(app);
         return Err(format!(
-            "远程实例 {} 的凭证已失效（请退出御符重新登录后再连接）",
+            "远程实例 {} 的凭证已失效（请在远程实例窗口重新连接，将自动换新票；若提示未登录请先登录御符账号）",
             cfg.address
         ));
     }
@@ -848,23 +848,47 @@ pub fn switch_to_local_flow(app: &tauri::AppHandle) {
 }
 
 /// 连接已保存的远程实例（托盘「已保存的远程实例」子菜单，D2 多实例）：
-/// 解密该实例 token → 升为活动 remote.json → 翻模式 → 走既有 restart_by_mode
-/// 远程序列（FlowGate 排队/托盘重建/连接屏全复用）。token 解密失败给出重新配对文案。
+/// 先在后台线程验活缓存票（服务端 TTL 24h，死票复用只会撞「凭证已失效」死路），
+/// 有效（或状态未知）才解密升级为活动 remote.json → 翻模式 → 走既有 restart_by_mode
+/// 远程序列（FlowGate 排队/托盘重建/连接屏全复用）；网关 403 权威判死则清除该条目
+/// （含同名活动票）并指引走远程实例窗口登录换票。token 解密失败给出重新配对文案。
 pub fn connect_saved(app: &tauri::AppHandle, address: &str) {
     let Some(cfg) = crate::remote::load_saved(address) else {
         crate::status::fail(app, "已保存实例的凭证无法读取，请在连接屏重新配对");
         return;
     };
-    if crate::remote::save(&cfg).is_err() {
-        crate::status::fail(app, "保存活动实例失败");
-        return;
-    }
-    crate::remote::save_mode("remote");
-    let state: tauri::State<AppState> = app.state();
-    *state.mode.lock().unwrap() = "remote";
-    crate::tray::rebuild(app);
-    crate::status::set(app, &format!("正在连接已保存的远程实例 {address}…"));
-    restart_by_mode(app);
+    // 验活放后台线程：探测含网络 IO（读超时 5s），不能卡菜单/主线程；
+    // 决策后的后续动作照原样回主线程执行（tray 重建等保持原线程语义）。
+    let handle = app.clone();
+    let addr = address.to_string();
+    std::thread::spawn(move || {
+        let verdict = crate::readiness::gateway_token_state(&cfg.origin, &cfg.token);
+        let ui = handle.clone();
+        let _ = ui.run_on_main_thread(move || {
+            if verdict == Some(false) {
+                // 权威死票：清缓存（已存条目 + 同名活动票），指引走账号换票。
+                crate::remote::forget_saved(&addr);
+                if crate::remote::load().map(|c| c.address) == Some(addr.clone()) {
+                    let _ = std::fs::remove_file(crate::remote::config_path());
+                }
+                crate::status::fail(
+                    &handle,
+                    "已保存实例的凭证已过期（已清除）。请打开远程实例窗口登录御符账号后重新连接，将自动换新票",
+                );
+                return;
+            }
+            if crate::remote::save(&cfg).is_err() {
+                crate::status::fail(&handle, "保存活动实例失败");
+                return;
+            }
+            crate::remote::save_mode("remote");
+            let state: tauri::State<AppState> = handle.state();
+            *state.mode.lock().unwrap() = "remote";
+            crate::tray::rebuild(&handle);
+            crate::status::set(&handle, &format!("正在连接已保存的远程实例 {addr}…"));
+            restart_by_mode(&handle);
+        });
+    });
 }
 
 /// 托盘「重启服务」/ 重启命令的统一入口：按当前模式分派。整个流程持同一把闸锁

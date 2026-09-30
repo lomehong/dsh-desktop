@@ -178,6 +178,38 @@ pub fn remember_saved(cfg: &RemoteConfig) {
     }
 }
 
+/// 从已存列表移除某实例条目（路径注入版，便于单测）。返回是否发生了删除。
+/// 缺失/损坏文件一律不动（保守：由 remember_saved 下次配对时覆写重建）；
+/// 清空列表时直接删文件（saved_list/load_saved 对缺失按空处理）。
+fn forget_saved_in(path: &std::path::Path, address: &str) -> bool {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return false;
+    };
+    let Ok(mut list) = serde_json::from_str::<Vec<StoredConfig>>(&text) else {
+        return false;
+    };
+    let before = list.len();
+    list.retain(|s| s.address != address);
+    if list.len() == before {
+        return false;
+    }
+    if list.is_empty() {
+        return std::fs::remove_file(path).is_ok();
+    }
+    let tmp = path.with_extension("json.tmp");
+    serde_json::to_string_pretty(&list)
+        .ok()
+        .and_then(|text| std::fs::write(&tmp, text).ok())
+        .and_then(|_| std::fs::rename(&tmp, path).ok())
+        .is_some()
+}
+
+/// 忘掉某个已保存实例（按 address 移除 remotes.json 条目）。幂等：无条目返回 false。
+/// 用途：连接前验活发现死票（网关 403）时清掉缓存，让下一次连接走账号换票自愈。
+pub fn forget_saved(address: &str) -> bool {
+    forget_saved_in(&saved_path(), address)
+}
+
 /// 读配置并报告 token 是否来自旧明文形状（无 `tokenEnc` 字段）——`load()` 据此惰性迁移。
 /// crypto 为加解密 seam（测试注入假实现；真实现 = DPAPI）。
 fn load_config_detailed(
@@ -534,6 +566,70 @@ mod tests {
         let loaded = load_config_detailed(&path, crypto_impl()).unwrap().0;
         assert_eq!(loaded.token, "tok-1");
         assert_eq!(loaded.origin, cfg.origin);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /* ── forget_saved_in（死票清理兜底） ── */
+    fn saved_entry(addr: &str) -> StoredConfig {
+        StoredConfig {
+            address: addr.into(),
+            origin: format!("http://{addr}"),
+            token: "tok".into(),
+            token_enc: None,
+            paired_at: 1,
+        }
+    }
+
+    #[test]
+    fn forget_saved_in_removes_target_keeps_others() {
+        let dir = temp_dir("forget");
+        let path = dir.join("remotes.json");
+        let list = vec![saved_entry("10.0.0.1:3090"), saved_entry("10.0.0.2:3090")];
+        std::fs::write(&path, serde_json::to_string_pretty(&list).unwrap()).unwrap();
+        assert!(forget_saved_in(&path, "10.0.0.1:3090"));
+        let left: Vec<StoredConfig> =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(left.len(), 1);
+        assert_eq!(left[0].address, "10.0.0.2:3090");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn forget_saved_in_last_entry_removes_file() {
+        // 清空列表时删文件：saved_list/load_saved 对缺失按空处理
+        let dir = temp_dir("forget-last");
+        let path = dir.join("remotes.json");
+        std::fs::write(
+            &path,
+            serde_json::to_string_pretty(&vec![saved_entry("10.0.0.1:3090")]).unwrap(),
+        )
+        .unwrap();
+        assert!(forget_saved_in(&path, "10.0.0.1:3090"));
+        assert!(!path.exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn forget_saved_in_idempotent_missing_and_corrupt() {
+        let dir = temp_dir("forget-edge");
+        let path = dir.join("remotes.json");
+        // 文件缺失：幂等 false
+        assert!(!forget_saved_in(&path, "10.0.0.1:3090"));
+        // 条目不存在：幂等 false，文件原样保留
+        std::fs::write(
+            &path,
+            serde_json::to_string_pretty(&vec![saved_entry("10.0.0.2:3090")]).unwrap(),
+        )
+        .unwrap();
+        assert!(!forget_saved_in(&path, "10.0.0.1:3090"));
+        assert_eq!(
+            forget_saved_in(&path, "10.0.0.2:3090"),
+            true,
+            "存在的条目应可删除"
+        );
+        // 损坏文件：不动它（保守，由 remember_saved 下次覆写重建）
+        std::fs::write(&path, "{broken").unwrap();
+        assert!(!forget_saved_in(&path, "10.0.0.1:3090"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

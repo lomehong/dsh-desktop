@@ -449,6 +449,8 @@ async fn remote_instances(
 /// 点选实例连接：TOFU（未确认地址需 confirm_tofu=true）→ exchange 换实例 token
 /// → 落凭据（remote.json + saved）→ 切 remote 模式 → 走既有连接执行流
 /// （探活→反代→事件订阅→导航），连接进度经状态屏呈现。
+/// 本机已有缓存票时先验活：网关 403 判死票 → 清缓存自动落到 exchange 换新票
+/// （自愈，0.2.x 幂等签发不堆服务端条目）；不可达/未知状态按原样复用。
 /// 返回 Err("TOFU_REQUIRED") 时 UI 弹首连确认框，用户批准后带 confirm_tofu 重发。
 #[tauri::command(async)]
 async fn remote_connect_instance(
@@ -472,26 +474,47 @@ async fn remote_connect_instance(
         return Err("TOFU_REQUIRED".into());
     }
     remote_account::tofu_approve(&address)?;
-    // 本机已有凭据的实例（缓存段）：跳过 exchange 直接复用；云端新实例才走换票。
+    // 本机已有凭据的实例（缓存段）：先验活再复用；云端新实例才走换票。
+    // 缓存票有服务端 TTL（0.2.x 24h），过期/吊销后盲目复用只会在连接屏撞
+    // 「凭证已失效」死路（v0.2.0 事故复盘：死票曾把账号化通道锁死一周）。
     let already = remote::load_saved(&address)
         .or_else(|| remote::load().filter(|c| c.address == address));
     if let Some(cfg) = already {
-        remote::save(&cfg).map_err(|e| format!("凭据落盘失败: {e}"))?;
-        remote::save_mode("remote");
-        let handle = app.clone();
-        std::thread::spawn(move || {
-            crate::webview::navigate_to_loader(&handle);
-            if let Some(w) = handle.get_webview_window("main") {
-                let _ = w.set_focus();
+        // 403 = 网关权威判定死票 → 清缓存（活动票 + 已存条目）、落到下方 exchange
+        // 自愈换新票（入口已强制登录，幂等签发不堆服务端条目）。
+        // 不可达/未知状态不删缓存：按原样复用，让连接流程如实报错，
+        // 避免网络抖动误删仍有效的票。
+        let probe_origin = cfg.origin.clone();
+        let probe_token = cfg.token.clone();
+        let verdict = tauri::async_runtime::spawn_blocking(move || {
+            crate::readiness::gateway_token_state(&probe_origin, &probe_token)
+        })
+        .await
+        .unwrap_or(None);
+        if verdict == Some(false) {
+            if remote::load().map(|c| c.address) == Some(address.clone()) {
+                let _ = std::fs::remove_file(remote::config_path());
             }
-            if let Err(e) = crate::supervisor::connect_remote_flow(&handle) {
-                if let Some(mut log) = crate::runtime::open_log_append() {
-                    use std::io::Write;
-                    let _ = writeln!(log, "[远程实例] 缓存凭据连接失败: {e}");
+            remote::forget_saved(&address);
+            // 不 return：落到下方 exchange 换新票（save + remember_saved 重建条目）。
+        } else {
+            remote::save(&cfg).map_err(|e| format!("凭据落盘失败: {e}"))?;
+            remote::save_mode("remote");
+            let handle = app.clone();
+            std::thread::spawn(move || {
+                crate::webview::navigate_to_loader(&handle);
+                if let Some(w) = handle.get_webview_window("main") {
+                    let _ = w.set_focus();
                 }
-            }
-        });
-        return Ok("复用本机既有凭据，正在连接…".into());
+                if let Err(e) = crate::supervisor::connect_remote_flow(&handle) {
+                    if let Some(mut log) = crate::runtime::open_log_append() {
+                        use std::io::Write;
+                        let _ = writeln!(log, "[远程实例] 缓存凭据连接失败: {e}");
+                    }
+                }
+            });
+            return Ok("复用本机既有凭据，正在连接…".into());
+        }
     }
     let endpoints = remote_account::AccountEndpoints::from_env();
     let addr_for_call = address.clone();

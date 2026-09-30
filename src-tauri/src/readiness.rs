@@ -98,14 +98,25 @@ pub fn wait_http_reachable(base: &str, timeout: Duration) -> bool {
     false
 }
 
-/// 网关凭证有效性直查：GET {origin}/__remote/pair?token=<token> →
-/// 303（种 cookie 落 /）= 令牌有效；403 = 无效/已吊销。不经过本地反代，
-/// 直接问网关，作为连接前的快速失败检查。
+/// 网关凭证有效性直查（三态）：GET {origin}/__remote/pair?token=<token> →
+/// Some(true) = 3xx（令牌有效，种 cookie 落 /）；Some(false) = 403（网关权威判定
+/// 无效/过期/吊销）；None = 不可达或其他未知状态。不经过本地反代，直接问网关。
+/// 注意：调用方只有拿到 Some(false) 才可销毁本地缓存票——不可达/未知时误删，
+/// 会把仍有效的票连同用户的重连捷径一起丢掉（网络抖动不应有破坏性）。
+pub fn gateway_token_state(origin: &str, token: &str) -> Option<bool> {
+    let code = http_status(&format!("{origin}/__remote/pair?token={token}"), None)?;
+    if code.starts_with('3') {
+        Some(true)
+    } else if code.starts_with("403") {
+        Some(false)
+    } else {
+        None
+    }
+}
+
+/// 布尔便捷版：仅 3xx 视为有效（既有连接流程的快速失败检查用）。
 pub fn gateway_token_ok(origin: &str, token: &str) -> bool {
-    matches!(
-        http_status(&format!("{origin}/__remote/pair?token={token}"), None),
-        Some(code) if code.starts_with('3')
-    )
+    matches!(gateway_token_state(origin, token), Some(true))
 }
 
 /// GET 一次，返回状态行中的状态码首字符（如 Some("2")）；连不上/非 HTTP → None。
@@ -253,6 +264,30 @@ mod tests {
         // 凭证不对（token 失效 / 未带 token 撞上新版 401）不算就绪
         let p = serve_once("HTTP/1.1 401 Unauthorized\r\nconnection: close\r\ncontent-length: 0\r\n\r\n");
         assert!(!http_ok(&format!("http://127.0.0.1:{p}/")));
+    }
+
+    #[test]
+    fn gateway_token_state_maps_3xx_403_and_treats_unknown_as_none() {
+        // 303 = 网关认可（有效）
+        let p = serve_once("HTTP/1.1 303 See Other\r\nlocation: /\r\nconnection: close\r\ncontent-length: 0\r\n\r\n");
+        assert_eq!(
+            gateway_token_state(&format!("http://127.0.0.1:{p}"), "tok"),
+            Some(true)
+        );
+        // 403 = 网关权威死票（唯一可触发「清缓存换票」的信号）
+        let p = serve_once("HTTP/1.1 403 Forbidden\r\nconnection: close\r\ncontent-length: 0\r\n\r\n");
+        assert_eq!(
+            gateway_token_state(&format!("http://127.0.0.1:{p}"), "tok"),
+            Some(false)
+        );
+        // 其他状态（404/200/500…）= 未知，不判死
+        let p = serve_once("HTTP/1.1 404 Not Found\r\nconnection: close\r\ncontent-length: 0\r\n\r\n");
+        assert_eq!(
+            gateway_token_state(&format!("http://127.0.0.1:{p}"), "tok"),
+            None
+        );
+        // 不可达 = None：网络抖动不得触发清缓存
+        assert_eq!(gateway_token_state("http://127.0.0.1:1", "tok"), None);
     }
 
     #[test]

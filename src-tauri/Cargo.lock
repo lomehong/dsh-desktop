@@ -973,7 +973,7 @@ dependencies = [
 
 [[package]]
 name = "dsh-desktop"
-version = "0.1.68"
+version = "0.1.69"
 dependencies = [
  "objc2",
  "serde",
