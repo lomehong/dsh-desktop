@@ -178,6 +178,13 @@ pub const TITLEBAR_INSET_CSS: &str = r##"
 ///    「应用」三项命令双通道：首选 IPC（shell_open_about / shell_open_settings /
 ///    shell_quit 自定义命令，命令侧以「仅 main 窗」降级守卫）；远程页调用被拒或
 ///    IPC 不可达时回退导航命令通道（DESKTOP_CMD_HOST，on_navigation 拦截分发）。
+/// 5. 前端支持探测与回退（2026-10-04，远程旧前端实报）：官方布局规则住在 dsh
+///    前端 bundle——web-frontend@0.1.7-rc.2（npm latest 挂了数周的版本）的 dist
+///    没有 [data-windows-titlebar] 规则集，0.2.x 起才有；连到旧版远程实例时壳侧
+///    菜单/窗控悬空、左侧呈原生堆叠布局（「远程左侧与本地不一样」的根因）。
+///    判定引擎按支持信号（样式表规则 → AppFrame 内联变量 → React 挂载仍无）分派
+///    官方模式或壳侧回退：40px 让位带 + 左侧拖拽条 + 菜单挂带内（互不抢点击，
+///    v0.1.11 教训），可逆（慢前端误判后探到信号即撤销，双态不叠加）。
 pub const WINDOWS_TITLEBAR_MODE_JS: &str = r##"
 (function () {
   // 端口守卫：同旧顶栏带方案——能加载进壳的 http 页面只有导航守卫放行的已配对
@@ -186,10 +193,34 @@ pub const WINDOWS_TITLEBAR_MODE_JS: &str = r##"
   // 官方 preload-windows.ts 仅 win32 生效；macOS 红绿灯布局不同，壳侧不注册本脚本。
   if (!/Windows/i.test(navigator.userAgent)) return;
 
-  // ── decorum 收缩 + 拖拽区 + 菜单（属性打上后执行一次）──
-  var rest = function () {
-    var de = document.documentElement;
-    // decorum 顶栏收缩为右上窗控钮：透明底、去 hairline、无反向平移（body 不让位）
+  // ── 前端支持探测：官方布局规则住在 dsh 前端 bundle，壳只负责开开关——远程实例
+  // 可能运行旧版 dsh（2026-10-04 对照包实证：web-frontend@0.1.7-rc.2 的 dist 无
+  // [data-windows-titlebar] 规则集，0.2.x 起才有），此时壳侧菜单/窗控会悬空在
+  // 原生堆叠布局上（用户报告「远程左侧与本地不一样」的根因）。支持信号按速度排序：
+  // ① 样式表规则（CSS bundle 加载完即可判定，早于 React 首帧）；② AppFrame 根
+  // 内联变量 --dsh-windows-sidebar-width（仅支持模式的前端渲染，与样式提交原子发生）。
+  var stylesheetHasTitlebarRule = function () {
+    try {
+      var sheets = document.styleSheets;
+      for (var i = 0; i < sheets.length; i++) {
+        var rules = null;
+        try { rules = sheets[i].cssRules; } catch (e) { continue; }
+        if (!rules) continue;
+        for (var j = 0; j < rules.length; j++) {
+          var sel = rules[j].selectorText;
+          if (sel && sel.indexOf('data-windows-titlebar') >= 0) return true;
+        }
+      }
+    } catch (e) { /* 尚未加载：留待下轮 */ }
+    return false;
+  };
+  var frameMarker = function () {
+    return document.querySelector('[style*="--dsh-windows-sidebar-width"]');
+  };
+
+  // ── decorum 收缩为右上窗控钮（官方/回退两路径共用；底色由回退路径覆盖）──
+  var shrinkDecorum = function () {
+    if (document.getElementById('dsh-desktop-titlebar-mode')) return;
     var s = document.createElement('style');
     s.id = 'dsh-desktop-titlebar-mode';
     s.textContent =
@@ -197,69 +228,81 @@ pub const WINDOWS_TITLEBAR_MODE_JS: &str = r##"
       'left:auto !important;width:auto !important;height:40px !important;box-sizing:border-box !important;' +
       'align-items:flex-start !important;background:transparent !important;border-bottom:none !important;' +
       'transform:none !important;z-index:2147483647 !important}';
-    (document.head || de).appendChild(s);
-
-    // 拖拽区：AppFrame 根元素打 data-tauri-drag-region（React 挂载后才有，观察 DOM）
-    var marked = null;
-    var mark = function () {
-      if (marked && marked.isConnected) return true;
-      var el = document.querySelector('[style*="--dsh-windows-sidebar-width"]');
-      if (!el) {
-        var rootEl = document.getElementById('root');
-        el = rootEl && rootEl.firstElementChild;
-      }
-      if (!el) return false;
-      el.setAttribute('data-tauri-drag-region', '');
-      marked = el;
-      return true;
-    };
-    if (!mark()) {
-      var mo = new MutationObserver(function () {
-        if (mark()) mo.disconnect();
-      });
-      mo.observe(de, { childList: true, subtree: true });
-    }
-
-    // dockkit 停靠面板（右侧栏层，套件插件注册的顶条 tab / 悬浮把手都在这层）：
-    // 【2026-09-28 修正：下移量 40px → 0】绝对定位相对包含块的 **padding 盒**定位，
-    // 而 frame 自带 padding-top:40px——abs top:0 本来就落在顶条下方，不会重叠。
-    // 旧的 top:40px 是 overlay 时代（body transform 让位、frame 无 padding）的
-    // 遗留量：在 padding 模式下变成双重偏移，恰好把面板多压低一个标题栏高度。
-    // 它只在面板插件渲染出 abs 图层时命中（该图层的出现与否取决于 CSS 视口
-    // 宽度），这就是用户看到的「偏移随分辨率变化」。归零 = 任何模式下都与
-    // 对话区同顶。面板类名是 CSS Modules 哈希（随版本变），用子元素 data-*
-    // 反查最近的三边贴边容器改内联 top；插件加载晚于首帧，定时窗口内重试。
-    var dockFix = function () {
-      var el = document.querySelector(
-        '[data-dockkit-tab],[data-dockkit-host],[data-dockkit-pane],[data-dockkit-empty]'
-      );
-      if (!el) return false;
-      var p = el.parentElement;
-      while (p && p !== document.body) {
-        var cs = getComputedStyle(p);
-        if ((cs.position === 'absolute' || cs.position === 'fixed') &&
-            cs.top === '0px' && cs.right === '0px' && cs.bottom === '0px') {
-          p.style.setProperty('top', '0px');
-          return true;
-        }
-        p = p.parentElement;
-      }
-      return false;
-    };
-    if (!dockFix()) {
-      var dockTries = 0;
-      var dockTimer = setInterval(function () {
-        dockTries += 1;
-        if (dockFix() || dockTries > 30) clearInterval(dockTimer);
-      }, 1000);
-    }
-
-    // 「应用/编辑」顶条菜单
-    installMenubar();
+    (document.head || document.documentElement).appendChild(s);
   };
 
+  // ── 拖拽区：AppFrame 根元素打 data-tauri-drag-region（仅官方模式；回退模式页面
+  // 未让位，内容区绝不可拖）。React 挂载后才有，观察 DOM。──
+  var marked = null;
+  var markDragRegion = function () {
+    if (marked && marked.isConnected) return true;
+    var el = frameMarker();
+    if (!el) {
+      var rootEl = document.getElementById('root');
+      el = rootEl && rootEl.firstElementChild;
+    }
+    if (!el) return false;
+    el.setAttribute('data-tauri-drag-region', '');
+    marked = el;
+    return true;
+  };
+  var watchDragRegion = function () {
+    if (markDragRegion()) return;
+    var mo = new MutationObserver(function () {
+      if (markDragRegion()) mo.disconnect();
+    });
+    mo.observe(document.documentElement, { childList: true, subtree: true });
+  };
+
+  // ── dockkit 停靠面板对齐（右侧栏层，套件插件注册的顶条 tab / 悬浮把手都在这层）：
+  // 【2026-09-28 修正：官方模式下移量 40px → 0】绝对定位相对包含块的 **padding 盒**定位，
+  // 而 frame 自带 padding-top:40px——abs top:0 本来就落在顶条下方，不会重叠。
+  // 旧的 top:40px 是 overlay 时代（body transform 让位、frame 无 padding）的
+  // 遗留量：在 padding 模式下变成双重偏移，恰好把面板多压低一个标题栏高度。
+  // 它只在面板插件渲染出 abs 图层时命中（该图层的出现与否取决于 CSS 视口
+  // 宽度），这就是用户看到的「偏移随分辨率变化」。归零 = 任何模式下都与
+  // 对话区同顶。面板类名是 CSS Modules 哈希（随版本变），用子元素 data-*
+  // 反查最近的三边贴边容器改内联 top；插件加载晚于首帧，定时窗口内重试。
+  // 下移量由 dockTop 单一来源随模式切换：官方 0；回退模式（旧前端、body transform
+  // 让位、frame 无 padding）回到 overlay 时代几何，须为一个带高——模式翻转
+  // （undoFallback）时重跑。贴边判定放行 top 0/40 两态，保证翻转后仍能重命中。
+  var dockTop = '0px';
+  var dockTries = 0;
+  var dockFixOnce = function () {
+    var el = document.querySelector(
+      '[data-dockkit-tab],[data-dockkit-host],[data-dockkit-pane],[data-dockkit-empty]'
+    );
+    if (!el) return false;
+    var p = el.parentElement;
+    while (p && p !== document.body) {
+      var cs = getComputedStyle(p);
+      if ((cs.position === 'absolute' || cs.position === 'fixed') &&
+          cs.right === '0px' && cs.bottom === '0px' &&
+          (cs.top === '0px' || cs.top === '40px')) {
+        p.style.setProperty('top', dockTop);
+        return true;
+      }
+      p = p.parentElement;
+    }
+    return false;
+  };
+  var dockTimer = setInterval(function () {
+    dockTries += 1;
+    if (dockFixOnce() || dockTries > 60) clearInterval(dockTimer);
+  }, 1000);
+
   // ── 应用/编辑菜单：shadow DOM 隔离页面样式；mousedown preventDefault 保焦点 ──
+  // top 随模式：官方 0；回退模式（body 让位平移 +带高）反向偏移住进让位带。
+  // 重复调用 = 仅重定位（模式翻转时），不重复创建。
+  var menubarHost = null;
+  var menubarTop = function () {
+    return fallbackApplied ? 'calc(0px - var(--dsh-titlebar-h,0px))' : '0px';
+  };
   var installMenubar = function () {
+    if (menubarHost) {
+      menubarHost.style.top = menubarTop();
+      return;
+    }
     // 「应用」菜单命令：首选 IPC（自定义命令不受 capabilities 约束）；远程页调用被
     // 拒/不可达时回退导航通道——location 指向保留 host（RFC 2606 .invalid 永不解析），
     // 壳的 on_navigation 在 DNS 之前分发命令并取消导航，页面原地不动、零网络请求
@@ -291,9 +334,11 @@ pub const WINDOWS_TITLEBAR_MODE_JS: &str = r##"
     };
     var host = document.createElement('div');
     host.id = 'dsh-desktop-menubar-host';
+    menubarHost = host;
     // left 跟随前端变量：侧栏收起时官方 SidebarRoot.module.css 会把它从默认
-    // 48px 改成 84px（给收起态顶条的「新会话」钮让位），写死 48px 会与之重叠
-    host.style.cssText = 'position:fixed;top:0;left:var(--dsh-windows-menu-start,48px);height:40px;z-index:2147483646;pointer-events:none;';
+    // 48px 改成 84px（给收起态顶条的「新会话」钮让位），写死 48px 会与之重叠；
+    // top 随模式（官方 0 / 回退住进让位带）
+    host.style.cssText = 'position:fixed;top:' + menubarTop() + ';left:var(--dsh-windows-menu-start,48px);height:40px;z-index:2147483646;pointer-events:none;';
     var sr = host.attachShadow({ mode: 'open' });
     var st = document.createElement('style');
     st.textContent =
@@ -403,24 +448,112 @@ pub const WINDOWS_TITLEBAR_MODE_JS: &str = r##"
 
   // ── 属性点亮：必须赶在页面脚本（React 首帧）之前。初始化脚本运行于文档创建期，
   // documentElement 可能尚未生成——setInterval(0) 在解析间隙重试（官方 preload
-  // 同款「立刻 + 稍后」分段；带 10s 上限兜底，防止异常页空转）。
+  // 同款「立刻 + 稍后」分段；带 10s 上限兜底，防止异常页空转）。属性对旧前端是
+  // 惰性（无规则读取），先打上不做最终判定——官方/回退由下方判定引擎决定。
   var markAttr = function () {
     if (!document.documentElement) return false;
     document.documentElement.dataset.windowsTitlebar = '';
     document.documentElement.style.setProperty('--dsh-windows-titlebar-height', '40px');
     return true;
   };
-  if (markAttr()) {
-    rest();
-  } else {
+  if (!markAttr()) {
     var t0 = setInterval(function () {
-      if (markAttr()) {
-        clearInterval(t0);
-        rest();
-      }
+      if (markAttr()) clearInterval(t0);
     }, 0);
     setTimeout(function () { clearInterval(t0); }, 10000);
   }
+
+  // ── 回退路径：壳侧让位带（旧前端缺 [data-windows-titlebar] 规则时的系统性兜底）──
+  // 40px 让位带 = html 高度收缩 + body transform 平移（TITLEBAR_INSET_CSS 的
+  // Windows 版）。全宽拖拽容器会劫持带内点击（v0.1.11 教训），拆成互不重叠的
+  // 三件套：decorum 维持右上收缩（补不透明底 + 底部 hairline 与拖拽条连成一线）、
+  // 左侧拖拽条（data-tauri-drag-region 仅在事件 target 恰为该元素时触发，Tauri
+  // 语义天然不抢子元素点击）、菜单挂带内（fixed top 反向偏移一个带高）。
+  // 可逆：慢加载的新前端被 20s 兜底误判后，仍会继续观察——探到支持信号即整体
+  // 撤销（undoFallback）切官方模式，双态不叠加。
+  var fallbackApplied = false;
+  var strip = null;
+  var supportedPath = function () {
+    shrinkDecorum();
+    watchDragRegion();
+    installMenubar();
+  };
+  var applyFallback = function () {
+    if (fallbackApplied) return;
+    fallbackApplied = true;
+    document.documentElement.dataset.dshTitlebarFallback = '';
+    shrinkDecorum();
+    var s = document.createElement('style');
+    s.id = 'dsh-desktop-titlebar-fallback';
+    s.textContent =
+      ':root{--dsh-titlebar-h:40px}' +
+      'html{height:calc(100% - var(--dsh-titlebar-h)) !important;overflow:hidden !important;' +
+      'background:var(--dsw-alias-bg-base,#16181d)}' +
+      'body{margin:0 !important;height:100% !important;transform:translateY(var(--dsh-titlebar-h))}' +
+      '[data-tauri-decorum-tb]{background:var(--dsw-alias-bg-base,#16181d) !important;' +
+      'border-bottom:1px solid var(--dsw-alias-border-l1,rgba(0,0,0,.08)) !important}';
+    (document.head || document.documentElement).appendChild(s);
+    var mountStrip = function () {
+      if (!document.body) return false;
+      if (!strip) {
+        strip = document.createElement('div');
+        strip.setAttribute('data-tauri-drag-region', '');
+        // box-sizing 使 hairline 画在 40px 带内；与右侧 decorum 角的分隔线连成一线
+        strip.style.cssText = 'position:fixed;top:calc(0px - var(--dsh-titlebar-h,0px));left:0;' +
+          'right:174px;height:var(--dsh-titlebar-h,0px);box-sizing:border-box;' +
+          'border-bottom:1px solid var(--dsw-alias-border-l1,rgba(0,0,0,.08));z-index:2147483645;';
+      }
+      if (!strip.isConnected) document.body.appendChild(strip);
+      return true;
+    };
+    if (!mountStrip()) document.addEventListener('DOMContentLoaded', mountStrip);
+    dockTop = 'var(--dsh-titlebar-h,0px)';
+    dockTries = 0;
+    dockFixOnce();
+    installMenubar();
+  };
+  var undoFallback = function () {
+    if (!fallbackApplied) return;
+    fallbackApplied = false;
+    delete document.documentElement.dataset.dshTitlebarFallback;
+    var s = document.getElementById('dsh-desktop-titlebar-fallback');
+    if (s && s.parentNode) s.parentNode.removeChild(s);
+    if (strip && strip.parentNode) strip.parentNode.removeChild(strip);
+    dockTop = '0px';
+    dockFixOnce();
+    supportedPath();
+  };
+
+  // ── 判定引擎：200ms 轮询。支持信号（样式表规则 / AppFrame 标记）任一出现 →
+  // 官方模式；React 已挂载（#root 有子元素——样式提交与标记原子发生）仍无信号
+  // → 回退；20s 兜底回退。回退后继续观察 60s：慢加载新前端的误判自救。
+  var decided = false;
+  var ticks = 0;
+  var poll = setInterval(function () {
+    ticks += 1;
+    if (!decided) {
+      if (stylesheetHasTitlebarRule() || frameMarker()) {
+        decided = true;
+        supportedPath();
+        return;
+      }
+      var rootEl = document.getElementById('root');
+      if ((rootEl && rootEl.children.length > 0) || ticks >= 100) {
+        decided = true;
+        if (frameMarker()) { supportedPath(); } else { applyFallback(); }
+      }
+      return;
+    }
+    if (fallbackApplied) {
+      if (frameMarker() || stylesheetHasTitlebarRule()) {
+        undoFallback();
+      } else if (ticks >= 300) {
+        clearInterval(poll);
+      }
+      return;
+    }
+    clearInterval(poll);
+  }, 200);
 })();
 "##;
 
@@ -1209,6 +1342,7 @@ mod tests {
             "缺少标题栏高度变量"
         );
         // decorum 收缩为右上窗控钮：透明底透出页面 sidebar-fill 顶条；hairline 移除
+        // （官方模式无分隔线；回退路径的让位带允许 hairline，另有契约测试）
         assert!(
             s.contains("right:0 !important") && s.contains("width:auto !important"),
             "decorum 容器未收缩到右上角（全宽会劫持顶条折叠钮/菜单，v0.1.11 教训）"
@@ -1218,8 +1352,8 @@ mod tests {
             "decorum 容器未透明（会盖住页面顶条底色）"
         );
         assert!(
-            !s.contains("border-bottom:1px solid"),
-            "官方顶条无分隔线，hairline 应移除"
+            s.contains("border-bottom:none !important"),
+            "官方模式 decorum 应无分隔线"
         );
         // 拖拽区：AppFrame 根元素标记 + data-tauri-drag-region（wry 不认 app-region）
         assert!(
@@ -1231,12 +1365,13 @@ mod tests {
             "缺少 AppFrame 根元素定位标记（仅标题栏模式下内联存在）"
         );
         // dockkit 停靠面板：padding 模式下 abs top:0 已天然落在顶条下方（padding 盒
-        // 语义），下移量必须为 0——旧的 +40px 是 overlay 时代遗留，在 padding 模式
-        // 下变成双重偏移（面板恰好多压低一个标题栏高度，且只在插件渲染出 abs 图层
-        // 的视口宽度下出现 =「偏移随分辨率变化」的根因）
+        // 语义），官方模式下移量必须为 0——旧的 +40px 是 overlay 时代遗留，在 padding
+        // 模式下变成双重偏移（面板恰好多压低一个标题栏高度，且只在插件渲染出 abs
+        // 图层的视口宽度下出现 =「偏移随分辨率变化」的根因）。下移量单一来源 dockTop，
+        // 回退模式（body transform 让位）才切到带高。
         assert!(
-            s.contains("'top', '0px'"),
-            "dockFix 下移量不是 0（padding 模式下 +40px 是双重偏移）"
+            s.contains("var dockTop = '0px'"),
+            "官方模式 dockFix 下移量不是 0（padding 模式下 +40px 是双重偏移）"
         );
         assert!(
             !s.contains("'top', 'var(--dsh-windows-titlebar-height)'"),
@@ -1262,6 +1397,49 @@ mod tests {
         assert!(
             s.contains("backdrop-filter:var(--dsw-menu-backdrop-filter"),
             "下拉面板缺少毛玻璃（半透明底会透出页面文字）"
+        );
+    }
+
+    /// 旧前端回退契约（2026-10-04 远程旧前端实报）：web-frontend@0.1.7-rc.2 的 dist
+    /// 无 [data-windows-titlebar] 规则集，壳侧菜单/窗控悬空。判定引擎必须存在三条
+    /// 支持信号（样式表规则 / AppFrame 标记 / React 挂载仍无 → 回退）与可逆回退。
+    #[test]
+    fn windows_titlebar_mode_js_falls_back_for_legacy_frontend() {
+        let s = WINDOWS_TITLEBAR_MODE_JS;
+        // 支持探测：样式表规则扫描 + AppFrame 内联变量标记 + React 挂载决策点
+        assert!(s.contains("cssRules"), "缺少样式表规则扫描（最快的支持信号）");
+        assert!(s.contains("data-windows-titlebar"), "缺少样式表规则匹配串");
+        assert!(
+            s.contains("rootEl.children.length > 0"),
+            "缺少 React 挂载决策点（样式提交与标记原子发生，children>0 而无标记 = 不支持）"
+        );
+        // 回退体：40px 让位带（html 收缩 + body transform，TITLEBAR_INSET_CSS 同款几何）
+        assert!(s.contains("dsh-desktop-titlebar-fallback"), "缺少回退样式表 id（防重/可撤销依赖）");
+        assert!(s.contains(":root{--dsh-titlebar-h:40px}"), "回退缺少带高单一来源变量");
+        assert!(
+            s.contains("transform:translateY(var(--dsh-titlebar-h))"),
+            "回退缺少 body 让位平移"
+        );
+        // 回退模式的分隔线：decorum 补 hairline 与拖拽条连成一线（官方模式禁止，见上）
+        assert!(
+            s.contains("border-bottom:1px solid var(--dsw-alias-border-l1"),
+            "回退让位带缺少 hairline（顶带与页面连成一片读不出标题栏，2026-09-09 用户草图）"
+        );
+        // 拖拽条：属性标记 + 右侧让位窗控角（174px = 3×58 decorum 按钮）
+        assert!(
+            s.contains("right:174px") && s.contains("data-tauri-drag-region"),
+            "回退缺少左侧拖拽条（全宽容器会劫持带内点击，v0.1.11 教训）"
+        );
+        // 菜单挂带内：body 平移后 fixed top 须反向偏移一个带高
+        assert!(
+            s.contains("calc(0px - var(--dsh-titlebar-h,0px))"),
+            "回退模式菜单/拖拽条未反向偏移进让位带"
+        );
+        // 可逆：误判自救（回退后探到支持信号即撤销，双态不叠加）
+        assert!(s.contains("undoFallback"), "缺少回退撤销路径");
+        assert!(
+            s.contains("dshTitlebarFallback"),
+            "缺少回退态标记（撤销与调试依赖）"
         );
     }
 
