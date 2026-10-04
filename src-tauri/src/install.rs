@@ -19,14 +19,16 @@ use tauri::Manager;
 /// 解析成 alpha.2，缺 watchUserPatches 导出 → SyntaxError 启动即崩）。基线跟进
 /// 最新版 = 主子版本一致。根治需上游 exact 钉版或全局锁文件。
 ///
-/// 当前基线 0.2.0-rc.2（2026-09-28 核对 npm 官方 + 上游 tag dsh-v0.2.0-rc.2）：
-/// dsh-* 子依赖精确钉 0.2.0-rc.2 延续；rc.1→rc.2 变更 1022 文件（+33K/−6K），
-/// 壳集成面八项复查全存活：stdout URL 行（web-app/src/index.ts:271 原样）、
-/// --no-open、/api/remote.mux、Set-Cookie 认证、data-windows-titlebar、
-/// renderSlot、`dsh plugin --profile`（README 10 处）、keep-alive 锚点——
-/// 最后者有 0.2.0-rc.1 真机日志实证（[自愈] webserver keepAliveTimeout 5s
-/// -> 65s 多次命中）。真机冒烟延续进行中（守护已在 rc.1 实战检出套件问题）。
-pub const DSH_VERSION: &str = "0.2.0-rc.2";
+/// 当前基线 0.2.1-alpha.1（2026-10-04 核对 npm 官方，alpha tag 指向；发布完整性
+/// 75/75 钉版子依赖全在——0.2.0-rc.2 式漏发已排除）：
+/// dsh-* 子依赖精确钉 0.2.1-alpha.1 延续；集成面八项复查全存活（对照包实测
+/// grep 2026-10-04）：stdout URL 行（dsh-web-app/lib/index.js 原样）、--no-open
+/// （web-app）、/api/remote.mux（api-gateway，与 rc.1/rc.2 同构）、
+/// data-windows-titlebar（web-frontend dist css+js + client-ui-layout）、
+/// renderSlot、`dsh plugin --profile`（主包 lib）、keep-alive 锚点
+/// （host-webserver index 恰 1 处）。token→cookie 认证无字面锚点可 grep
+/// （前端运行时行为），新旧版本结构等价——真机冒烟待补，跑通前不宣称已验证。
+pub const DSH_VERSION: &str = "0.2.1-alpha.1";
 /// 便携 Node 版本（dsh rc.x 的 zstd 要求需要 Node 24）。
 const NODE_VERSION: &str = "24.19.0";
 /// 固定自带包管理器版本，禁止因系统 pnpm 或 latest 跨大版本而改变安装行为。
@@ -42,9 +44,11 @@ const PNPM_VERSION: &str = "10.34.5";
 /// renderSlot/plugin--profile 安装命令全部存活；真机冒烟待补。
 /// 0.2.0-rc.2 复查（2026-09-28，tag dsh-v0.2.0-rc.2，rc.1→rc.2 共 1022 文件
 /// +33K/−6K）：集成面八项全存活；keep-alive 锚点有 0.2.0-rc.1 真机日志实证。
-/// 升到 (0,2,0) 放行 0.2.0 系列。npm 超出此版本时仍拒绝升级并引导先升级应用
+/// 0.2.1-alpha.1 复查（2026-10-04，对照包实测 grep）：75/75 钉版子依赖发布完整
+/// （rc.2 式漏发已排除）；集成面八项全存活（见 DSH_VERSION 注释）。
+/// 升到 (0,2,1) 放行 0.2.1 系列。npm 超出此版本时仍拒绝升级并引导先升级应用
 /// 本体；DSH_DESKTOP_DSH_VERSION 显式指定视为知情强制。
-const DSH_MAX_ADAPTED: (u64, u64, u64) = (0, 2, 0);
+const DSH_MAX_ADAPTED: (u64, u64, u64) = (0, 2, 1);
 
 /// ⚠️ 运行时升级纪律（真实事故两次，教训见 docs/lessons/2026-09-15-runtime-upgrade-whilst-running.md）：
 /// **执行 npm install 升级运行时前，必须确认用户已关闭 dsh-desktop 应用。**
@@ -304,12 +308,27 @@ fn target_version() -> Result<String, String> {
 }
 
 /// 安装指定版本的 dsh 到活动便携运行时（输出落日志）。
+/// 发布窗口期容错（2026-09-29 0.2.0-rc.2 真实故障）：上游把 dist-tag 切到新版本时
+/// 74 个精确钉版的 @deepseek-ai/* 子依赖是逐个发布的——窗口期内主包可解析、子包
+/// 404（ETARGET），npmmirror 与官方源先后各缺一个不同子包，10 秒内两连败即放弃，
+/// 用户只看到裸「npm 退出码非零」。识别该特征后同一源间隔 30 秒重试一次（覆盖
+/// CDN/镜像秒级不一致），仍失败再换源；完整发布窗口（数十分钟）靠可读报错引导
+/// 用户稍后重试，不做长阻塞等待。
 fn npm_install_dsh(version: &str) -> Result<(), String> {
     let mut last_err = String::new();
     for registry in npm_registry() {
-        match npm_install_dsh_once(version, &registry) {
-            Ok(()) => return Ok(()),
-            Err(e) => last_err = e,
+        for attempt in 0..2 {
+            match npm_install_dsh_once(version, &registry) {
+                Ok(()) => return Ok(()),
+                Err(e) => {
+                    let retry = attempt == 0 && is_publish_window_error(&e);
+                    last_err = e;
+                    if !retry {
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_secs(30));
+                }
+            }
         }
     }
     Err(format!("DSH v{version} 安装失败：{last_err}"))
@@ -386,7 +405,15 @@ fn npm_install_dsh_once(version: &str, registry: &str) -> Result<(), String> {
             }
             Ok(())
         }
-        Ok(_) => Err("npm 退出码非零（详见日志）".into()),
+        Ok(o) => {
+            let text = format!(
+                "{}{}",
+                String::from_utf8_lossy(&o.stdout),
+                String::from_utf8_lossy(&o.stderr)
+            );
+            Err(diagnose_etarget_failure(&text)
+                .unwrap_or_else(|| "npm 退出码非零（详见日志）".into()))
+        }
         Err(e) => Err(e.to_string()),
     }
 }
@@ -423,6 +450,50 @@ fn parse_allow_scripts_skipped(output: &str) -> Vec<String> {
         }
     }
     names
+}
+
+/// 发布窗口期诊断文案的固定前缀（is_publish_window_error 靠它识别，二者必须同步改）。
+const PUBLISH_WINDOW_PREFIX: &str = "上游发布未完整同步";
+
+/// 从 npm install 失败输出中识别 ETARGET（依赖版本不存在）并生成可操作诊断。
+/// 真实输出形态（2026-09-29 0.2.0-rc.2 发布窗口期实测）：
+/// ```text
+/// npm error code ETARGET
+/// npm error notarget No matching version found for @deepseek-ai/dsh-typert-protocol@0.2.0-rc.2.
+/// ```
+/// 上游切 dist-tag 时 74 个精确钉版子依赖逐个发布，窗口期内两个 registry 各缺
+/// 不同子包。命中返回以 PUBLISH_WINDOW_PREFIX 开头的诊断；未命中返回 None（调用方
+/// 维持原通用报错）。
+fn diagnose_etarget_failure(output: &str) -> Option<String> {
+    const MARKER: &str = "No matching version found for ";
+    let mut missing: Vec<&str> = Vec::new();
+    for line in output.lines() {
+        let Some(idx) = line.find(MARKER) else { continue };
+        let spec = line[idx + MARKER.len()..]
+            .trim_end_matches(['.', '。', '，', ' ', '\r']);
+        if !spec.is_empty() && !missing.contains(&spec) {
+            missing.push(spec);
+        }
+    }
+    if missing.is_empty() {
+        return None;
+    }
+    // status 文案空间有限：超过 3 个只列前 3 个 + 计数
+    let shown = if missing.len() > 3 {
+        format!("{} 等 {} 个", missing[..3].join("、"), missing.len())
+    } else {
+        missing.join("、")
+    };
+    Some(format!(
+        "{PUBLISH_WINDOW_PREFIX}（ETARGET：{shown} 在该 registry 暂缺）。上游已切换 dist-tag 而部分子依赖尚未发布或未同步：请 10-30 分钟后在托盘重试「升级 DSH 运行时」；若长时间持续失败，说明上游该版本发布残缺（如 2026-09-29 0.2.0-rc.2 漏发 dsh-client-ui-settings-account@rc.2），可继续使用当前版本等上游修复，或设环境变量 DSH_DESKTOP_DSH_VERSION 固定可用版本"
+    ))
+}
+
+/// 发布窗口期错误识别（npm_install_dsh 重试判定用）。诊断文案由
+/// diagnose_etarget_failure 生成、以固定前缀开头；通用报错（裸 npm 退出码非零、
+/// 网络错误等）一律返回 false，不触发重试。
+fn is_publish_window_error(e: &str) -> bool {
+    e.starts_with(PUBLISH_WINDOW_PREFIX)
 }
 
 /// npm 拦截了依赖安装脚本时补跑：`npm rebuild -g <pkgs> --allow-scripts=…` 显式执行
@@ -2352,18 +2423,67 @@ npm warn allow-scripts Run `npm install -g --allow-scripts=@deepseek-ai/dsh-subp
         assert_eq!(parse_allow_scripts_skipped(twice), vec!["koffi"]);
     }
 
+    /* ── ETARGET 发布窗口期诊断（2026-09-29 0.2.0-rc.2 残缺发布真实故障） ── */
+    #[test]
+    fn etarget_diagnosis_flags_missing_spec_from_real_output() {
+        // 真实输出形态（官方源失败，2026-09-29 18:13 日志原文）
+        let output = "\
+npm warn ERESOLVE overriding peer dependency\n\
+npm error code ETARGET\n\
+npm error notarget No matching version found for @deepseek-ai/dsh-client-ui-settings-account@0.2.0-rc.2.\n\
+npm error notarget In most cases you or one of your dependencies are requesting a package version that doesn't exist.\n\
+npm error A complete log of this run can be found in: cache\\npm\\_logs\\debug-0.log\n\
+";
+        let d = diagnose_etarget_failure(output).expect("ETARGET 输出应生成诊断");
+        assert!(d.starts_with(PUBLISH_WINDOW_PREFIX), "诊断必须带固定前缀: {d}");
+        assert!(d.contains("@deepseek-ai/dsh-client-ui-settings-account@0.2.0-rc.2"));
+        assert!(d.contains("升级 DSH 运行时"), "须给出可操作指引: {d}");
+        assert!(is_publish_window_error(&d));
+    }
+
+    #[test]
+    fn etarget_diagnosis_dedups_and_folds_long_lists() {
+        let output = "\
+npm error notarget No matching version found for @a/one@1.0.0.\n\
+npm error notarget No matching version found for @a/one@1.0.0.\n\
+npm error notarget No matching version found for @b/two@2.0.0\n\
+npm error notarget No matching version found for @c/three@3.0.0.\n\
+npm error notarget No matching version found for @d/four@4.0.0.\n\
+";
+        let d = diagnose_etarget_failure(output).expect("应生成诊断");
+        // 去重后 4 条：只列前 3 个 + 计数，避免 status 文案爆长
+        assert!(d.contains("@a/one@1.0.0"));
+        assert!(d.contains("@b/two@2.0.0"));
+        assert!(d.contains("@c/three@3.0.0"));
+        assert!(d.contains("4 个"));
+        assert!(!d.contains("@d/four@4.0.0"));
+    }
+
+    #[test]
+    fn non_etarget_failures_stay_generic_and_non_retryable() {
+        // 网络/其他错误不得误判为发布窗口期（重试只针对 ETARGET）
+        assert!(diagnose_etarget_failure(
+            "npm error network request to https://registry.npmmirror.com failed\nnpm error code ENOTFOUND"
+        )
+        .is_none());
+        let generic = "npm 退出码非零（详见日志）";
+        assert!(diagnose_etarget_failure("npm error code E404").is_none());
+        assert!(!is_publish_window_error(generic));
+    }
+
     #[test]
     fn guard_blocks_next_minor_line_allows_current() {
-        // 0.2.0 系列放行（2026-09-27 静态核查：dsh-* 子包精确钉版，集成面全存活；
-        // 真机冒烟待补）
+        // 0.2.0/0.2.1 系列放行（2026-09-27/2026-10-04 静态核查：dsh-* 子包精确钉版，
+        // 集成面全存活；0.2.1-alpha.1 发布完整性 75/75；真机冒烟待补）
         assert!(version_triple("0.2.0-rc.1").unwrap() <= DSH_MAX_ADAPTED);
         assert!(version_triple("0.2.0").unwrap() <= DSH_MAX_ADAPTED);
-        // 0.1.x 全系列 ≤ (0,2,0)：放行（历史基线都在适配线内）
+        assert!(version_triple("0.2.1-alpha.1").unwrap() <= DSH_MAX_ADAPTED);
+        // 0.1.x 全系列 ≤ (0,2,1)：放行（历史基线都在适配线内）
         assert!(version_triple("0.1.7-rc.2").unwrap() <= DSH_MAX_ADAPTED);
         assert!(version_triple("0.1.8").unwrap() <= DSH_MAX_ADAPTED);
-        // 预发布段按其所属三元组参与比较：0.2.1-alpha 起视为需要壳配套适配——必须拦
-        assert!(version_triple("0.2.1-alpha.1").unwrap() > DSH_MAX_ADAPTED);
-        assert!(version_triple("0.2.1").unwrap() > DSH_MAX_ADAPTED);
+        // 预发布段按其所属三元组参与比较：0.2.2-alpha 起视为需要壳配套适配——必须拦
+        assert!(version_triple("0.2.2-alpha.1").unwrap() > DSH_MAX_ADAPTED);
+        assert!(version_triple("0.2.2").unwrap() > DSH_MAX_ADAPTED);
         assert!(version_triple("0.3.0").unwrap() > DSH_MAX_ADAPTED);
         // 0.1.6 系列（含 alpha/正式）≤ 当前适配线：放行（2026-09-09 评估
         // 11 个依赖包零 diff，零破坏后放行）
