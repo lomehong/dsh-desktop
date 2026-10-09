@@ -19,16 +19,17 @@ use tauri::Manager;
 /// 解析成 alpha.2，缺 watchUserPatches 导出 → SyntaxError 启动即崩）。基线跟进
 /// 最新版 = 主子版本一致。根治需上游 exact 钉版或全局锁文件。
 ///
-/// 当前基线 0.2.1-alpha.1（2026-10-04 核对 npm 官方，alpha tag 指向；发布完整性
-/// 75/75 钉版子依赖全在——0.2.0-rc.2 式漏发已排除）：
-/// dsh-* 子依赖精确钉 0.2.1-alpha.1 延续；集成面八项复查全存活（对照包实测
-/// grep 2026-10-04）：stdout URL 行（dsh-web-app/lib/index.js 原样）、--no-open
+/// 当前基线 0.2.1-alpha.2（2026-10-09 核对 npm 官方 + 上游 tag dsh-v0.2.1-alpha.2；
+/// alpha.1→alpha.2 共 6259 文件 +165K/−60K）：
+/// dsh-* 子依赖精确钉 0.2.1-alpha.2 延续；集成面八项复查全存活（对照包实测
+/// grep）：stdout URL 行（dsh-web-app/lib/index.js 原样）、--no-open
 /// （web-app）、/api/remote.mux（api-gateway，与 rc.1/rc.2 同构）、
 /// data-windows-titlebar（web-frontend dist css+js + client-ui-layout）、
-/// renderSlot、`dsh plugin --profile`（主包 lib）、keep-alive 锚点
-/// （host-webserver index 恰 1 处）。token→cookie 认证无字面锚点可 grep
-/// （前端运行时行为），新旧版本结构等价——真机冒烟待补，跑通前不宣称已验证。
-pub const DSH_VERSION: &str = "0.2.1-alpha.1";
+/// renderSlot、`dsh plugin --profile`（主包 lib）。token→cookie 认证无字面锚点可
+/// grep（前端运行时行为）。keep-alive 补丁锚点 `this.server.listen(this.config.port`
+/// 在 alpha.2 构建产物内唯一存活（npm 包实测 grep=1）——65s 补丁直接套用。
+/// 真机冒烟待补，跑通前不宣称已验证。
+pub const DSH_VERSION: &str = "0.2.1-alpha.2";
 /// 便携 Node 版本（dsh rc.x 的 zstd 要求需要 Node 24）。
 const NODE_VERSION: &str = "24.19.0";
 /// 固定自带包管理器版本，禁止因系统 pnpm 或 latest 跨大版本而改变安装行为。
@@ -46,6 +47,8 @@ const PNPM_VERSION: &str = "10.34.5";
 /// +33K/−6K）：集成面八项全存活；keep-alive 锚点有 0.2.0-rc.1 真机日志实证。
 /// 0.2.1-alpha.1 复查（2026-10-04，对照包实测 grep）：75/75 钉版子依赖发布完整
 /// （rc.2 式漏发已排除）；集成面八项全存活（见 DSH_VERSION 注释）。
+/// 0.2.1-alpha.2 复查（2026-10-09，npm 包 lib/index.js 实测 grep）：集成面八项
+/// 全存活；keep-alive 补丁锚点唯一存活——65s 补丁跨此版本直接套用。
 /// 升到 (0,2,1) 放行 0.2.1 系列。npm 超出此版本时仍拒绝升级并引导先升级应用
 /// 本体；DSH_DESKTOP_DSH_VERSION 显式指定视为知情强制。
 const DSH_MAX_ADAPTED: (u64, u64, u64) = (0, 2, 1);
