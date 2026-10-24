@@ -14,6 +14,23 @@ DeepSeek Harness（dsh）的桌面应用：Tauri 2 原生窗口 + 受监督的 H
 - **无边框窗口**：decorum 保留式顶栏带（Windows 去原生边框 + 扁平自绘最小化/最大化/关闭按钮，保留 Snap Layout；macOS Overlay 红绿灯）。Harness 页面经初始化脚本让出顶部 40px 独占带：`html/body` 高度收缩 + `body transform` 平移（fixed/absolute 定位的 overlay——模式角标、dockkit 浮窗——一并下移；dsh 前端是 `html,body,#root{height:100%}` 链，收缩后正好铺满带下，底部零裁切），decorum 条带反向平移回窗口顶、整带为拖拽区、底色继承 app `--dsw-alias-bg-base` 随深浅主题。2026-09-09 由 overlay 改回让位：dsh 0.1.5+ 右侧栏 dockkit 条带专职占据窗口右上角，overlay 窗控钮与其结构性重叠（视觉上两套 ✕ 叠加，点击被劫持——点「开始」tab=最小化窗口、点侧栏收起=关窗口）。设计文档：`docs/plans/2026-09-09-titlebar-right-sidebar-collision-design.md`。Harness 页面（本地回环或已配对远程 origin）经 `http://*:* ` 通配 capability 仅授予窗口控制最小权限集（无文件/系统访问；能加载的页面由导航守卫约束）。关闭按钮走 `CloseRequested` → 语义仍为最小化到托盘。设置 / 关于窗为无边框自绘标题栏的**暖窗常驻**（`CloseRequested` 拦截为隐藏 + 启动 3 秒后台预热）——打开零渲染进程孵化（懒创建+销毁式打开在 Windows 上要孵化 WebView2 渲染进程 1~3s，杀软扫描加重）。
 - **DSH_HOME 完全独立**：dsh 使用专属 home（安装版 `%LOCALAPPDATA%\dsh-desktop-app-data\home`，便携版包内 `Data\home`），profile/预设/技能/凭证/会话全在里面随包走，**与 `~/.dsh` 零依赖**——绝不读写系统 dsh/persona 的共享目录（多版本交叉污染是历史真实故障源；旧版的一次性自动迁移已删除）。分身技能目录也在 home 内（`home/skills`）。
 
+## 青鸟采集（可选）
+
+壳把 guardian 已经结构化的现场失败接入通用青鸟 SDK（`../qingniao-rust`，SPEC v1、零第三方依赖）。配置环境变量即启用：
+
+| env | 说明 |
+|---|---|
+| `QINGNIAO_ENDPOINT` | Nuwa ingest 地址，如 `http://127.0.0.1:7321/ingest`（回退 `NUWA_INGEST_URL`） |
+| `QINGNIAO_TOKEN` | ingest 令牌，作为 `X-NUWA-Token` 发送（回退 `NUWA_INGEST_TOKEN`） |
+
+未配置 endpoint 时整层空操作（不会静默堆兜底文件）。启用后：
+
+- **上报**：`suite_install_failed`、`profile_bundle`、`module_missing`、`node_crash`、`plugin_dep_missing`——带 dsh 版本、安装模式、guardian 动作、错误码（`ERR_PNPM_*` 等）以及日志里的**根因行**（guardian 台账只有一行“已回滚”，根因在它前面几行）。
+- **不上报**：`service_unreachable` / `auth_401` / `port_in_use`——guardian 本地修复，代码 PR 不是正确响应。
+- **归属**：信号点名的插件包 → 对应 `lomehong/dsh-*` 子仓；安装/套件失败 → `digital-twin`；壳或运行时崩溃 → `dsh-desktop`。一个应用级 Reporter，按条覆盖 `repo`，不是每插件一个实例。
+- **失败安全**：panic 同步上报；投递失败落 `<runtime_root>/qingniao/fallback.jsonl`（便携模式随包走）；`Stats` 区分 reported/fallback/dropped。
+- **日志语义修正**：guardian 的日志 tail 现在**首次锚定 EOF**，不再启动时回扫历史——旧行为会把历史失败重放成新案，台账里的“复发”因此失真。
+
 ## 远程连接
 
 桌面壳可作为 [dsh-remote](https://github.com/lomehong/dsh-remote) 网关的客户端连接远程机器上的 dsh：配对后原生窗口直接呈现远端 Harness 页面，托盘本地/远程随时互切。

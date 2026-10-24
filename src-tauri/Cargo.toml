@@ -1,6 +1,6 @@
 [package]
 name = "dsh-desktop"
-version = "0.1.74"
+version = "0.1.75"
 description = "DSH Desktop — DeepSeek Harness 桌面应用（Windows / macOS）"
 edition = "2021"
 
@@ -24,6 +24,11 @@ tungstenite = "0.26"
 tokio = { version = "1", features = ["net", "io-util", "rt-multi-thread", "sync", "time", "macros"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# 通用青鸟采集 SDK（qingniao SPEC v1，零第三方依赖）。dsh 特有的归属/属性
+# 映射在 src/qingniao_bridge.rs，SDK 本体不知道 dsh。rev 钉定已推送的
+# qingniao-rust main（962e632）——CI 只 checkout 本仓库，path 依赖在 runner
+# 上解析不到；本地迭代 SDK 时同步 bump rev。
+qingniao = { git = "https://github.com/lomehong/qingniao-rust", rev = "962e6324a62e35a1fec06eef9dbb137e12eec97b" }
 tauri-plugin-decorum = "1"
 # 数字分身一键安装（D2b）：托盘「安装数字分身套件」弹原生文件夹选择器
 # 让用户选 meta-repo 根目录，再调 install-all.bat。读路径走持久化文件，

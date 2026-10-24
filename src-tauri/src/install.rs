@@ -19,18 +19,20 @@ use tauri::Manager;
 /// 解析成 alpha.2，缺 watchUserPatches 导出 → SyntaxError 启动即崩）。基线跟进
 /// 最新版 = 主子版本一致。根治需上游 exact 钉版或全局锁文件。
 ///
-/// 当前基线 0.2.1-rc.2（2026-10-10 核对 npm 官方 + 上游 tag dsh-v0.2.1-rc.2；
-/// alpha.5→rc.1→rc.2 共 465 文件 +5K/−854K，含 DeepSeek Search/Fetch 新 API
-/// 【设置开关默认关】、1017 徽章、cordis vendor 4.0.5）：
-/// dsh-* 子依赖精确钉 0.2.1-rc.2 延续；集成面八项复查全存活（对照包实测
-/// grep）：stdout URL 行（dsh-web-app/lib/index.js 原样）、--no-open
-/// （web-app）、/api/remote.mux（api-gateway）、Set-Cookie（web-auth e2e）、
-/// data-windows-titlebar（dockkit FloatLayer + module.css）、renderSlot、
-/// `dsh plugin --profile`（主包 lib ×10）。keep-alive 补丁锚点
-/// `this.server.listen(this.config.port` 在 rc.2 构建产物 lib/index.js
-/// 内唯一存活（npm 包实测 grep=1，line 468）——65s 补丁直接套用。
-/// 真机冒烟待补，跑通前不宣称已验证。
-pub const DSH_VERSION: &str = "0.2.1-rc.2";
+/// 当前基线 0.2.1-rc.3（2026-10-24 核对 npm 官方 dist-tags：rc.3 挂 next、
+/// latest 仍在 rc.2；上游 checkout 尚无 dsh-v0.2.1-rc.3 tag，核对以 npm 包
+/// 实测为准）：主包 86 依赖、78 个精确钉 rc.3 全部发布完整（registry 逐包
+/// packument 核验）；集成面八项复查全存活（各包产物实测 grep）：
+/// stdout URL 行（dsh-web-app lib:162 `dsh web: ${authenticatedUrl}`）、
+/// --no-open（web-app lib:164）、/api/remote.mux + Set-Cookie（dsh-
+/// client-connection lib/index.js，303+Set-Cookie 换证链路原样）、
+/// data-windows-titlebar（dsh-web-frontend dist css+js）、renderSlot
+/// （dsh-client-ui-renderer lib/client.js；web-frontend 产物 rc.2 起本就
+/// 不含，对照口径一致）、`dsh plugin --profile`（主包 lib bin.js+plugin 分块）。
+/// keep-alive 补丁锚点 `this.server.listen(this.config.port` 在
+/// dsh-host-webserver lib/index.js 唯一存活（grep=1，line 468 与 rc.2 同位）
+/// ——65s 补丁直接套用。真机冒烟待补，跑通前不宣称已验证。
+pub const DSH_VERSION: &str = "0.2.1-rc.3";
 /// 便携 Node 版本（dsh rc.x 的 zstd 要求需要 Node 24）。
 const NODE_VERSION: &str = "24.19.0";
 /// 固定自带包管理器版本，禁止因系统 pnpm 或 latest 跨大版本而改变安装行为。
@@ -54,6 +56,9 @@ const PNPM_VERSION: &str = "10.34.5";
 /// 全存活；keep-alive 补丁锚点唯一存活（line 468）——65s 补丁跨此版本直接套用。
 /// 0.2.1-rc.2 复查（2026-10-10，npm 包 lib/index.js 实测 grep）：集成面八项
 /// 全存活；keep-alive 补丁锚点唯一存活（line 468）——65s 补丁跨此版本直接套用。
+/// 0.2.1-rc.3 复查（2026-10-24，npm 包逐包实测 grep）：78/78 钉版子依赖发布
+/// 完整；集成面八项全存活；keep-alive 补丁锚点唯一存活（dsh-host-webserver
+/// lib/index.js line 468）——65s 补丁跨此版本直接套用。
 /// 升到 (0,2,1) 放行 0.2.1 系列。npm 超出此版本时仍拒绝升级并引导先升级应用
 /// 本体；DSH_DESKTOP_DSH_VERSION 显式指定视为知情强制。
 const DSH_MAX_ADAPTED: (u64, u64, u64) = (0, 2, 1);
@@ -1250,6 +1255,9 @@ pub fn install_digital_twin_suite(app: &tauri::AppHandle, channel: SuiteChannel)
                 use std::io::Write;
                 let _ = writeln!(log, "[数字分身] {e}");
             }
+            // 启动安装器就失败时没有可分类的日志行，guardian 不会立案；这里直接
+            // 把结构化失败交给青鸟，否则这类信号完全不可见。
+            crate::qingniao_bridge::report_install_failure("install-all spawn", &e);
             status::fail(app, &e);
             suite_progress(app, "fail", &e);
             notify_digital_twin(app, "数字分身安装失败", &e);
@@ -1775,7 +1783,13 @@ fn run_suite_installer(
         cmd.args(["/D", "/c", "install-all.bat"])
             .args(bat_args)
             .current_dir(installer_dir)
-            .env("DSH_HOME", home.display().to_string());
+            .env("DSH_HOME", home.display().to_string())
+            // 无 TTY 的 GUI 子进程里，pnpm 10 会以
+            // ERR_PNPM_ABORTED_REMOVE_MODULES_DIR_NO_TTY 拒绝清理 node_modules
+            // （2026-09-29 实机 1 次、日志可证）。CI=true 让 pnpm 走非交互路径，
+            // npm_config_yes 让 npm 不弹确认。
+            .env("CI", "true")
+            .env("npm_config_yes", "true");
         // 便携 node 目录前置进安装器 PATH + 显式节点路径（2026-09-16 新机故障二段）：
         // 无系统 Node 的机器上，安装器对 node 的解析依赖它自己对桌面布局的探测——
         // 旧版安装器只认 legacy 布局，新布局机器曾报 "Node.js not found"；且生产
@@ -1875,7 +1889,10 @@ fn run_suite_installer(
             .current_dir(installer_dir)
             .env("DSH_HOME", home.display().to_string())
             .env("PATH", path)
-            .env("NODE_USE_ENV_PROXY", "1");
+            .env("NODE_USE_ENV_PROXY", "1")
+            // Same non-interactive contract as the Windows branch (no TTY).
+            .env("CI", "true")
+            .env("npm_config_yes", "true");
         let opts = std::env::var("NODE_OPTIONS").unwrap_or_default();
         if !opts.contains("--dns-result-order") {
             cmd.env(
@@ -2481,11 +2498,12 @@ npm error notarget No matching version found for @d/four@4.0.0.\n\
 
     #[test]
     fn guard_blocks_next_minor_line_allows_current() {
-        // 0.2.0/0.2.1 系列放行（2026-09-27/2026-10-04 静态核查：dsh-* 子包精确钉版，
-        // 集成面全存活；0.2.1-alpha.1 发布完整性 75/75；真机冒烟待补）
+        // 0.2.0/0.2.1 系列放行（2026-09-27～2026-10-24 历次核查：dsh-* 子包精确
+        // 钉版、集成面八项全存活；rc.3 复查 78/78 钉版发布完整；真机冒烟待补）
         assert!(version_triple("0.2.0-rc.1").unwrap() <= DSH_MAX_ADAPTED);
         assert!(version_triple("0.2.0").unwrap() <= DSH_MAX_ADAPTED);
         assert!(version_triple("0.2.1-alpha.1").unwrap() <= DSH_MAX_ADAPTED);
+        assert!(version_triple("0.2.1-rc.3").unwrap() <= DSH_MAX_ADAPTED);
         // 0.1.x 全系列 ≤ (0,2,1)：放行（历史基线都在适配线内）
         assert!(version_triple("0.1.7-rc.2").unwrap() <= DSH_MAX_ADAPTED);
         assert!(version_triple("0.1.8").unwrap() <= DSH_MAX_ADAPTED);

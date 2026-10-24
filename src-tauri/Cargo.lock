@@ -973,9 +973,10 @@ dependencies = [
 
 [[package]]
 name = "dsh-desktop"
-version = "0.1.74"
+version = "0.1.75"
 dependencies = [
  "objc2",
+ "qingniao",
  "serde",
  "serde_json",
  "tauri",
@@ -3060,6 +3061,11 @@ checksum = "985e7ec9bb745e6ce6535b544d84d6cd6f7ad8bd711c398938ae983b91a766d9"
 dependencies = [
  "unicode-ident",
 ]
+
+[[package]]
+name = "qingniao"
+version = "0.1.0"
+source = "git+https://github.com/lomehong/qingniao-rust?rev=962e6324a62e35a1fec06eef9dbb137e12eec97b#962e6324a62e35a1fec06eef9dbb137e12eec97b"
 
 [[package]]
 name = "quick-xml"

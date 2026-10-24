@@ -13,6 +13,7 @@ mod install;
 mod jumplist;
 mod notifications;
 mod persona;
+mod qingniao_bridge;
 mod readiness;
 mod remote;
 mod remote_account;
@@ -766,6 +767,9 @@ fn main() {
             let handle = app.handle().clone();
             webview::create_main_window(&handle)?;
             tray::build_tray(&handle)?;
+            // 青鸟：配置了 QINGNIAO_ENDPOINT/NUWA_INGEST_URL 才启用；panic 钩子
+            // 与守护立案共用同一个应用级 Reporter。未配置时整层为空操作。
+            qingniao_bridge::init();
             // 守护 Agent：加载问题台账 + 起守护线程（独立于 dsh 运行时的壳内巡检）
             guardian::spawn(handle.clone());
             // D3b：Windows 任务栏右键任务列表（尽力而为，失败仅记日志）
@@ -879,6 +883,8 @@ fn main() {
                 }
                 // 反代收尾：本地回环监听关闭（尽力而为——进程退出本身也会终结它）
                 supervisor::stop_proxy(app);
+                // 青鸟：有界 flush 队列（默认走完 2 次尝试 + 落盘兜底）
+                qingniao_bridge::close();
             }
         });
 }

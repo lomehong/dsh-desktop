@@ -266,6 +266,9 @@ struct Rt {
     /// 日志 tail 偏移与半行缓冲。
     log_offset: u64,
     log_partial: String,
+    /// 首次 tail 必须锚定在 EOF：从 0 回扫会把历史失败行重新立案，
+    /// 台账里的“复发”就变成假数据（真实现场 28 条里多数是这种幽灵案）。
+    log_initialized: bool,
     last_tick: Option<u64>,
 }
 
@@ -486,6 +489,16 @@ fn open_issue(
         &format!("[{}] {}", severity_zh(severity), diagnosis),
     );
     log_line(&format!("立案 #{id} [{category}] {diagnosis}"));
+    // 现场只采集：把这条已结构化的失败交给通用青鸟 SDK。归属仓库、根因行、
+    // dsh 版本等 dsh 特有的映射在桥接层；本地环境类失败由桥接层过滤掉。
+    crate::qingniao_bridge::report_issue(
+        category,
+        severity,
+        source,
+        evidence,
+        diagnosis,
+        action.map(|a| a.as_str()),
+    );
     id
 }
 
@@ -629,6 +642,15 @@ fn tail_log(app: &tauri::AppHandle, now: u64) {
     let len = meta.len();
     {
         let mut rt = rt().lock().unwrap();
+        if !rt.log_initialized {
+            // First tick: only new lines from here on. (The old behaviour
+            // re-scanned the whole log and “resolved” historical failures with
+            // historical success lines — a local self-heal loop that made the
+            // ledger unusable as telemetry.)
+            rt.log_initialized = true;
+            rt.log_offset = len;
+            return;
+        }
         if len < rt.log_offset {
             rt.log_offset = 0;
             rt.log_partial.clear();
