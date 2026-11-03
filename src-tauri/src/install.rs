@@ -19,23 +19,24 @@ use tauri::Manager;
 /// 解析成 alpha.2，缺 watchUserPatches 导出 → SyntaxError 启动即崩）。基线跟进
 /// 最新版 = 主子版本一致。根治需上游 exact 钉版或全局锁文件。
 ///
-/// 当前基线 0.2.2-alpha.2（2026-10-28 核对 npm 官方 dist-tags：alpha.2 挂
-/// alpha、next 到 0.2.1-rc.4；semver 上 alpha.2 > rc.4，三 tag 扫描自动选中
-/// alpha.2。0.2.2 跨次版本线，适配线同步抬到 (0,2,2)）：主包 91 依赖、
-/// 83 个精确钉版全部发布完整（registry 逐包 packument 核验）；cordis vendor
-/// 升 alpha 线（4.0.6-alpha.1 等 5 包范围版，0.2.2 线特征）；新增 5 个钉版包
-/// official-bundles/experimental-liveshare/cua-bundle/personalized-
-/// recommendations/experimental-forge-bundle。集成面八项复查全存活（各包
-/// 产物实测 grep）：stdout URL 行（dsh-web-app lib:162 `dsh web:
-/// ${authenticatedUrl}`）、--no-open（web-app lib:164）、/api/remote.mux +
-/// Set-Cookie（dsh-client-connection lib/index.js）、data-windows-titlebar
-/// （dsh-web-frontend dist css+js）、renderSlot（dsh-client-ui-renderer
-/// lib/client.js+types）、`dsh plugin --profile`（主包 lib bin.js+plugin
-/// 分块）。keep-alive 补丁锚点 `this.server.listen(this.config.port` 在
-/// dsh-host-webserver lib/index.js 唯一存活（grep=1，行号 468→546，补丁按
-/// 计数判定与行号无关）——65s 补丁直接套用；0.2.1-rc.4 锚点同步核验存活。
+/// 当前基线 0.2.2-alpha.3（2026-11-03 核对 npm 官方 dist-tags：alpha.3 挂
+/// alpha、latest/next 到 0.2.1-rc.5；semver 上 alpha.3 > rc.5，三 tag 扫描
+/// 自动选中 alpha.3）：主包 90 依赖、82 个精确钉版全部发布完整（registry
+/// 逐包 packument 核验）；对比 alpha.2 仅移除 dsh-cua-bundle 一个钉版包，
+/// 其余 87 个常规 alpha 步进（cordis vendor 至 -alpha.2 线）。集成面八项
+/// 复查全存活（各包产物实测 grep）：stdout URL 行（dsh-web-app lib:162
+/// `dsh web: ${authenticatedUrl}`）、--no-open（web-app lib:164）、
+/// /api/remote.mux + Set-Cookie（dsh-client-connection lib/index.js）、
+/// data-windows-titlebar（dsh-web-frontend dist css+js）、renderSlot
+/// （dsh-client-ui-renderer lib）、`dsh plugin --profile`（主包 lib bin.js+
+/// plugin 分块）。keep-alive 补丁锚点 `this.server.listen(this.config.port`
+/// 在 dsh-host-webserver lib/index.js 唯一存活（grep=1，line 546 与 alpha.2
+/// 同位）——65s 补丁直接套用。已知遗留：subagent-control 的 `./list-agents`
+/// 子路径导出在 alpha 线被删（rc.3/rc.4 有），alpha.3 未恢复——引用该子路径
+/// 的自定义 Agent 预设（数字分身/架构师）在 0.2.2 线持续「加载失败」，修复
+/// 在预设/插件仓（删引用行）或钉 DSH_DESKTOP_DSH_VERSION=0.2.1-rc.5 缓解。
 /// 真机冒烟待补，跑通前不宣称已验证。
-pub const DSH_VERSION: &str = "0.2.2-alpha.2";
+pub const DSH_VERSION: &str = "0.2.2-alpha.3";
 /// 便携 Node 版本（dsh rc.x 的 zstd 要求需要 Node 24）。
 const NODE_VERSION: &str = "24.19.0";
 /// 固定自带包管理器版本，禁止因系统 pnpm 或 latest 跨大版本而改变安装行为。
@@ -65,6 +66,10 @@ const PNPM_VERSION: &str = "10.34.5";
 /// 0.2.2-alpha.2 复查（2026-10-28，npm 包逐包实测 grep，跨次版本线）：83/83
 /// 钉版子依赖发布完整；集成面八项全存活；keep-alive 补丁锚点唯一存活
 /// （host-webserver line 468→546，补丁按计数判定）；0.2.1-rc.4 锚点同步存活。
+/// 0.2.2-alpha.3 复查（2026-11-03，npm 包逐包实测 grep）：82/82 钉版子依赖
+/// 发布完整（仅移除 dsh-cua-bundle）；集成面八项全存活；keep-alive 补丁锚点
+/// 唯一存活（line 546 同位）——65s 补丁跨此版本直接套用；subagent-control
+/// `./list-agents` 导出仍未恢复（已知遗留见 DSH_VERSION 注释）。
 /// 升到 (0,2,2) 放行 0.2.2 系列。npm 超出此版本时仍拒绝升级并引导先升级应用
 /// 本体；DSH_DESKTOP_DSH_VERSION 显式指定视为知情强制。
 const DSH_MAX_ADAPTED: (u64, u64, u64) = (0, 2, 2);
@@ -2504,15 +2509,17 @@ npm error notarget No matching version found for @d/four@4.0.0.\n\
 
     #[test]
     fn guard_blocks_next_minor_line_allows_current() {
-        // 0.2.0/0.2.1/0.2.2 系列放行（2026-09-27～2026-10-28 历次核查：dsh-* 子包
-        // 精确钉版、集成面八项全存活；rc.3 复查 78/78、alpha.2 复查 83/83 钉版
-        // 发布完整；alpha.2 真机冒烟待补）
+        // 0.2.0/0.2.1/0.2.2 系列放行（2026-09-27～2026-11-03 历次核查：dsh-* 子包
+        // 精确钉版、集成面八项全存活；rc.3 复查 78/78、alpha.2 复查 83/83、
+        // alpha.3 复查 82/82 钉版发布完整；alpha.2 真机冒烟待补）
         assert!(version_triple("0.2.0-rc.1").unwrap() <= DSH_MAX_ADAPTED);
         assert!(version_triple("0.2.0").unwrap() <= DSH_MAX_ADAPTED);
         assert!(version_triple("0.2.1-alpha.1").unwrap() <= DSH_MAX_ADAPTED);
         assert!(version_triple("0.2.1-rc.3").unwrap() <= DSH_MAX_ADAPTED);
         assert!(version_triple("0.2.1-rc.4").unwrap() <= DSH_MAX_ADAPTED);
+        assert!(version_triple("0.2.1-rc.5").unwrap() <= DSH_MAX_ADAPTED);
         assert!(version_triple("0.2.2-alpha.2").unwrap() <= DSH_MAX_ADAPTED);
+        assert!(version_triple("0.2.2-alpha.3").unwrap() <= DSH_MAX_ADAPTED);
         // 0.1.x 全系列 ≤ (0,2,2)：放行（历史基线都在适配线内）
         assert!(version_triple("0.1.7-rc.2").unwrap() <= DSH_MAX_ADAPTED);
         assert!(version_triple("0.1.8").unwrap() <= DSH_MAX_ADAPTED);
