@@ -446,12 +446,20 @@ pub fn spawn_dsh(app: &tauri::AppHandle, launch: Launch) -> Result<Running, Stri
     let tx_err = tx.clone();
     drop(tx);
     let tail_out = Arc::clone(&tail);
+    // 最近一次子进程输出时刻：等待循环据此发现「进程活着但零输出」（2026-11-05
+    // 真实故障：服务进程被环境问题挂成零输出静默，此前壳只会在 180 秒后给出
+    // 无指向性的「未报告监听地址」，用户面对的是无解释的转圈）
+    let last_output = Arc::new(Mutex::new(std::time::Instant::now()));
+    let last_out_wait = Arc::clone(&last_output);
     std::thread::spawn(move || {
         let reader = BufReader::new(stdout);
         // 同世代就绪地址唯一事实：首次解析结果定格，冲突行忽略并留证日志
         let mut seen: Option<(String, String)> = None;
         for line in reader.lines() {
             let Ok(line) = line else { break };
+            if let Ok(mut t) = last_out_wait.lock() {
+                *t = std::time::Instant::now();
+            }
             if let Ok(mut f) = log_out.lock() {
                 let _ = writeln!(f, "[out] {line}");
             }
@@ -508,6 +516,7 @@ pub fn spawn_dsh(app: &tauri::AppHandle, launch: Launch) -> Result<Running, Stri
 
     let deadline = std::time::Instant::now() + Duration::from_secs(URL_WAIT_SECS);
     let mut crash_detail: Option<String> = None;
+    let mut zero_out_warned = false;
     let (base_url, launch_url) = loop {
         if std::time::Instant::now() > deadline {
             // 经槽位取句柄再整树击杀：槽位空 = 退出流程（RunEvent::Exit）已收尸，防双杀
@@ -518,11 +527,26 @@ pub fn spawn_dsh(app: &tauri::AppHandle, launch: Launch) -> Result<Running, Stri
             let tail = tail.lock().map(|t| tail_text(&t)).unwrap_or_default();
             return Err(with_tail(
                 &format!(
-                    "服务在 {URL_WAIT_SECS} 秒内未报告监听地址。请查看日志: {}",
+                    "服务在 {URL_WAIT_SECS} 秒内未报告监听地址（若期间无任何输出，多见于安全软件拦截服务写入或 profile 数据异常——可将 DSH 数据目录加入安全软件白名单，或将整个 home 目录改名后重启应用以重建）。请查看日志: {}",
                     runtime::log_file().display()
                 ),
                 &tail,
             ));
+        }
+        // 零输出早告警（一次性）：进程活着但长时间无一字输出——本次形态的
+        // 早期信号。只改状态文字与日志，不打断等待（超长安装过程属正常）。
+        if !zero_out_warned {
+            let silent = last_output.lock().map(|t| t.elapsed()).unwrap_or_default();
+            if silent >= Duration::from_secs(30) {
+                zero_out_warned = true;
+                if let Some(mut f) = runtime::open_log_append() {
+                    let _ = writeln!(
+                        f,
+                        "[warn] 服务进程已 30 秒无任何输出（进程在但静默）。常见于安全软件拦截文件写入挂起裁决，或 profile 插件超长安装——继续观察"
+                    );
+                }
+                status::set(app, "服务进程暂无输出（若长时间无进展，可能被安全软件拦截，详见日志）…");
+            }
         }
         match rx.recv_timeout(Duration::from_millis(500)) {
             Ok(SpawnSignal::Ready(origin, url)) => break (origin, url),
@@ -653,6 +677,20 @@ fn start_service_locked(app: &tauri::AppHandle) -> Result<(), String> {
     // WebKit 连接池保留更久且不自动重试 POST——停顿后首个请求撞陈旧连接即报
     // 「client api:... failed: Load failed」（Mac 实机：发消息/存凭证/加载预设多处偶发）。
     install::patch_webserver_keepalive();
+    // spawn 前 profile 根配置写入探测（2026-11-05 真实故障：home/profiles/web/
+    // cordis.yml 写入被系统级拦截（精确到单个文件），dsh compose 被拒后服务
+    // 无声挂死（事件循环空等），UI 只有转圈且守护/超时都给不出指向。前置探测
+    // 把这类环境问题前置成可读报错与修复指引；远程模式无本地 home，跳过。
+    if launch == Launch::Portable {
+        if let Err(e) = install::probe_profile_write() {
+            crate::notifications::record(app, "服务启动被拦截", &e);
+            if let Some(mut log) = runtime::open_log_append() {
+                let _ = writeln!(log, "[拦截] profile 写入预检失败: {e}");
+            }
+            status::fail(app, &e);
+            return Err(e);
+        }
+    }
     status::set(app, "正在启动 DSH 服务…");
     // spawn_dsh 内部已把 child 挂入 state（冷启动孤儿修复）；此处拿回 Running 后
     // 用真实端口覆盖占位 pid 记录并重新登记句柄。

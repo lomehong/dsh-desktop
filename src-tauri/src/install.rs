@@ -2,7 +2,7 @@
 //! （Windows %LOCALAPPDATA%\dsh-desktop-app-data，macOS ~/Library/Application Support/dsh-desktop-app-data）。
 //! 全程使用系统自带工具（curl 下载、tar 解压：Windows/macOS 为 bsdtar，Linux 为 gnu tar），
 //! 零新增 Rust 依赖；下载走 npmmirror 镜像，nodejs.org / npm 官方源兜底。
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::runtime::{self, no_window};
@@ -19,24 +19,26 @@ use tauri::Manager;
 /// 解析成 alpha.2，缺 watchUserPatches 导出 → SyntaxError 启动即崩）。基线跟进
 /// 最新版 = 主子版本一致。根治需上游 exact 钉版或全局锁文件。
 ///
-/// 当前基线 0.2.2-alpha.3（2026-11-03 核对 npm 官方 dist-tags：alpha.3 挂
-/// alpha、latest/next 到 0.2.1-rc.5；semver 上 alpha.3 > rc.5，三 tag 扫描
-/// 自动选中 alpha.3）：主包 90 依赖、82 个精确钉版全部发布完整（registry
-/// 逐包 packument 核验）；对比 alpha.2 仅移除 dsh-cua-bundle 一个钉版包，
-/// 其余 87 个常规 alpha 步进（cordis vendor 至 -alpha.2 线）。集成面八项
-/// 复查全存活（各包产物实测 grep）：stdout URL 行（dsh-web-app lib:162
-/// `dsh web: ${authenticatedUrl}`）、--no-open（web-app lib:164）、
-/// /api/remote.mux + Set-Cookie（dsh-client-connection lib/index.js）、
-/// data-windows-titlebar（dsh-web-frontend dist css+js）、renderSlot
-/// （dsh-client-ui-renderer lib）、`dsh plugin --profile`（主包 lib bin.js+
-/// plugin 分块）。keep-alive 补丁锚点 `this.server.listen(this.config.port`
-/// 在 dsh-host-webserver lib/index.js 唯一存活（grep=1，line 546 与 alpha.2
-/// 同位）——65s 补丁直接套用。已知遗留：subagent-control 的 `./list-agents`
-/// 子路径导出在 alpha 线被删（rc.3/rc.4 有），alpha.3 未恢复——引用该子路径
-/// 的自定义 Agent 预设（数字分身/架构师）在 0.2.2 线持续「加载失败」，修复
-/// 在预设/插件仓（删引用行）或钉 DSH_DESKTOP_DSH_VERSION=0.2.1-rc.5 缓解。
-/// 真机冒烟待补，跑通前不宣称已验证。
-pub const DSH_VERSION: &str = "0.2.2-alpha.3";
+/// 当前基线 0.2.2-rc.1（2026-11-05 核对 npm 官方 dist-tags：rc.1 挂 next，
+/// latest 仍 0.2.1-rc.5、alpha 仍 0.2.2-alpha.3；semver 上 rc.1 为 0.2.2 线
+/// 最高，三 tag 扫描自动选中）：主包 90 依赖、82 个精确钉版全部发布完整
+/// （registry 逐包 packument 核验）。**cordis vendor 从 alpha 线切正式版**
+/// （~4.0.6-alpha.2 → ~4.1.0，schemastery 同步 ~3.19.0）——上游 rc 稳定化的
+/// 实质。主包启动链（bin.js/profile-boot）与 alpha.3 逐字节一致，故
+/// 2026-11-03 起 alpha.3 在真机上的「服务进程零输出挂死（CORDIS 树挂载段
+/// EventPair 内核等待）」嫌疑集中于 alpha 线 vendor——rc.1 换正式 vendor
+/// 即修复候选。集成面八项复查全存活（各包产物实测 grep）：stdout URL 行
+/// （dsh-web-app lib:162 `dsh web: ${authenticatedUrl}`）、--no-open（web-app
+/// lib:164）、/api/remote.mux + Set-Cookie（dsh-client-connection lib）、
+/// data-windows-titlebar（dsh-web-frontend dist css+js）、renderSlot（dsh-
+/// client-ui-renderer lib）、`dsh plugin --profile`（主包 lib bin.js+plugin
+/// 分块）。keep-alive 补丁锚点 `this.server.listen(this.config.port` 在
+/// dsh-host-webserver lib/index.js 唯一存活（grep=1，line 546 同位）——
+/// 65s 补丁直接套用。已知遗留：subagent-control 的 `./list-agents` 子路径
+/// 导出仍缺（rc.1 实测 exports 四项）——自定义预设（数字分身/架构师）的
+/// 「加载失败」修复仍在预设/插件仓（删引用行，architect 85c7cf6 与 twin
+/// v0.9.8 已按此修好）。真机冒烟待补，跑通前不宣称已验证。
+pub const DSH_VERSION: &str = "0.2.2-rc.1";
 /// 便携 Node 版本（dsh rc.x 的 zstd 要求需要 Node 24）。
 const NODE_VERSION: &str = "24.19.0";
 /// 固定自带包管理器版本，禁止因系统 pnpm 或 latest 跨大版本而改变安装行为。
@@ -70,6 +72,10 @@ const PNPM_VERSION: &str = "10.34.5";
 /// 发布完整（仅移除 dsh-cua-bundle）；集成面八项全存活；keep-alive 补丁锚点
 /// 唯一存活（line 546 同位）——65s 补丁跨此版本直接套用；subagent-control
 /// `./list-agents` 导出仍未恢复（已知遗留见 DSH_VERSION 注释）。
+/// 0.2.2-rc.1 复查（2026-11-05，npm 包逐包实测 grep）：82/82 钉版子依赖发布
+/// 完整；集成面八项全存活；keep-alive 补丁锚点唯一存活（line 546 同位）。
+/// cordis vendor 切正式版 4.1.0（alpha 线 ~4.0.6-alpha.2 退役）——11-03 起
+/// alpha.3 真机「服务挂死」的修复候选；主包启动链与 alpha.3 逐字节一致。
 /// 升到 (0,2,2) 放行 0.2.2 系列。npm 超出此版本时仍拒绝升级并引导先升级应用
 /// 本体；DSH_DESKTOP_DSH_VERSION 显式指定视为知情强制。
 const DSH_MAX_ADAPTED: (u64, u64, u64) = (0, 2, 2);
@@ -720,6 +726,57 @@ pub fn dsh_home() -> PathBuf {
 fn core_version_marker() -> PathBuf {
     runtime::runtime_root().join("last-core-version")
 }
+
+/// spawn 前 profile 根配置写入探测（2026-11-05 真实故障：home/profiles/web/cordis.yml
+/// 的写入被系统级拦截（EPERM errno -4048，精确到该单个文件，同目录其它文件正常，
+/// 安全软件日志零记录——拦截者未定案），dsh compose 的 writeFileSync 被拒后服务
+/// 无声挂死/崩退，UI 只有转圈，壳此前完全不可见）。
+/// 以最小破坏方式探测该文件的可写性：
+///  - 文件存在：以 WRITE 模式打开（不截断、不写内容），随即关闭；
+///  - 文件不存在：create_dir_all 补目录后 create_new 建出 0 字节文件——dsh compose
+///    每次启动都会整文件重写，留下的空文件无害。
+/// 任一步 PermissionDenied → 返回带修复指引的错误，start_service_locked 在 spawn
+/// 前直接失败（错误页可读），把「无声挂死」前置为「可读拦截」。
+pub fn probe_profile_write() -> Result<(), String> {
+    probe_profile_write_at(&dsh_home().join("profiles").join("web"))
+}
+
+fn probe_profile_write_at(dir: &Path) -> Result<(), String> {
+    let path = dir.join("cordis.yml");
+    if let Err(e) = std::fs::create_dir_all(dir) {
+        return Err(probe_blocked_message(&path, &format!("profile 目录无法创建（{e}）")));
+    }
+    let opened = if path.exists() {
+        std::fs::OpenOptions::new().write(true).open(&path)
+    } else {
+        std::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&path)
+    };
+    match opened {
+        Ok(_) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+            Err(probe_blocked_message(&path, &format!("写入被系统拦截（EPERM: {e}）")))
+        }
+        Err(e) => Err(format!(
+            "profile 配置文件探测失败（{e}）。详情日志: {}",
+            runtime::log_file().display()
+        )),
+    }
+}
+
+fn probe_blocked_message(path: &Path, why: &str) -> String {
+    format!(
+        "profile 配置文件 {} {why}。dsh 启动必须重写该文件，被拦会导致服务无声挂死。\n\
+         处理建议：① 将数据目录 {} 加入安全软件白名单后重启应用；② 或将整个 home 目录改名（如 home.broken-backup）后重启应用重建（会话与凭证可从改名后的备份目录搬回）。\n\
+         详情日志: {}",
+        path.display(),
+        runtime::runtime_root().display(),
+        runtime::log_file().display()
+    )
+}
+
 
 /// 核心 dsh 版本变化时清空各 profile 的 node_modules，强制按新核心重新解析插件。
 /// 修复「核心升级但 profile 插件仍是旧版/符号链接指向残留安装」的版本错位（真实故障：
@@ -2310,6 +2367,20 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// 写探测：全新目录（不存在）应创建 cordis.yml 空文件并成功；已存在文件应
+    /// 以 WRITE 打开成功。失败路径（权限拒绝）在 CI 文件系统上不可稳定构造，只验证
+    /// 成功路径与落盘副作用（空文件对 dsh compose 无害，会被整写覆盖）。
+    #[test]
+    fn probe_profile_write_creates_and_opens() {
+        let stamp = format!("dsh-probe-test-{}", std::process::id());
+        let dir = std::env::temp_dir().join(&stamp).join("profiles").join("web");
+        probe_profile_write_at(&dir).expect("全新目录探测应成功");
+        let file = dir.join("cordis.yml");
+        assert!(file.exists(), "探测应留下 cordis.yml 空文件（compose 会整写覆盖）");
+        probe_profile_write_at(&dir).expect("已存在文件探测应成功");
+        std::fs::remove_dir_all(std::env::temp_dir().join(&stamp)).ok();
+    }
+
     /// 快照/回滚回环：快照后改动原件，回滚必须逐字恢复；装前缺失的文件回滚不造。
     #[test]
     fn snapshot_and_restore_roundtrip() {
@@ -2509,9 +2580,9 @@ npm error notarget No matching version found for @d/four@4.0.0.\n\
 
     #[test]
     fn guard_blocks_next_minor_line_allows_current() {
-        // 0.2.0/0.2.1/0.2.2 系列放行（2026-09-27～2026-11-03 历次核查：dsh-* 子包
+        // 0.2.0/0.2.1/0.2.2 系列放行（2026-09-27～2026-11-05 历次核查：dsh-* 子包
         // 精确钉版、集成面八项全存活；rc.3 复查 78/78、alpha.2 复查 83/83、
-        // alpha.3 复查 82/82 钉版发布完整；alpha.2 真机冒烟待补）
+        // alpha.3/rc.1 复查 82/82 钉版发布完整；rc.1 真机冒烟待补）
         assert!(version_triple("0.2.0-rc.1").unwrap() <= DSH_MAX_ADAPTED);
         assert!(version_triple("0.2.0").unwrap() <= DSH_MAX_ADAPTED);
         assert!(version_triple("0.2.1-alpha.1").unwrap() <= DSH_MAX_ADAPTED);
@@ -2520,6 +2591,7 @@ npm error notarget No matching version found for @d/four@4.0.0.\n\
         assert!(version_triple("0.2.1-rc.5").unwrap() <= DSH_MAX_ADAPTED);
         assert!(version_triple("0.2.2-alpha.2").unwrap() <= DSH_MAX_ADAPTED);
         assert!(version_triple("0.2.2-alpha.3").unwrap() <= DSH_MAX_ADAPTED);
+        assert!(version_triple("0.2.2-rc.1").unwrap() <= DSH_MAX_ADAPTED);
         // 0.1.x 全系列 ≤ (0,2,2)：放行（历史基线都在适配线内）
         assert!(version_triple("0.1.7-rc.2").unwrap() <= DSH_MAX_ADAPTED);
         assert!(version_triple("0.1.8").unwrap() <= DSH_MAX_ADAPTED);

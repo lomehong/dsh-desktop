@@ -365,6 +365,27 @@ pub fn classify_line(line: &str) -> Option<RuleHit> {
             advice: String::new(),
         });
     }
+    // Agent 预设加载失败：预设定义引用的插件 API 与运行时断链（2026-11-03 实机：
+    // 上游 0.2.2-alpha 线删除 subagent-control/list-agents 子路径导出，两个自定义
+    // 预设 broken 三天无可见性）。dsh registry 的 warn 形态：
+    // `agent preset <id>: <原因>`（stderr tee 后带 [err] 前缀也可命中）。
+    if line.contains("agent preset") {
+        let reason = line
+            .split("agent preset")
+            .nth(1)
+            .unwrap_or("")
+            .trim_start_matches([':', ' '])
+            .chars()
+            .take(140)
+            .collect::<String>();
+        return Some(RuleHit {
+            category: "profile_preset",
+            severity: "warn",
+            diagnosis: format!("Agent 预设加载失败（{reason}）"),
+            action: None,
+            advice: "预设定义引用的插件 API 与运行时不匹配——更新预设/插件源码，或在插件管理器禁用对应插件".into(),
+        });
+    }
     // 本地链接插件缺依赖：壳修不了（要去插件源码仓库装依赖），只给可操作提示
     if let Some(hint) = crate::supervisor::local_plugin_hint(line) {
         return Some(RuleHit {
@@ -1326,6 +1347,16 @@ mod tests {
 
         let hit = classify_line("[err] Error: listen EADDRINUSE: address already in use 127.0.0.1:4418").unwrap();
         assert_eq!(hit.action, Some(Action::ClearFixedPort));
+
+        // Agent 预设加载失败：registry 的 warn 形态（2026-11-05 实机回归）
+        let hit = classify_line(
+            "[err] agent preset architect: @deepseek-ai/dsh-tool-subagent-control/list-agents 行无法解析（ERR_PACKAGE_PATH_NOT_EXPORTED）",
+        )
+        .expect("agent preset 失败应命中");
+        assert_eq!(hit.category, "profile_preset");
+        assert_eq!(hit.action, None, "壳修不了预设源码，只给建议");
+        assert!(hit.diagnosis.contains("architect"), "诊断要带出预设 id");
+        assert!(hit.diagnosis.contains("ERR_PACKAGE_PATH_NOT_EXPORTED"));
 
         let hit = classify_line("[npm] npm ERR! code ECONNRESET").unwrap();
         assert_eq!(hit.action, Some(Action::RepairRuntime));
