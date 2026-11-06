@@ -380,6 +380,13 @@ pub fn spawn_dsh(app: &tauri::AppHandle, launch: Launch) -> Result<Running, Stri
             // 请求行最长）最先撞线——真实故障 2026-09-10：UI 永远卡「Failed to load
             // plugins」，curl/独立浏览器均正常。放宽到 128KB 作结构性兜底。
             c.arg("--max-http-header-size=131072");
+            // 诊断探针（默认关闭）：DSH_DESKTOP_INSPECT=1 时给服务进程开 9236
+            // 调试端口，供外部抓取挂死进程的 JS 调用栈（2026-11-05 服务挂死排查）。
+            // 注意：从开始菜单启动的壳不会继承 setx 后的环境变量（explorer 环境快照
+            // 不刷新），需从新开终端启动或重启电脑后才生效。
+            if std::env::var("DSH_DESKTOP_INSPECT").as_deref() == Ok("1") {
+                c.arg("--inspect=9236");
+            }
             c.arg(&bin).arg("web");
             // 容错：镜像旧包可能缺 --no-open，按实际能力决定是否传，避免「unknown option」崩溃
             if install::web_supports_no_open() {

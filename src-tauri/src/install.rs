@@ -366,7 +366,15 @@ fn npm_install_dsh(version: &str) -> Result<(), String> {
 
 /// 探测已装便携 dsh 的 web 命令是否接受 --no-open。
 /// 防 npmmirror 镜像滞后返回缺该 flag 的旧 tarball（真实故障：装到 alpha.4 但无 --no-open）。
-pub fn web_supports_no_open() -> bool {    let node = runtime::node_exe();
+///
+/// ⚠️ 不得用 `.output()` 同步等待：`web --help` 也走完整 compose（写 cordis.yml、
+/// 挂载插件树），当该写入被环境拦截（2026-11-05 真实故障：写入被系统级挂起）
+/// 时探测进程零输出挂死，`.output()` 永久阻塞 → 壳启动卡死在这一行，主服务
+/// 从未 spawn，UI 无限转圈。改为 spawn + 15 秒轮询超时：超时击杀并按「支持」
+/// 放行（0.2.x 全支持；真缺失时 spawn 侧有 unknown option 崩溃自愈兜底）。
+pub fn web_supports_no_open() -> bool {
+    use std::io::Write;
+    let node = runtime::node_exe();
     let bin = runtime::dsh_bin_js();
     if !node.exists() || !bin.exists() {
         return true; // 无可探测对象，视为支持（后续启动自检会兜底）
@@ -374,7 +382,33 @@ pub fn web_supports_no_open() -> bool {    let node = runtime::node_exe();
     let mut c = Command::new(&node);
     c.arg(&bin).args(["web", "--help"]);
     if runtime::configure_command(&mut c).is_err() { return false; }
-    match no_window(&mut c).output() {
+    let Ok(mut child) = no_window(&mut c)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn() else { return true; };
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break, // 正常退出，收集输出判定
+            Ok(None) => {
+                if std::time::Instant::now() >= deadline {
+                    // 探测挂死（compose 被环境拦截的典型形态）：击杀并放行
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    if let Some(mut log) = runtime::open_log_append() {
+                        let _ = writeln!(
+                            log,
+                            "[warn] web --help 探测 15 秒未退出（compose 可能被环境拦截），按支持 --no-open 放行"
+                        );
+                    }
+                    return true;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(200));
+            }
+            Err(_) => return true,
+        }
+    }
+    match child.wait_with_output() {
         Ok(o) => {
             let s = format!("{}{}", String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr));
             s.contains("--no-open")
