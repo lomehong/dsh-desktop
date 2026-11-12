@@ -19,27 +19,27 @@ use tauri::Manager;
 /// 解析成 alpha.2，缺 watchUserPatches 导出 → SyntaxError 启动即崩）。基线跟进
 /// 最新版 = 主子版本一致。根治需上游 exact 钉版或全局锁文件。
 ///
-/// 当前基线 0.2.2-rc.2（2026-11-11 适配：GitHub release dsh-v0.2.2-rc.2 当日
-/// 已出、npm 两源（npmjs/npmmirror）当日仍停在 rc.1——rc.1→rc.2 高达 1568
-/// commits，发布窗口期比常规更长；npm 侧钉版子依赖逐包核验待包到位后补做，
-/// 首装撞窗口期走既有 ETARGET 诊断自愈）。依赖结构 90↔90 换血一项：
-/// +dsh-cua-bundle（alpha.2 后回归）、-dsh-experimental-agent-team-profile，
-/// 钉版子依赖预计 82→83。cordis vendor 与 rc.1 持平（正式版 ~4.1.0，
-/// schemastery ~3.19.0），无代际切换。集成面八项源码级全存活（GitHub tag
-/// dsh-v0.2.2-rc.2 全量 clone 实测 grep）：stdout URL 行（web-app
-/// src/index.ts:231 `dsh web: ${authenticatedUrl}`，printUrl 默认 true，
-/// --no-open 下仍打印）、--no-open（startup.ts:65）、/api/remote.mux +
-/// Set-Cookie（client-connection browser-auth.ts:341/:283/:343）、
-/// data-windows-titlebar（ui-dockkit FloatLayer.tsx 等多包源码）、renderSlot
-/// （ui-renderer scoped-slots/registry/app）、`dsh plugin --profile`（apps/cli
-/// src/plugin.ts）。keep-alive 补丁锚点 `this.server.listen(this.config.port`
-/// 在 host-webserver src/index.ts:621 唯一存活（rc.1 构建产物 lib 为 line 546；
-/// 行号口径不同，补丁按计数判定不受行号漂移影响）——65s 补丁直接套用。URL 行认证形态不变
-/// （authenticatedUrl = origin + `?token=`，壳 parse_web_url 兼容）。已知
-/// 遗留持续：subagent-control 的 `./list-agents` 子路径导出仍缺（rc.2 exports
-/// 四项与 rc.1 同构）——自定义预设（数字分身/架构师）的「加载失败」修复仍在
-/// 预设/插件仓（删引用行，architect 85c7cf6 与 twin v0.9.8 已按此修好）。
-/// 真机冒烟待补，跑通前不宣称已验证。
+/// 当前基线 0.2.2-rc.2（2026-11-11 适配 + 2026-11-12 npm 到货终验：GitHub
+/// release 当日出而 npm 滞后约 26 小时才跟上（挂 next；上游历来 npm 先发，
+/// 这次反序说明发布流水线故障——期间 CI 冒烟因装不到包红过一轮，到货后
+/// 重跑即绿）。发布完整性：主包 90 依赖、82/82 精确钉版 registry 逐包核验
+/// 全部存在。依赖结构与 rc.1 相比 90↔90 一对一换血：+dsh-cua-bundle
+/// （alpha.2 后回归）、-dsh-experimental-agent-team-profile，钉版数 82↔82
+/// 不变。cordis vendor 与 rc.1 持平（正式版 ~4.1.0，schemastery ~3.19.0），
+/// 无代际切换。集成面八项双重复核全存活（源码级：GitHub tag
+/// dsh-v0.2.2-rc.2 全量 clone grep；产物级：npm pack 实测 grep，且与 rc.1
+/// 同位）：stdout URL 行（dsh-web-app lib:162 `dsh web: ${authenticatedUrl}`，
+/// printUrl 默认 true，--no-open 下仍打印）、--no-open（lib:164 提示行 +
+/// startup.js 选项）、/api/remote.mux + Set-Cookie（dsh-client-connection
+/// lib）、data-windows-titlebar、renderSlot、`dsh plugin --profile`。
+/// keep-alive 补丁锚点 `this.server.listen(this.config.port` 在
+/// dsh-host-webserver lib/index.js 唯一存活（grep=1，line 546 同位）——
+/// 65s 补丁直接套用。URL 行认证形态不变（authenticatedUrl = origin +
+/// `?token=`，壳 parse_web_url 兼容）。已知遗留持续：subagent-control 的
+/// `./list-agents` 子路径导出仍缺（rc.2 实测 exports 四项与 rc.1 同构）——
+/// 自定义预设（数字分身/架构师）的「加载失败」修复仍在预设/插件仓（删引用
+/// 行，architect 85c7cf6 与 twin v0.9.8 已按此修好）。真机冒烟待补，跑通前
+/// 不宣称已验证。
 pub const DSH_VERSION: &str = "0.2.2-rc.2";
 /// 便携 Node 版本（dsh rc.x 的 zstd 要求需要 Node 24）。
 const NODE_VERSION: &str = "24.19.0";
@@ -78,12 +78,14 @@ const PNPM_VERSION: &str = "10.34.5";
 /// 完整；集成面八项全存活；keep-alive 补丁锚点唯一存活（line 546 同位）。
 /// cordis vendor 切正式版 4.1.0（alpha 线 ~4.0.6-alpha.2 退役）——11-03 起
 /// alpha.3 真机「服务挂死」的修复候选；主包启动链与 alpha.3 逐字节一致。
-/// 0.2.2-rc.2 复查（2026-11-11，GitHub tag dsh-v0.2.2-rc.2 全量 clone 源码级
-/// grep；npm 两源当日仍停 rc.1，钉版子依赖 registry 逐包核验待包到位补做）：
-/// 集成面八项源码级全存活（URL 行 src:231/printUrl 默认 true/--no-open
-/// startup.ts:65/remote.mux+Set-Cookie browser-auth.ts:341/titlebar/renderSlot/
-/// plugin --profile）；keep-alive 锚点 src:621 唯一；cordis vendor 4.1.0 持平；
-/// deps 90↔90（+dsh-cua-bundle、-dsh-experimental-agent-team-profile）。
+/// 0.2.2-rc.2 复查（2026-11-11 源码级：GitHub tag dsh-v0.2.2-rc.2 全量 clone
+/// grep；2026-11-12 产物级：npm 到货（挂 next，滞后 GitHub release 约 26h）
+/// 逐项 pack 实测）：82/82 钉版子依赖 registry 逐包核验发布完整（90↔90
+/// 一对一换血：+dsh-cua-bundle、-dsh-experimental-agent-team-profile）；
+/// 集成面八项全存活且与 rc.1 同位（URL 行 web-app lib:162/--no-open
+/// lib:164/remote.mux+Set-Cookie client-connection/titlebar/renderSlot/
+/// plugin --profile）；keep-alive 锚点 dsh-host-webserver lib:546 唯一命中
+/// ——65s 补丁直接套用；cordis vendor 4.1.0 持平。
 /// 升到 (0,2,2) 放行 0.2.2 系列。npm 超出此版本时仍拒绝升级并引导先升级应用
 /// 本体；DSH_DESKTOP_DSH_VERSION 显式指定视为知情强制。
 const DSH_MAX_ADAPTED: (u64, u64, u64) = (0, 2, 2);
@@ -2622,10 +2624,9 @@ npm error notarget No matching version found for @d/four@4.0.0.\n\
 
     #[test]
     fn guard_blocks_next_minor_line_allows_current() {
-        // 0.2.0/0.2.1/0.2.2 系列放行（2026-09-27～2026-11-11 历次核查：dsh-* 子包
+        // 0.2.0/0.2.1/0.2.2 系列放行（2026-09-27～2026-11-12 历次核查：dsh-* 子包
         // 精确钉版、集成面八项全存活；rc.3 复查 78/78、alpha.2 复查 83/83、
-        // alpha.3/rc.1 复查 82/82 钉版发布完整；rc.2 源码级八项存活、npm 钉版
-        // 核验待包到位，rc.1 真机冒烟待补）
+        // alpha.3/rc.1/rc.2 复查 82/82 钉版发布完整；rc.1 真机冒烟待补）
         assert!(version_triple("0.2.0-rc.1").unwrap() <= DSH_MAX_ADAPTED);
         assert!(version_triple("0.2.0").unwrap() <= DSH_MAX_ADAPTED);
         assert!(version_triple("0.2.1-alpha.1").unwrap() <= DSH_MAX_ADAPTED);
