@@ -19,28 +19,20 @@ use tauri::Manager;
 /// 解析成 alpha.2，缺 watchUserPatches 导出 → SyntaxError 启动即崩）。基线跟进
 /// 最新版 = 主子版本一致。根治需上游 exact 钉版或全局锁文件。
 ///
-/// 当前基线 0.2.2-rc.2（2026-11-11 适配 + 2026-11-12 npm 到货终验：GitHub
-/// release 当日出而 npm 滞后约 26 小时才跟上（挂 next；上游历来 npm 先发，
-/// 这次反序说明发布流水线故障——期间 CI 冒烟因装不到包红过一轮，到货后
-/// 重跑即绿）。发布完整性：主包 90 依赖、82/82 精确钉版 registry 逐包核验
-/// 全部存在。依赖结构与 rc.1 相比 90↔90 一对一换血：+dsh-cua-bundle
-/// （alpha.2 后回归）、-dsh-experimental-agent-team-profile，钉版数 82↔82
-/// 不变。cordis vendor 与 rc.1 持平（正式版 ~4.1.0，schemastery ~3.19.0），
-/// 无代际切换。集成面八项双重复核全存活（源码级：GitHub tag
-/// dsh-v0.2.2-rc.2 全量 clone grep；产物级：npm pack 实测 grep，且与 rc.1
-/// 同位）：stdout URL 行（dsh-web-app lib:162 `dsh web: ${authenticatedUrl}`，
-/// printUrl 默认 true，--no-open 下仍打印）、--no-open（lib:164 提示行 +
-/// startup.js 选项）、/api/remote.mux + Set-Cookie（dsh-client-connection
-/// lib）、data-windows-titlebar、renderSlot、`dsh plugin --profile`。
-/// keep-alive 补丁锚点 `this.server.listen(this.config.port` 在
-/// dsh-host-webserver lib/index.js 唯一存活（grep=1，line 546 同位）——
-/// 65s 补丁直接套用。URL 行认证形态不变（authenticatedUrl = origin +
-/// `?token=`，壳 parse_web_url 兼容）。已知遗留持续：subagent-control 的
-/// `./list-agents` 子路径导出仍缺（rc.2 实测 exports 四项与 rc.1 同构）——
-/// 自定义预设（数字分身/架构师）的「加载失败」修复仍在预设/插件仓（删引用
-/// 行，architect 85c7cf6 与 twin v0.9.8 已按此修好）。真机冒烟待补，跑通前
+/// 当前基线 0.2.2-rc.3（2026-11-17 npm 逐包实测核查）：
+/// 发布完整性 83/83 精确钉版子依赖全部在 registry（rc.2 的 82→83，+1 包；
+/// 挂 next 已 4 天非发布窗口期；latest 仍 rc.1，升级择新逻辑取 next 的 rc.3）。
+/// 集成面八项产物级 grep 全存活（与 rc.2 同位）：stdout URL 行（web-app lib
+/// `dsh web: ${authenticatedUrl}`）、--no-open（index.js+startup.js）、
+/// /api/remote.mux（api-gateway——注意文件布局拆成 client.browser.js/
+/// client.node.js，锚点仍存活）、token→cookie 认证（无字面锚点可 grep，
+/// 与 rc.1/rc.2 同构）、data-windows-titlebar（web-frontend dist+layout）、
+/// renderSlot、`dsh plugin --profile`（主包 lib）、keep-alive 补丁锚点
+/// `this.server.listen(this.config.port` 在 dsh-host-webserver lib/index.js
+/// line 546 唯一命中——65s 补丁直接套用。已知遗留持续：subagent-control
+/// `./list-agents` 导出未核（随 rc.2 遗留延续）。真机冒烟待补，跑通前
 /// 不宣称已验证。
-pub const DSH_VERSION: &str = "0.2.2-rc.2";
+pub const DSH_VERSION: &str = "0.2.2-rc.3";
 /// 便携 Node 版本（dsh rc.x 的 zstd 要求需要 Node 24）。
 const NODE_VERSION: &str = "24.19.0";
 /// 固定自带包管理器版本，禁止因系统 pnpm 或 latest 跨大版本而改变安装行为。
@@ -86,6 +78,10 @@ const PNPM_VERSION: &str = "10.34.5";
 /// lib:164/remote.mux+Set-Cookie client-connection/titlebar/renderSlot/
 /// plugin --profile）；keep-alive 锚点 dsh-host-webserver lib:546 唯一命中
 /// ——65s 补丁直接套用；cordis vendor 4.1.0 持平。
+/// 0.2.2-rc.3 复查（2026-11-17，npm 逐包实测 grep）：83/83 钉版子依赖发布
+/// 完整（rc.2 的 82→83，+1 包；挂 next 已 4 天非发布窗口期）；集成面八项
+/// 全存活且与 rc.2 同位；keep-alive 锚点唯一命中（host-webserver line 546
+/// 同位）——65s 补丁直接套用。
 /// 升到 (0,2,2) 放行 0.2.2 系列。npm 超出此版本时仍拒绝升级并引导先升级应用
 /// 本体；DSH_DESKTOP_DSH_VERSION 显式指定视为知情强制。
 const DSH_MAX_ADAPTED: (u64, u64, u64) = (0, 2, 2);
@@ -2624,9 +2620,10 @@ npm error notarget No matching version found for @d/four@4.0.0.\n\
 
     #[test]
     fn guard_blocks_next_minor_line_allows_current() {
-        // 0.2.0/0.2.1/0.2.2 系列放行（2026-09-27～2026-11-12 历次核查：dsh-* 子包
+        // 0.2.0/0.2.1/0.2.2 系列放行（2026-09-27～2026-11-17 历次核查：dsh-* 子包
         // 精确钉版、集成面八项全存活；rc.3 复查 78/78、alpha.2 复查 83/83、
-        // alpha.3/rc.1/rc.2 复查 82/82 钉版发布完整；rc.1 真机冒烟待补）
+        // alpha.3/rc.1/rc.2 复查 82/82、0.2.2-rc.3 复查 83/83 钉版发布完整；
+        // rc.1 真机冒烟待补）
         assert!(version_triple("0.2.0-rc.1").unwrap() <= DSH_MAX_ADAPTED);
         assert!(version_triple("0.2.0").unwrap() <= DSH_MAX_ADAPTED);
         assert!(version_triple("0.2.1-alpha.1").unwrap() <= DSH_MAX_ADAPTED);
@@ -2637,6 +2634,7 @@ npm error notarget No matching version found for @d/four@4.0.0.\n\
         assert!(version_triple("0.2.2-alpha.3").unwrap() <= DSH_MAX_ADAPTED);
         assert!(version_triple("0.2.2-rc.1").unwrap() <= DSH_MAX_ADAPTED);
         assert!(version_triple("0.2.2-rc.2").unwrap() <= DSH_MAX_ADAPTED);
+        assert!(version_triple("0.2.2-rc.3").unwrap() <= DSH_MAX_ADAPTED);
         // 0.1.x 全系列 ≤ (0,2,2)：放行（历史基线都在适配线内）
         assert!(version_triple("0.1.7-rc.2").unwrap() <= DSH_MAX_ADAPTED);
         assert!(version_triple("0.1.8").unwrap() <= DSH_MAX_ADAPTED);
