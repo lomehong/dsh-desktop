@@ -289,21 +289,28 @@ fn base_url_port(base_url: &str) -> u16 {
         .unwrap_or(0)
 }
 
-/// 启动时清理「壳被强杀后残留的孤儿 dsh 进程树」：
-/// 登记存在、壳 pid 已死、子 pid 仍活且进程名符合 dsh 启动链（node/cmd）→ 整树击杀。
-/// 壳 pid 仍存活说明是并行实例（单实例插件之外的兜底），不动。
+/// 启动时清理「壳被强杀后残留的孤儿 dsh 进程树」。两层：
+/// ① 特征清扫：cmdline 含本应用独占数据目录（dsh-desktop-app-data）的 node.exe
+///    一律击杀——pid 登记只记最后一个 child，guardian 多轮重启漏杀的孤儿不在册
+///    （2026-11-17 实机曾积 13 个锁死 node 目录 → 自愈 rename 报
+///    ERROR_DIR_NOT_EMPTY「目录不是空的」，自愈永远失败）。⚠ 签名必须钉死
+///    本应用独占路径：本机还有其他项目也跑 dsh 运行时（不同根路径，如安装
+///    目录下的遗留 node），宽匹配 `@deepseek-ai\dsh\bin.js` 会误杀邻居服务。
+/// ② 登记在册的单棵孤儿树整树击杀（pid 复用防御保留：进程名须在 dsh 启动链）。
+/// 壳 pid 仍存活说明是并行实例（单实例插件之外的兜底），两层都不动。
 pub fn cleanup_stale_orphan() {
-    let Ok(text) = std::fs::read_to_string(runtime::pid_file()) else {
-        return;
-    };
+    let recorded = std::fs::read_to_string(runtime::pid_file())
+        .ok()
+        .and_then(|text| serde_json::from_str::<PidRecord>(&text).ok());
     let _ = std::fs::remove_file(runtime::pid_file());
-    let Ok(rec) = serde_json::from_str::<PidRecord>(&text) else {
-        return;
-    };
-    if runtime::process_alive(rec.shell_pid) {
+    if recorded.as_ref().is_some_and(|rec| runtime::process_alive(rec.shell_pid)) {
         // 另一个壳实例仍在运行（其子进程归它管）
         return;
     }
+    sweep_orphan_dsh_processes();
+    let Some(rec) = recorded else {
+        return; // 无登记（首次启动等）：①已兜住
+    };
     let Some(name) = runtime::process_name(rec.child_pid) else {
         return; // 子进程已不在
     };
@@ -316,6 +323,39 @@ pub fn cleanup_stale_orphan() {
     }
     kill_tree(rec.child_pid);
 }
+
+/// ① 的执行体（Windows 专用；unix 启动链用进程组 KILL，漏网面小，暂不加扫）。
+/// 用 PowerShell Get-CimInstance 按命令行特征找本应用运行时的 node 进程并整批
+/// 击杀（系统自带零新依赖；启动线程异步执行，WMI 查询秒级不卡窗口）。命中
+/// pid 写回日志留证。查询失败不影响启动（还有 ② 与自愈重试兜底）。
+#[cfg(windows)]
+fn sweep_orphan_dsh_processes() {
+    const SIGNATURE: &str = "*dsh-desktop-app-data*";
+    let script = "Get-CimInstance Win32_Process -Filter \"Name='node.exe'\" | \
+Where-Object { $_.CommandLine -like '*dsh-desktop-app-data*' } | \
+ForEach-Object { Write-Output $_.ProcessId; Stop-Process -Id $_.ProcessId -Force }";
+    let mut cmd = Command::new("powershell");
+    cmd.args(["-NoProfile", "-NonInteractive", "-Command", script]);
+    runtime::no_window(&mut cmd);
+    match cmd.output() {
+        Ok(o) if o.status.success() && !o.stdout.is_empty() => {
+            let pids = String::from_utf8_lossy(&o.stdout);
+            if let Some(mut log) = runtime::open_log_append() {
+                let _ = writeln!(log, "[清理] 特征清扫孤儿 dsh 进程（cmdline 含 {}）: {}",
+                    SIGNATURE, pids.trim());
+            }
+        }
+        Ok(_) => {}
+        Err(_) => {
+            if let Some(mut log) = runtime::open_log_append() {
+                let _ = writeln!(log, "[清理] 孤儿进程特征清扫执行失败（不影响启动，自愈重试兜底）");
+            }
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn sweep_orphan_dsh_processes() {}
 
 /// 杀掉整个进程树（dsh 会派生工作线程/子进程，必须整树清理）。
 pub fn kill_tree(pid: u32) {

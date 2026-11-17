@@ -1004,7 +1004,15 @@ fn install_runtime_inner(app: &tauri::AppHandle) -> Result<(), String> {
             .map_err(|e| format!("解压失败: {e}"))
             .and_then(|s| if s.success() { Ok(()) } else { Err("解压失败".into()) })?;
         let inner = extract_to.join(node_inner_dir()?);
-        let _ = std::fs::remove_dir_all(&node_dir);
+        // 旧目录清不掉 = 有文件被进程占用（2026-11-17 实机：13 个 guardian 重启
+        // 循环漏杀的孤儿 dsh node 进程锁死 node_modules，remove_dir_all 半途
+        // 而废 → rename 报 ERROR_DIR_NOT_EMPTY「目录不是空的」，用户无从知道
+        // 真因）。失败不再静默：带出原始错误与可操作指引。
+        if let Err(e) = std::fs::remove_dir_all(&node_dir) {
+            return Err(format!(
+                "安装 Node 失败：旧运行时目录清理失败（{e}）——通常是有 node 进程仍占用其下文件（如未随应用退出的 dsh 服务残留）。请重启应用（启动时自动清扫本应用孤儿进程）或手动结束相关 node.exe 后重试"
+            ));
+        }
         std::fs::rename(&inner, &node_dir).map_err(|e| format!("安装 Node 失败: {e}"))?;
         let _ = std::fs::remove_dir_all(&extract_to);
         let _ = std::fs::remove_file(&zip);
