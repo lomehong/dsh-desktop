@@ -29,6 +29,11 @@ jobs:
       - name: Smoke test (boot → ready → graceful exit, no orphans)
         env:
           HOME: ${{ runner.temp }}/dsh-smoke-home
+          # runner 到 npmmirror CDN 可能慢到 ~100KB/s（2026-11-19 v0.1.84 macOS
+          # 冒烟：Node zip 下载 8m42s 吃掉 900s 预算大半，npm 装 dsh + 起服务
+          # 没跑完即超时 → no URL line）。壳原生支持镜像覆盖：runner 直连源站。
+          DSH_DESKTOP_NODE_MIRROR: https://nodejs.org/dist
+          DSH_DESKTOP_NPM_REGISTRY: https://registry.npmjs.org
         run: |
           mkdir -p "$HOME"
           # 仅保留 OS 工具，验证应用自行准备 Node/npm/DSH。

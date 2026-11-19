@@ -30,6 +30,9 @@ jobs:
         shell: pwsh
         env:
           LOCALAPPDATA: ${{ runner.temp }}\dsh-smoke
+          # 与 macOS 冒烟同源策略：runner 直连源站，消除 npmmirror CDN 波动
+          DSH_DESKTOP_NODE_MIRROR: https://nodejs.org/dist
+          DSH_DESKTOP_NPM_REGISTRY: https://registry.npmjs.org
         run: |
           New-Item -ItemType Directory -Force -Path $env:LOCALAPPDATA | Out-Null
           # 启动时 PATH 仅含系统自带工具，禁止 runner 的 Node/npm/pnpm 掩盖自举缺陷。
