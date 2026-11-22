@@ -19,21 +19,24 @@ use tauri::Manager;
 /// 解析成 alpha.2，缺 watchUserPatches 导出 → SyntaxError 启动即崩）。基线跟进
 /// 最新版 = 主子版本一致。根治需上游 exact 钉版或全局锁文件。
 ///
-/// 当前基线 0.2.2-rc.5（2026-11-19 npm 逐包实测核查）：
-/// 发布完整性 83/83 精确钉版子依赖全部在 registry（与 rc.3 相同的 91/83 结构；
-/// 挂 next；latest 仍 rc.1，升级择新逻辑取 next 的 rc.5；rc.4 只存活约 20h 即被
-/// rc.5 取代，无需单独适配）。集成面八项产物级 grep 全存活且与 rc.3 完全同位
-/// （前端 bundle 连 dist 哈希名都未变——rc.3→rc.5 前端零变化）：stdout URL 行
-/// （web-app lib `dsh web: ${authenticatedUrl}`）、--no-open（index.js+startup.js）、
-/// /api/remote.mux（api-gateway client.browser.js/client.node.js/index.js）、
-/// token→cookie 认证（无字面锚点可 grep，与 rc.1～rc.3 同构）、
-/// data-windows-titlebar（web-frontend dist+layout）、renderSlot、
-/// `dsh plugin --profile`（主包 lib）、keep-alive 补丁锚点
-/// `this.server.listen(this.config.port` 在 dsh-host-webserver lib/index.js
-/// line 546 唯一命中——65s 补丁直接套用。已知遗留持续：subagent-control
-/// `./list-agents` 导出未核（随 rc.2 遗留延续）。真机冒烟待补，跑通前
-/// 不宣称已验证。
-pub const DSH_VERSION: &str = "0.2.2-rc.5";
+/// 当前基线 0.2.3-alpha.2（2026-11-22 npm 逐包实测核查，跨次版本线 0.2.2→0.2.3）：
+/// 发布完整性 85/85 精确钉版子依赖全部在 registry（93 总依赖/85 钉版，vs rc.5 的
+/// 91/83：+dsh-cua-mcp、+dsh-timeline、+dsh-session-persistence-sqlite、
+/// -dsh-personalized-recommendations；alpha.1 与 alpha.2 结构一致，上游当日两连发，
+/// alpha tag 指向 alpha.2——基线铁律跟最新）。集成面八项双重复核全存活：产物级
+/// npm pack grep（--no-open/remote.mux/titlebar/renderSlot/plugin --profile/
+/// cookie 结构等价）+ 源码级 GitHub clone（tag 只到 alpha.1，依赖结构与 alpha.2
+/// 一致）专查**URL 打印跨线重构**：0.2.3 起 web-app 改为 `webserver/entry-url`
+/// 事件收集多入口按 `label: url` 逐行打印，经 authentication-token 监听源码实证
+/// 输出格式不变——`entries.push({ label: 'dsh web', url:
+/// auth.authenticatedUrl(baseUrl) })`，authenticatedUrl = origin + `?token=`，
+/// 壳 parse_web_url 兼容；新增的 `dsh web: listening on ...` 警告行首词非
+/// 127.0.0.1 会被解析器安全跳过。keep-alive 补丁锚点 `this.server.listen(
+/// this.config.port` 在 dsh-host-webserver lib/index.js line 620 唯一命中
+/// （rc.5 的 546 → 620，行号移动但计数判定不受影响）——65s 补丁直接套用。
+/// 已知遗留持续：subagent-control `./list-agents` 导出未核（随 rc.2 遗留延续）。
+/// 真机冒烟待补，跑通前不宣称已验证。
+pub const DSH_VERSION: &str = "0.2.3-alpha.2";
 /// 便携 Node 版本（dsh rc.x 的 zstd 要求需要 Node 24）。
 const NODE_VERSION: &str = "24.19.0";
 /// 固定自带包管理器版本，禁止因系统 pnpm 或 latest 跨大版本而改变安装行为。
@@ -87,9 +90,14 @@ const PNPM_VERSION: &str = "10.34.5";
 /// 完整（91/83 结构与 rc.3 持平；rc.4 存活约 20h 即被取代）；集成面八项
 /// 全存活且与 rc.3 完全同位（前端 dist 哈希名未变，rc.3→rc.5 前端零变化）；
 /// keep-alive 锚点唯一命中（line 546 同位）——65s 补丁直接套用。
-/// 升到 (0,2,2) 放行 0.2.2 系列。npm 超出此版本时仍拒绝升级并引导先升级应用
+/// 0.2.3-alpha.2 复查（2026-11-22，跨次版本线 0.2.2→0.2.3，npm 逐包实测
+/// grep + 源码级 clone 专查 URL 打印重构）：85/85 钉版子依赖发布完整
+/// （93/85 结构，+dsh-cua-mcp/+dsh-timeline/+dsh-session-persistence-sqlite/
+/// -dsh-personalized-recommendations）；集成面八项全存活（八项明细见
+/// DSH_VERSION 注释）；keep-alive 锚点唯一命中（line 546→620，计数判定）。
+/// 升到 (0,2,3) 放行 0.2.3 系列。npm 超出此版本时仍拒绝升级并引导先升级应用
 /// 本体；DSH_DESKTOP_DSH_VERSION 显式指定视为知情强制。
-const DSH_MAX_ADAPTED: (u64, u64, u64) = (0, 2, 2);
+const DSH_MAX_ADAPTED: (u64, u64, u64) = (0, 2, 3);
 
 /// ⚠️ 运行时升级纪律（真实事故两次，教训见 docs/lessons/2026-09-15-runtime-upgrade-whilst-running.md）：
 /// **执行 npm install 升级运行时前，必须确认用户已关闭 dsh-desktop 应用。**
@@ -2637,10 +2645,10 @@ npm error notarget No matching version found for @d/four@4.0.0.\n\
 
     #[test]
     fn guard_blocks_next_minor_line_allows_current() {
-        // 0.2.0/0.2.1/0.2.2 系列放行（2026-09-27～2026-11-19 历次核查：dsh-* 子包
-        // 精确钉版、集成面八项全存活；rc.3 复查 78/78、alpha.2 复查 83/83、
-        // alpha.3/rc.1/rc.2 复查 82/82、0.2.2-rc.3/rc.5 复查 83/83 钉版发布完整；
-        // rc.1 真机冒烟待补）
+        // 0.2.0/0.2.1/0.2.2/0.2.3 系列放行（2026-09-27～2026-11-22 历次核查：
+        // dsh-* 子包精确钉版、集成面八项全存活；rc.3 复查 78/78、alpha.2 复查
+        // 83/83、alpha.3/rc.1/rc.2 复查 82/82、0.2.2-rc.3/rc.5 复查 83/83、
+        // 0.2.3-alpha.1/alpha.2 复查 85/85 钉版发布完整；rc.1 真机冒烟待补）
         assert!(version_triple("0.2.0-rc.1").unwrap() <= DSH_MAX_ADAPTED);
         assert!(version_triple("0.2.0").unwrap() <= DSH_MAX_ADAPTED);
         assert!(version_triple("0.2.1-alpha.1").unwrap() <= DSH_MAX_ADAPTED);
@@ -2654,12 +2662,15 @@ npm error notarget No matching version found for @d/four@4.0.0.\n\
         assert!(version_triple("0.2.2-rc.3").unwrap() <= DSH_MAX_ADAPTED);
         assert!(version_triple("0.2.2-rc.4").unwrap() <= DSH_MAX_ADAPTED);
         assert!(version_triple("0.2.2-rc.5").unwrap() <= DSH_MAX_ADAPTED);
-        // 0.1.x 全系列 ≤ (0,2,2)：放行（历史基线都在适配线内）
+        assert!(version_triple("0.2.3-alpha.1").unwrap() <= DSH_MAX_ADAPTED);
+        assert!(version_triple("0.2.3-alpha.2").unwrap() <= DSH_MAX_ADAPTED);
+        assert!(version_triple("0.2.3").unwrap() <= DSH_MAX_ADAPTED);
+        // 0.1.x 全系列 ≤ (0,2,3)：放行（历史基线都在适配线内）
         assert!(version_triple("0.1.7-rc.2").unwrap() <= DSH_MAX_ADAPTED);
         assert!(version_triple("0.1.8").unwrap() <= DSH_MAX_ADAPTED);
-        // 预发布段按其所属三元组参与比较：0.2.3-alpha 起视为需要壳配套适配——必须拦
-        assert!(version_triple("0.2.3-alpha.1").unwrap() > DSH_MAX_ADAPTED);
-        assert!(version_triple("0.2.3").unwrap() > DSH_MAX_ADAPTED);
+        // 预发布段按其所属三元组参与比较：0.2.4-alpha 起视为需要壳配套适配——必须拦
+        assert!(version_triple("0.2.4-alpha.1").unwrap() > DSH_MAX_ADAPTED);
+        assert!(version_triple("0.2.4").unwrap() > DSH_MAX_ADAPTED);
         assert!(version_triple("0.3.0").unwrap() > DSH_MAX_ADAPTED);
         // 0.1.6 系列（含 alpha/正式）≤ 当前适配线：放行（2026-09-09 评估
         // 11 个依赖包零 diff，零破坏后放行）
