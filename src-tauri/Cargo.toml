@@ -1,6 +1,6 @@
 [package]
 name = "dsh-desktop"
-version = "0.1.88"
+version = "0.1.89"
 description = "DSH Desktop — DeepSeek Harness 桌面应用（Windows / macOS）"
 edition = "2021"
 
@@ -45,6 +45,12 @@ windows = { version = "0.61", features = [
     "Win32_UI_Shell",
     "Win32_UI_Shell_Common",
     "Win32_UI_Shell_PropertiesSystem",
+    # 进程树保底（job.rs）：kill-on-close 作业对象 + 按 pid 取句柄加入作业
+    # （CreateJobObjectW 本身 gate 在 Win32_Security 之下，必须一并启用）
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_JobObjects",
+    "Win32_System_Threading",
 ] }
 
 # macOS Dock badge（D3b）：NSApp.dockTile.badgeLabel 的最小 msg_send 封装。仅 macOS 目标编译。

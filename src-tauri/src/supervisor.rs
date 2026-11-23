@@ -524,6 +524,10 @@ pub fn spawn_dsh(app: &tauri::AppHandle, launch: Launch) -> Result<Running, Stri
         cmd.process_group(0);
     }
     let mut child = runtime::no_window(&mut cmd).spawn().map_err(|e| format!("启动 dsh web 失败: {e}"))?;
+    // 进程树保底（2026-11 孤儿事故的结构性修复）：立即把 dsh 纳入壳持有的
+    // kill-on-close 作业——壳消失（正常退出/崩溃/被安装器强杀）时内核连带收走
+    // 整棵树，不再依赖事后清扫。加入动作必须紧跟 spawn（窗口期越短越好）。
+    crate::job::adopt(child.id());
 
     let stdout = child.stdout.take().ok_or("无法捕获 dsh 输出")?;
     let stderr = child.stderr.take().ok_or("无法捕获 dsh 错误输出")?;

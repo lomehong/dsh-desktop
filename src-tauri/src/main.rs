@@ -10,6 +10,7 @@ mod events;
 mod guardian;
 mod i18n;
 mod install;
+mod job;
 mod jumplist;
 mod notifications;
 mod persona;
