@@ -1053,7 +1053,100 @@ fn install_runtime_inner(app: &tauri::AppHandle) -> Result<(), String> {
     if runtime::ready_root().is_none() {
         return Err("安装后自带 Node/npm/DSH 仍不完整，请查看运行时安装日志".into());
     }
+    check_cua_native_binary(app);
     Ok(())
+}
+
+/// Windows Computer Use 原生后端自检（非阻断）：上游 0.2.3-alpha 的
+/// @deepseek-ai/dsh-cua-windows npm 包缺 `native/bin/win-x64/dsh-cua-windows.exe`
+/// （files 清单声明了 native/bin 但发布流水线未跑 dotnet 构建——2026-11-22 实机
+/// 排查，分析与手工解法见 docs/plans/2026-11-23-official-desktop-followup-analysis.md）。
+/// 缺失时 cua:windows 服务 spawn 即 ENOENT，UI 报「Service cuaAccess is unavailable」。
+/// 实验性预览功能，缺失不阻断启动：日志留证 + 系统通知给出明确指引，等上游 rc
+/// 修复打包后重装运行时即恢复。
+fn check_cua_native_binary(app: &tauri::AppHandle) {
+    if !cfg!(windows) {
+        return;
+    }
+    let Some(dsh_dir) = runtime::dsh_package_dir() else {
+        return;
+    };
+    let nested = dsh_dir.join("node_modules/@deepseek-ai/dsh-cua-windows/native/bin/win-x64/dsh-cua-windows.exe");
+    let hoisted = dsh_dir
+        .parent()
+        .map(|scope| scope.join("dsh-cua-windows/native/bin/win-x64/dsh-cua-windows.exe"))
+        .unwrap_or_default();
+    if nested.is_file() || hoisted.is_file() {
+        return;
+    }
+    let guidance = "Windows Computer Use 暂不可用：上游 0.2.3-alpha npm 包缺原生后端（已确认非本机问题）。等上游 rc 修复后升级运行时即恢复；手工解法见运行时日志";
+    if let Some(mut log) = runtime::open_log_append() {
+        use std::io::Write;
+        let _ = writeln!(log, "[warn] dsh-cua-windows 原生后端缺失（上游 0.2.3-alpha npm 发布未携带 native/bin）：\n  已查路径：{}\n  已查路径：{}\n  影响：Windows Computer Use 后端 spawn 即 ENOENT（UI 报 Service cuaAccess is unavailable）。\n  手工解法：装 .NET 10 SDK 后克隆上游 monorepo，在 packages/experimental/cua-windows 执行 dotnet publish native/entry/CuaWindows.csproj -c Release -r win-x64 --self-contained true，产物拷入上述 native/bin/win-x64/（2026-11-22 已按此法补齐过一次）。",
+            nested.display(), hoisted.display());
+    }
+    crate::notifications::present(app, "Computer Use", guidance);
+}
+
+/// 每个 profile 的 manifest（package.json）先备份为 `package.json.rescue-<unix>`，
+/// 再清空 dependencies——dsh 启动时 profile 无依赖可解析即以纯核心形态启动。
+/// 第三方插件恢复 = 把备份文件改名回 package.json（后缀约定见守护文案）。
+/// 首次救援前已存在的备份不覆盖（保留最早原件，反复救援不丢原始清单）。
+pub fn disable_third_party_plugins(app: &tauri::AppHandle) -> Result<String, String> {
+    let profiles = runtime::app_home().join("profiles");
+    let entries = std::fs::read_dir(&profiles).map_err(|e| format!("读 profiles 目录失败: {e}"))?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let mut touched: Vec<String> = Vec::new();
+    let mut skipped: Vec<String> = Vec::new();
+    for entry in entries.flatten() {
+        let manifest = entry.path().join("package.json");
+        if !manifest.is_file() {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().to_string();
+        let text = std::fs::read_to_string(&manifest)
+            .map_err(|e| format!("读 {} 失败: {e}", manifest.display()))?;
+        let mut value: serde_json::Value = serde_json::from_str(&text)
+            .map_err(|e| format!("解析 {} 失败: {e}", manifest.display()))?;
+        let deps_empty = value
+            .get("dependencies")
+            .and_then(|d| d.as_object())
+            .map(|m| m.is_empty())
+            .unwrap_or(false);
+        if deps_empty {
+            skipped.push(name.clone());
+            continue;
+        }
+        let backup = manifest.with_file_name(format!("package.json.rescue-{now}"));
+        if !backup.exists() {
+            std::fs::copy(&manifest, &backup)
+                .map_err(|e| format!("备份 {} 失败: {e}", manifest.display()))?;
+        }
+        if let Some(obj) = value.as_object_mut() {
+            obj.insert("dependencies".into(), serde_json::json!({}));
+        }
+        let cleared = serde_json::to_string_pretty(&value)
+            .map_err(|e| format!("序列化 {} 失败: {e}", manifest.display()))?;
+        std::fs::write(&manifest, cleared)
+            .map_err(|e| format!("写 {} 失败: {e}", manifest.display()))?;
+        touched.push(name);
+    }
+    if let Some(mut log) = runtime::open_log_append() {
+        use std::io::Write;
+        let _ = writeln!(log, "[救援] 禁用第三方插件: 清空 {} 个 profile 清单依赖（备份 *.rescue-{now}，未动: {}）",
+            touched.len(), skipped.join(","));
+    }
+    if touched.is_empty() {
+        Ok("未发现第三方插件依赖，直接重启".into())
+    } else {
+        Ok(format!(
+            "已禁用 {} 个 profile 的第三方插件（原清单备份为 package.json.rescue-{now}，恢复 = 改名回 package.json）",
+            touched.len()
+        ))
+    }
 }
 
 /// 升级检查与安装（不含服务重启）：只升级应用自有运行时；缺失时先装基线。
@@ -1091,6 +1184,17 @@ pub fn upgrade_dsh(app: &tauri::AppHandle) -> Result<String, String> {
 /// 升级完成后按远程模式重连——绝不 start_service 把本地服务拉起来顶掉远程页面
 /// （升级的本地运行时等下次回到本地时生效）。
 pub fn upgrade_runtime(app: &tauri::AppHandle) {
+    // 任务感知退出（对照官方 update-tasks inspect）：升级要停服务/杀树，先问。
+    // 本函数已由托盘 spawn 在线程内执行，阻塞确认框安全。
+    if supervisor::tasks_likely_active(app)
+        && !supervisor::confirm_interrupt(
+            app,
+            "dsh 可能正在执行任务，或会话尚未结束。\n升级会停止服务并中断这些任务，仍要继续吗？",
+        )
+    {
+        status::set(app, "已取消升级：等待当前任务结束后再试");
+        return;
+    }
     status::set(app, "正在查询 npm 上 DSH 运行时的最新版本…");
     let state: tauri::State<crate::AppState> = app.state();
     let remote_mode = *state.mode.lock().unwrap() == "remote";

@@ -159,6 +159,7 @@
       <div id="bar-wrap"><div id="bar"></div></div>
       <div class="actions" id="actions">
         <button id="btn-install">安装运行环境</button>
+        <button id="btn-rescue">禁用第三方插件并启动</button>
         <button id="btn-log">打开日志</button>
         <button id="btn-dir">打开数据目录</button>
       </div>
@@ -471,6 +472,12 @@
     document.getElementById('btn-connect-cancel').onclick = () => { try { invoke('switch_to_local'); } catch (e) {} };
 
     document.getElementById('btn-install').onclick = () => { try { invoke('install_runtime'); } catch (e) {} };
+    // 零依赖救援（对照官方 fatal-recovery 的「禁用全部插件」）：服务反复崩溃时的兜底
+    document.getElementById('btn-rescue').onclick = () => {
+      const btn = document.getElementById('btn-rescue');
+      btn.disabled = true; btn.textContent = '正在禁用第三方插件…';
+      try { invoke('rescue_disable_plugins'); } catch (e) {}
+    };
     document.getElementById('btn-log').onclick = () => { try { invoke('open_log'); } catch (e) {} };
     document.getElementById('btn-dir').onclick = () => { try { invoke('open_runtime_dir'); } catch (e) {} };
     // 远程错误态按钮组

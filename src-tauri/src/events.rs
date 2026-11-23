@@ -316,6 +316,8 @@ fn remote_loop(
         match socket.read() {
             Ok(Message::Text(text)) => {
                 let outcome = handle_remote_frame(&text, &stream_id, &mut running);
+                // 任务感知退出：把会话运行状态同步进 AppState（托盘退出/升级前提醒用）
+                crate::supervisor::note_session_activity(&app, &running);
                 if !outcome.client_id.is_empty() {
                     client_id = outcome.client_id;
                 }

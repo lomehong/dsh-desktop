@@ -374,6 +374,59 @@ pub fn kill_tree(pid: u32) {
     }
 }
 
+/* ── 任务感知退出（对照官方 desktop 的 quit-inspection 设计） ── */
+
+/// 事件流订阅线程随帧刷新会话活跃状态（AppState.tasks_running/last_task_active_ms）。
+/// running 表由 handle_remote_frame 维护（turn/start 与 api-session/status 真 values）。
+pub fn note_session_activity(app: &tauri::AppHandle, running: &std::collections::HashMap<String, bool>) {
+    use std::sync::atomic::Ordering;
+    let any = running.values().any(|r| *r);
+    let state = app.state::<crate::AppState>();
+    state.tasks_running.store(any, Ordering::Relaxed);
+    if any {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        state.last_task_active_ms.store(now, Ordering::Relaxed);
+    }
+}
+
+/// 「可能有未完成任务」判定：服务存活且（任一会话在跑 ∪ 2 分钟内有活跃回合）。
+/// 事件流未连接（last=0）时不误报。托盘退出/应用菜单退出/升级前调用。
+pub fn tasks_likely_active(app: &tauri::AppHandle) -> bool {
+    use std::sync::atomic::Ordering;
+    let state = app.state::<crate::AppState>();
+    if state.child.lock().unwrap().is_none() {
+        return false; // 服务未运行：无任务可言
+    }
+    if state.tasks_running.load(Ordering::Relaxed) {
+        return true;
+    }
+    let last = state.last_task_active_ms.load(Ordering::Relaxed);
+    if last == 0 {
+        return false;
+    }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    now.saturating_sub(last) < 120_000
+}
+
+/// 阻塞确认框（须在非主线程调用；tray/upgrade 均已在线程内）。true = 用户确认继续。
+pub fn confirm_interrupt(app: &tauri::AppHandle, body: &str) -> bool {
+    use tauri_plugin_dialog::DialogExt;
+    app.dialog()
+        .message(body)
+        .title("DSH Desktop")
+        .buttons(tauri_plugin_dialog::MessageDialogButtons::OkCancelCustom(
+            "继续".into(),
+            "取消".into(),
+        ))
+        .blocking_show()
+}
+
 /// 拉起 `dsh web --no-open --port 0`：随机端口由 OS 分配，实际地址从 stdout 的 URL 行解析；
 /// 全部输出同步 tee 到日志文件。未能在时限内解析出 URL 视为启动失败。
 /// 0.1.17 冷启动孤儿缺口修复：spawn 成功即刻 ①写 pid 记录（端口未知 0 占位）

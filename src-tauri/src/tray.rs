@@ -318,7 +318,12 @@ fn check_app_update(app: &tauri::AppHandle) {
     use tauri_plugin_updater::UpdaterExt;
     crate::status::set(app, "正在检查应用更新…");
     tauri::async_runtime::block_on(async move {
-        let updater = match app.updater_builder().build() {
+        let updater = match app
+            .updater_builder()
+            // 空闲超时（对照官方 updates http-executor）：CDN/feed 静默挂死不再卡检查
+            .timeout(std::time::Duration::from_secs(60))
+            .build()
+        {
             Ok(u) => u,
             Err(e) => {
                 crate::status::set(&app, &format!("更新器初始化失败：{e}"));
@@ -974,7 +979,20 @@ pub fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
                 std::thread::spawn(move || crate::supervisor::connect_saved(&handle, &addr));
             }
             "quit" => {
-                app.exit(0);
+                // 任务感知退出（对照官方 quit-inspection）：有会话在跑/刚空闲时先确认。
+                // 对话框须在非主线程阻塞展示，故 spawn 出去再问。
+                let handle = app.clone();
+                std::thread::spawn(move || {
+                    if crate::supervisor::tasks_likely_active(&handle)
+                        && !crate::supervisor::confirm_interrupt(
+                            &handle,
+                            "dsh 可能正在执行任务，或会话尚未结束。\n现在退出会中断这些任务，仍要退出吗？",
+                        )
+                    {
+                        return;
+                    }
+                    handle.exit(0);
+                });
             }
             _ => {}
         })

@@ -145,6 +145,8 @@ pub async fn about_check_update(
     let app = window.app_handle().clone();
     let updater = app
         .updater_builder()
+        // 空闲超时（对照官方 updates http-executor）：feed/CDN 静默挂死不再卡检查
+        .timeout(std::time::Duration::from_secs(60))
         .build()
         .map_err(|e| format!("更新器初始化失败：{e}"))?;
     match updater.check().await {
@@ -165,6 +167,8 @@ pub async fn about_install_update(window: tauri::WebviewWindow) -> Result<(), St
     let app = window.app_handle().clone();
     let updater = app
         .updater_builder()
+        // 同 about_check_update：feed/CDN 静默挂死不卡下载/安装
+        .timeout(std::time::Duration::from_secs(60))
         .build()
         .map_err(|e| format!("更新器初始化失败：{e}"))?;
     // 重新 check：区间内状态可能已变（对齐托盘 check_app_update 的做法）

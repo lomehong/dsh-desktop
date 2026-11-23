@@ -784,6 +784,68 @@ fn check_supervisor_terminal(app: &tauri::AppHandle, now: u64) {
         ),
     };
     open_issue(app, category, "error", "supervisor", &text, &diagnosis, action, &advice);
+    // 崩溃报告落盘（对照官方 crash-report：先报告再给恢复选项；报告有界、留 10 份）
+    write_service_crash_report(app, category, &text, &diagnosis);
+}
+
+/// 服务级崩溃报告（重启耗尽时落盘）：`crash-reports/crash-<unix>-service.log`，
+/// 含立案信息 + 重启计数 + 壳日志尾部（≤160 行，报告总量有界，保留最新 10 份）。
+/// 恢复对话的零依赖自愈（禁用第三方插件）以此为现场依据。
+fn write_service_crash_report(app: &tauri::AppHandle, category: &str, error_text: &str, diagnosis: &str) {
+    use std::io::Write;
+    let reports_dir = crate::runtime::runtime_root().join("crash-reports");
+    if let Err(e) = std::fs::create_dir_all(&reports_dir) {
+        log_line(&format!("崩溃报告目录创建失败: {e}"));
+        return;
+    }
+    let now = runtime::unix_now();
+    let path = reports_dir.join(format!("crash-{now}-service.log"));
+    // 壳日志尾部（崩溃现场最值钱的部分；行数有界防报告膨胀）
+    let log_tail: Vec<String> = {
+        let log_path = crate::runtime::log_file();
+        std::fs::read_to_string(&log_path)
+            .map(|text| {
+                text.lines()
+                    .rev()
+                    .take(160)
+                    .collect::<Vec<_>>()
+                    .into_iter()
+                    .rev()
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let restarts = app.state::<crate::AppState>().restarts.lock().map(|r| *r).unwrap_or(0);
+    let mut report = String::new();
+    report.push_str(&format!("time={now}\ncategory={category}\nrestarts={restarts}\n"));
+    report.push_str(&format!("diagnosis={diagnosis}\n"));
+    report.push_str(&format!("error={error_text}\n"));
+    report.push_str(&format!("baseline={}\n", crate::install::DSH_VERSION));
+    report.push_str("--- dsh-desktop.log tail ---\n");
+    for line in log_tail {
+        report.push_str(&line);
+        report.push('\n');
+    }
+    // 有界截断（64KiB 上限，尾部为准——崩溃现场在后段）
+    if report.len() > 64 * 1024 {
+        let cut = report.len() - 64 * 1024;
+        report = report[cut..].to_string();
+    }
+    if let Err(e) = std::fs::write(&path, report) {
+        log_line(&format!("崩溃报告写入失败: {e}"));
+    }
+    // 保留最新 10 份
+    let mut reports: Vec<std::path::PathBuf> = std::fs::read_dir(&reports_dir)
+        .map(|entries| entries.flatten().map(|e| e.path()).collect())
+        .unwrap_or_default();
+    if reports.len() > 10 {
+        reports.sort_by_key(|p| p.metadata().and_then(|m| m.modified()).ok());
+        let excess = reports.len() - 10;
+        for stale in reports.into_iter().take(excess) {
+            let _ = std::fs::remove_file(stale);
+        }
+    }
 }
 
 /// 纯函数便于单测：去抖判断。

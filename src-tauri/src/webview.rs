@@ -57,7 +57,20 @@ fn run_desktop_cmd(handle: &tauri::AppHandle, cmd: DesktopCmd) {
         DesktopCmd::Settings => {
             let _ = crate::settings::open_settings_window(&h);
         }
-        DesktopCmd::Quit => h.exit(0),
+        DesktopCmd::Quit => {
+            // 任务感知退出：与托盘退出同一确认（对话框须在非主线程阻塞展示）
+            std::thread::spawn(move || {
+                if crate::supervisor::tasks_likely_active(&h)
+                    && !crate::supervisor::confirm_interrupt(
+                        &h,
+                        "dsh 可能正在执行任务，或会话尚未结束。\n现在退出会中断这些任务，仍要退出吗？",
+                    )
+                {
+                    return;
+                }
+                h.exit(0);
+            });
+        }
     });
 }
 

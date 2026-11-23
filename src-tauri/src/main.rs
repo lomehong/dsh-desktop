@@ -57,6 +57,12 @@ struct AppState {
     /// 御符账号登录态（远程实例连接·账号化）：SSO JWT **仅内存**（红队裁决：账号
     /// 长期凭据不落盘），登出/进程退出即清空。None = 未登录。
     sso: Mutex<Option<remote_account::SsoSession>>,
+    /// 任务感知退出（对照官方 quit-inspection）：事件流里任一会话在跑 = true。
+    /// 由 events 订阅线程随帧刷新；托盘退出/应用菜单退出/升级前据此提醒。
+    tasks_running: std::sync::atomic::AtomicBool,
+    /// 最近一次会话活跃时刻（unix ms）。运行中持续刷新；退出提醒凭它与
+    /// tasks_running 组成「运行中或刚空闲 2 分钟内」的判定窗。
+    last_task_active_ms: std::sync::atomic::AtomicU64,
 }
 
 /// 自定义命令只服务本地加载页；Harness 远程页面调用一律拒绝（IPC 零授权边界在命令层再拦一道）。
@@ -220,6 +226,25 @@ fn install_runtime(window: tauri::WebviewWindow, app: tauri::AppHandle) {
         return;
     }
     std::thread::spawn(move || install::install_and_start(&app));
+}
+
+/// 救援：禁用第三方插件后重启（对照官方 fatal-recovery 的零依赖恢复对话）。
+/// profile 清单先备份为 `package.json.rescue-<ts>`；恢复 = 把备份改名回
+/// package.json。崩溃报告（crash-reports/）是触发本动作的现场依据。
+#[tauri::command]
+fn rescue_disable_plugins(window: tauri::WebviewWindow, app: tauri::AppHandle) {
+    if !caller_is_local(&window) {
+        return;
+    }
+    std::thread::spawn(move || {
+        match install::disable_third_party_plugins(&app) {
+            Ok(msg) => {
+                status::set(&app, &format!("{msg}，正在重启服务…"));
+                supervisor::restart_by_mode(&app);
+            }
+            Err(e) => status::fail(&app, &e),
+        }
+    });
 }
 
 /// 便携版分身向导：保存字段 → 写预设/patch/凭证 → 按当前模式自动（重）启动/重连。
@@ -719,12 +744,15 @@ fn main() {
             // manage 在 setup 前：load_mode 是纯文件读（无 Tauri 依赖），此处初始化安全
             mode: Mutex::new(remote::load_mode()),
             sso: Mutex::new(None),
+            tasks_running: std::sync::atomic::AtomicBool::new(false),
+            last_task_active_ms: std::sync::atomic::AtomicU64::new(0),
         })
         .invoke_handler(tauri::generate_handler![
             get_status,
             open_log,
             open_runtime_dir,
             install_runtime,
+            rescue_disable_plugins,
             persona_wizard_save,
             connect_remote,
             retry_connect,
