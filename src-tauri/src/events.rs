@@ -318,6 +318,10 @@ fn remote_loop(
                 let outcome = handle_remote_frame(&text, &stream_id, &mut running);
                 // 任务感知退出：把会话运行状态同步进 AppState（托盘退出/升级前提醒用）
                 crate::supervisor::note_session_activity(&app, &running);
+                if !outcome.waterfall_event_ids.is_empty() {
+                    // 有审批/提问正在等用户：记时刻（退出确认据此把「等审批」也算作任务）
+                    crate::supervisor::note_approval_seen(&app);
+                }
                 if !outcome.client_id.is_empty() {
                     client_id = outcome.client_id;
                 }

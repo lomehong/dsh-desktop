@@ -141,14 +141,8 @@ pub async fn about_check_update(
     if !crate::caller_is_local(&window) {
         return Err("无权限".into());
     }
-    use tauri_plugin_updater::UpdaterExt;
     let app = window.app_handle().clone();
-    let updater = app
-        .updater_builder()
-        // 空闲超时（对照官方 updates http-executor）：feed/CDN 静默挂死不再卡检查
-        .timeout(std::time::Duration::from_secs(60))
-        .build()
-        .map_err(|e| format!("更新器初始化失败：{e}"))?;
+    let updater = crate::updater_http::build(&app)?;
     match updater.check().await {
         Ok(Some(update)) => Ok(serde_json::json!({ "latest": update.version })),
         Ok(None) => Ok(serde_json::json!({ "latest": null })),
@@ -163,14 +157,16 @@ pub async fn about_install_update(window: tauri::WebviewWindow) -> Result<(), St
     if !crate::caller_is_local(&window) {
         return Err("无权限".into());
     }
-    use tauri_plugin_updater::UpdaterExt;
     let app = window.app_handle().clone();
-    let updater = app
-        .updater_builder()
-        // 同 about_check_update：feed/CDN 静默挂死不卡下载/安装
-        .timeout(std::time::Duration::from_secs(60))
-        .build()
-        .map_err(|e| format!("更新器初始化失败：{e}"))?;
+    // 应用自更新会重启整棵树（壳 + dsh），与「升级 DSH 运行时」同级风险：
+    // 有任务在跑时先确认，避免无声打断用户的回合。
+    if !crate::supervisor::confirm_before_interrupt(
+        &app,
+        "dsh 可能正在执行任务，或会话尚未结束。\n安装更新会重启应用并中断这些任务，仍要继续吗？",
+    ) {
+        return Err("已取消更新：等待当前任务结束后再试".into());
+    }
+    let updater = crate::updater_http::build(&app)?;
     // 重新 check：区间内状态可能已变（对齐托盘 check_app_update 的做法）
     let Some(update) = updater
         .check()

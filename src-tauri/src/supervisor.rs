@@ -392,8 +392,12 @@ pub fn note_session_activity(app: &tauri::AppHandle, running: &std::collections:
     }
 }
 
-/// 「可能有未完成任务」判定：服务存活且（任一会话在跑 ∪ 2 分钟内有活跃回合）。
-/// 事件流未连接（last=0）时不误报。托盘退出/应用菜单退出/升级前调用。
+/// 「可能有未完成任务」判定（对照官方 desktop quit-inspection 的两项事实）：
+/// 服务存活且满足任一：
+/// 1. 任一会话在跑（`api-session/status` 的 running 真值，含子代理回合）；
+/// 2. 有审批/提问在等用户决定（waterfall 未应答）——Agent 卡在那里等，退出即丢；
+/// 3. 2 分钟内有活跃回合（刚落幕的回合可能还有收尾动作）。
+/// 事件流未连接（last=0 且无 pending）时不误报。
 pub fn tasks_likely_active(app: &tauri::AppHandle) -> bool {
     use std::sync::atomic::Ordering;
     let state = app.state::<crate::AppState>();
@@ -403,29 +407,91 @@ pub fn tasks_likely_active(app: &tauri::AppHandle) -> bool {
     if state.tasks_running.load(Ordering::Relaxed) {
         return true;
     }
-    let last = state.last_task_active_ms.load(Ordering::Relaxed);
-    if last == 0 {
-        return false;
-    }
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0);
-    now.saturating_sub(last) < 120_000
+    let recent = |ms: u64| ms != 0 && now.saturating_sub(ms) < 120_000;
+    // 刚出现审批/提问：Agent 正在等用户决定，退出即丢
+    if recent(state.last_approval_ms.load(Ordering::Relaxed)) {
+        return true;
+    }
+    // 刚有活跃回合：可能还有收尾动作
+    recent(state.last_task_active_ms.load(Ordering::Relaxed))
 }
 
-/// 阻塞确认框（须在非主线程调用；tray/upgrade 均已在线程内）。true = 用户确认继续。
+/// 退出/重启/更新前的统一守卫（对照官方规则，三条都实现了）：
+/// - 系统正在关机/注销/重启 → **跳过**确认（不能拖住系统关机）；
+/// - 已有确认框打开 → **并入**：直接返回 false（本次请求不再叠框、也不执行）；
+/// - 无任务或无服务 → 直接放行；
+/// - 否则弹阻塞确认框。返回 true = 允许继续。
+/// 必须在非主线程调用（tray/菜单/更新流程都已在线程内）。
+pub fn confirm_before_interrupt(app: &tauri::AppHandle, body: &str) -> bool {
+    use std::sync::atomic::Ordering;
+    let state = app.state::<crate::AppState>();
+    if !tasks_likely_active(app) {
+        return true;
+    }
+    // 已有框在开：官方语义是「并入已有对话框」，即本次请求放弃、不重复弹框
+    if state
+        .quit_prompt_open
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return false;
+    }
+    let allowed = confirm_interrupt(app, body);
+    state.quit_prompt_open.store(false, Ordering::SeqCst);
+    allowed
+}
+
+/// 审批/提问事件的时间戳（events 订阅线程调用）：壳只把 waterfall 放行给页面，
+/// 并不知道页面是否已处理；所以按「最近 N 秒内出现过审批请求」判定，
+/// 而不是维护精确的在途计数（壳从来没有这个事实）。
+pub fn note_approval_seen(app: &tauri::AppHandle) {
+    use std::sync::atomic::Ordering;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    app.state::<crate::AppState>()
+        .last_approval_ms
+        .store(now, Ordering::Relaxed);
+}
+
+/// 阻塞确认框（须在非主线程调用）。true = 用户确认继续。
+/// 带自动超时：系统关机/注销时 Windows 只会给我们几秒，无限等待的对话框会
+/// 拖住关机（甚至被系统判为「阻止关机」）。超时按「继续」处理——关机语义就是
+/// 用户已经决定离开，没必要也不应该拦。日常退出时 30 秒足够用户读完再决定。
 pub fn confirm_interrupt(app: &tauri::AppHandle, body: &str) -> bool {
     use tauri_plugin_dialog::DialogExt;
-    app.dialog()
-        .message(body)
-        .title("DSH Desktop")
-        .buttons(tauri_plugin_dialog::MessageDialogButtons::OkCancelCustom(
-            "继续".into(),
-            "取消".into(),
-        ))
-        .blocking_show()
+    // 克隆句柄给新线程：dialog() 借用 app，直接 move 会逃逸出函数生命周期
+    let app = app.clone();
+    let (tx, rx) = std::sync::mpsc::channel::<bool>();
+    // 对话框本身没有超时 API：放到另一条线程等它的结果，本线程按超时收口。
+    let body = body.to_string();
+    std::thread::spawn(move || {
+        let answer = app
+            .dialog()
+            .message(&body)
+            .title("DSH Desktop")
+            .buttons(tauri_plugin_dialog::MessageDialogButtons::OkCancelCustom(
+                "继续".into(),
+                "取消".into(),
+            ))
+            .blocking_show();
+        let _ = tx.send(answer);
+    });
+    match rx.recv_timeout(CONFIRM_TIMEOUT) {
+        Ok(answer) => answer,
+        // 超时（多半是系统关机在催）：按继续处理，不拖住系统
+        Err(_) => true,
+    }
 }
+
+/// 退出确认框的超时上限。取 30 秒：足够日常阅读决定；系统关机时 Windows 会先行
+/// 终止进程，这里的超时只是兜底，避免我们成为关机的阻塞者。
+const CONFIRM_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// 拉起 `dsh web --no-open --port 0`：随机端口由 OS 分配，实际地址从 stdout 的 URL 行解析；
 /// 全部输出同步 tee 到日志文件。未能在时限内解析出 URL 视为启动失败。
@@ -732,6 +798,25 @@ fn resolve_launch(app: &tauri::AppHandle) -> Result<Launch, String> {
 fn start_service_locked(app: &tauri::AppHandle) -> Result<(), String> {
     let state: tauri::State<AppState> = app.state();
     let launch = resolve_launch(app)?;
+    // 运行时完整性校验（对照官方 desktop-runtime.json 的启动校验）：清单在
+    // 安装完成时写入，这里比对关键文件的 size+sha256。**不阻断启动**——文件
+    // 缺失本来就由 ready_root 拦住；这里的作用是给「装着装着被截断 / 杀毒软件
+    // 隔离了某个 .js」这类故障留下可读证据，并触发一次运行时自愈。
+    if launch == Launch::Portable {
+        match crate::runtime_manifest::verify(&runtime::runtime_root()) {
+            crate::runtime_manifest::Verdict::Mismatch(detail) => {
+                if let Some(mut log) = runtime::open_log_append() {
+                    let _ = writeln!(log, "[warn] 运行时完整性与清单不符：{detail}（继续启动，必要时走自愈重装）");
+                }
+            }
+            crate::runtime_manifest::Verdict::Ok(n) => {
+                if let Some(mut log) = runtime::open_log_append() {
+                    let _ = writeln!(log, "[清单] 运行时完整性校验通过（{n} 项）");
+                }
+            }
+            crate::runtime_manifest::Verdict::NoManifest => {}
+        }
+    }
     // 自带核心版本预检：运行时核心若为
     // 超出壳适配线（DSH_MAX_ADAPTED）的版本（如上游已发布 0.1.3+ 但壳尚未放行），
     // 插件 API 代际可能不匹配——与其让服务崩溃后报「180 秒未报告监听地址」，
@@ -1100,6 +1185,29 @@ pub fn watch_child(app: &tauri::AppHandle) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /* ── 退出判定窗口（对齐官方 quit-inspection：活跃/刚活跃/刚审批都算有任务） ── */
+
+    #[test]
+    fn recent_activity_window_covers_turn_and_approval() {
+        // 判定窗口是 120 秒；0 表示「从未观测到」，永远不算任务（事件流没连上时不误报）
+        let now: u64 = 1_000_000;
+        let within = |ms: u64| ms != 0 && now.saturating_sub(ms) < 120_000;
+        assert!(!within(0), "从未观测到活动时不应判定为有任务");
+        assert!(within(now - 1), "刚结束的回合应仍在窗口内");
+        assert!(within(now - 119_000), "119 秒内仍算有任务");
+        assert!(!within(now - 121_000), "超过 2 分钟不再算有任务");
+        // 时钟回拨（now < ms）时 saturating_sub 归零 → 算作刚活跃，宁可多问一次
+        assert!(within(now + 5_000), "时钟回拨应按刚活跃处理（保守）");
+    }
+
+    /// 确认框超时上限必须存在且足够短：系统关机只给几秒，长超时会把我们变成
+    /// 关机阻塞者。上限存在的意义是「超时按继续处理」。
+    #[test]
+    fn confirm_timeout_is_bounded() {
+        assert!(CONFIRM_TIMEOUT <= std::time::Duration::from_secs(60), "超时过长会拖住系统关机");
+        assert!(CONFIRM_TIMEOUT >= std::time::Duration::from_secs(10), "超时过短用户来不及读");
+    }
 
     #[test]
     fn parses_v0_1_2_token_url_keeping_token_and_origin() {

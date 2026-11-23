@@ -20,11 +20,13 @@ mod remote;
 mod remote_account;
 mod remote_proxy;
 mod runtime;
+mod runtime_manifest;
 mod settings;
 mod status;
 mod suite_path;
 mod supervisor;
 mod tray;
+mod updater_http;
 mod webview;
 mod whale;
 mod window_state;
@@ -64,6 +66,12 @@ struct AppState {
     /// 最近一次会话活跃时刻（unix ms）。运行中持续刷新；退出提醒凭它与
     /// tasks_running 组成「运行中或刚空闲 2 分钟内」的判定窗。
     last_task_active_ms: std::sync::atomic::AtomicU64,
+    /// 最近一次审批/提问（waterfall）事件时刻（unix ms）。壳只负责把 waterfall 放行
+    /// 给页面、并不知道用户是否已处理；按「最近 2 分钟内出现过」计入待办，
+    /// 因为此时 Agent 很可能正卡在等用户决定（对照官方 quit-inspection 的审批等待）。
+    last_approval_ms: std::sync::atomic::AtomicU64,
+    /// 退出确认框是否已打开：连点退出不再叠第二个框（官方同款「并入已有对话框」）。
+    quit_prompt_open: std::sync::atomic::AtomicBool,
 }
 
 /// 自定义命令只服务本地加载页；Harness 远程页面调用一律拒绝（IPC 零授权边界在命令层再拦一道）。
@@ -751,6 +759,8 @@ fn main() {
             sso: Mutex::new(None),
             tasks_running: std::sync::atomic::AtomicBool::new(false),
             last_task_active_ms: std::sync::atomic::AtomicU64::new(0),
+            last_approval_ms: std::sync::atomic::AtomicU64::new(0),
+            quit_prompt_open: std::sync::atomic::AtomicBool::new(false),
         })
         .invoke_handler(tauri::generate_handler![
             get_status,

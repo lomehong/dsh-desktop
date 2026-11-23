@@ -315,23 +315,29 @@ fn solid_dot_icon(color: (u8, u8, u8)) -> tauri::image::Image<'static> {
 
 /// 检查应用自更新（tauri-plugin-updater，签名公钥内置于 tauri.conf.json）。
 fn check_app_update(app: &tauri::AppHandle) {
-    use tauri_plugin_updater::UpdaterExt;
     crate::status::set(app, "正在检查应用更新…");
     tauri::async_runtime::block_on(async move {
-        let updater = match app
-            .updater_builder()
-            // 空闲超时（对照官方 updates http-executor）：CDN/feed 静默挂死不再卡检查
-            .timeout(std::time::Duration::from_secs(60))
-            .build()
-        {
+        let updater = match crate::updater_http::build(&app) {
             Ok(u) => u,
             Err(e) => {
-                crate::status::set(&app, &format!("更新器初始化失败：{e}"));
+                crate::status::set(&app, &e);
                 return;
             }
         };
         match updater.check().await {
             Ok(Some(update)) => {
+                // 应用自更新同样要重启整棵树（壳 + dsh），与「升级 DSH 运行时」
+                // 同级风险：有任务在跑时先确认，别把用户的回合无声打断。
+                if !crate::supervisor::confirm_before_interrupt(
+                    &app,
+                    &format!(
+                        "dsh 可能正在执行任务，或会话尚未结束。\n安装更新 v{} 会重启应用并中断这些任务，仍要继续吗？",
+                        update.version
+                    ),
+                ) {
+                    crate::status::set(&app, "已取消更新：等待当前任务结束后再试");
+                    return;
+                }
                 crate::status::set(&app, &format!("发现新版本 {}，正在下载…", update.version));
                 let on_done = || app.restart();
                 if let Err(e) = update
@@ -979,16 +985,15 @@ pub fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
                 std::thread::spawn(move || crate::supervisor::connect_saved(&handle, &addr));
             }
             "quit" => {
-                // 任务感知退出（对照官方 quit-inspection）：有会话在跑/刚空闲时先确认。
+                // 任务感知退出（对照官方 quit-inspection）：有会话在跑/审批等待/刚空闲
+                // 时先确认；系统关机或已有确认框时由守卫统一处理。
                 // 对话框须在非主线程阻塞展示，故 spawn 出去再问。
                 let handle = app.clone();
                 std::thread::spawn(move || {
-                    if crate::supervisor::tasks_likely_active(&handle)
-                        && !crate::supervisor::confirm_interrupt(
-                            &handle,
-                            "dsh 可能正在执行任务，或会话尚未结束。\n现在退出会中断这些任务，仍要退出吗？",
-                        )
-                    {
+                    if !crate::supervisor::confirm_before_interrupt(
+                        &handle,
+                        "dsh 可能正在执行任务，或会话尚未结束。\n现在退出会中断这些任务，仍要退出吗？",
+                    ) {
                         return;
                     }
                     handle.exit(0);

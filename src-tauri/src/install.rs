@@ -1053,6 +1053,22 @@ fn install_runtime_inner(app: &tauri::AppHandle) -> Result<(), String> {
     if runtime::ready_root().is_none() {
         return Err("安装后自带 Node/npm/DSH 仍不完整，请查看运行时安装日志".into());
     }
+    // 运行时完整性清单（对照官方 desktop-runtime.json）：记下关键文件的 size+sha256，
+    // 之后启动时校验「安装有没有被截断/文件有没有被替换损坏」。写失败不阻断安装。
+    match crate::runtime_manifest::write(&runtime::runtime_root(), DSH_VERSION) {
+        Ok(n) => {
+            if let Some(mut log) = runtime::open_log_append() {
+                use std::io::Write;
+                let _ = writeln!(log, "[清单] 运行时完整性清单已写入 {n} 项（dsh v{DSH_VERSION}）");
+            }
+        }
+        Err(e) => {
+            if let Some(mut log) = runtime::open_log_append() {
+                use std::io::Write;
+                let _ = writeln!(log, "[warn] 运行时清单写入失败（不阻断安装）: {e}");
+            }
+        }
+    }
     check_cua_native_binary(app);
     Ok(())
 }
@@ -1254,12 +1270,10 @@ pub fn upgrade_dsh(app: &tauri::AppHandle) -> Result<String, String> {
 pub fn upgrade_runtime(app: &tauri::AppHandle) {
     // 任务感知退出（对照官方 update-tasks inspect）：升级要停服务/杀树，先问。
     // 本函数已由托盘 spawn 在线程内执行，阻塞确认框安全。
-    if supervisor::tasks_likely_active(app)
-        && !supervisor::confirm_interrupt(
-            app,
-            "dsh 可能正在执行任务，或会话尚未结束。\n升级会停止服务并中断这些任务，仍要继续吗？",
-        )
-    {
+    if !supervisor::confirm_before_interrupt(
+        app,
+        "dsh 可能正在执行任务，或会话尚未结束。\n升级会停止服务并中断这些任务，仍要继续吗？",
+    ) {
         status::set(app, "已取消升级：等待当前任务结束后再试");
         return;
     }
