@@ -607,10 +607,10 @@ fn atomic_write_json<T: serde::Serialize>(path: &PathBuf, value: &T) -> Result<(
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     }
-    let tmp = path.with_extension("json.tmp");
     let text = serde_json::to_string_pretty(value).map_err(|e| e.to_string())?;
-    std::fs::write(&tmp, text).map_err(|e| e.to_string())?;
-    std::fs::rename(&tmp, path).map_err(|e| e.to_string())
+    // 统一走 runtime::write_atomic（tmp + fsync + rename）：台账是守护跨会话的事实来源，
+    // 写一半被杀会丢全部历史并让「已解决的问题」重复立案。
+    crate::runtime::write_atomic(path, text.as_bytes()).map_err(|e| e.to_string())
 }
 
 /* ── 采集层 ── */
@@ -788,63 +788,73 @@ fn check_supervisor_terminal(app: &tauri::AppHandle, now: u64) {
     write_service_crash_report(app, category, &text, &diagnosis);
 }
 
-/// 服务级崩溃报告（重启耗尽时落盘）：`crash-reports/crash-<unix>-service.log`，
-/// 含立案信息 + 重启计数 + 壳日志尾部（≤160 行，报告总量有界，保留最新 10 份）。
+/// 服务级崩溃报告（重启耗尽时落盘）：`crash-reports/crash-<unix>-service.log`。
+/// 对照官方 desktop 的 crash-report 纪律，本函数遵守四条：
+/// 1. 错误段与日志尾段**各自独立预算**（错误 8 KiB / 日志尾 48 KiB 字符），
+///    不让任一段吃掉另一段的现场；
+/// 2. 截断一律按**字符**边界（`runtime::tail_chars`）——按字节切中文日志会 panic，
+///    而这段代码只在崩溃路径上跑；
+/// 3. 原子写（tmp + fsync + rename），半截报告不会留在磁盘上；
+/// 4. 清理只删文件名匹配 `crash-<数字>-service.log` 的报告（保留最新 10 份），
+///    绝不碰目录里其它文件。
 /// 恢复对话的零依赖自愈（禁用第三方插件）以此为现场依据。
 fn write_service_crash_report(app: &tauri::AppHandle, category: &str, error_text: &str, diagnosis: &str) {
-    use std::io::Write;
+    const ERROR_CHARS: usize = 8 * 1024;
+    const LOG_TAIL_CHARS: usize = 48 * 1024;
     let reports_dir = crate::runtime::runtime_root().join("crash-reports");
     if let Err(e) = std::fs::create_dir_all(&reports_dir) {
         log_line(&format!("崩溃报告目录创建失败: {e}"));
         return;
     }
     let now = runtime::unix_now();
+    // 文件名固定、可排序、可精确匹配（清理依赖这个形状）
     let path = reports_dir.join(format!("crash-{now}-service.log"));
-    // 壳日志尾部（崩溃现场最值钱的部分；行数有界防报告膨胀）
-    let log_tail: Vec<String> = {
-        let log_path = crate::runtime::log_file();
-        std::fs::read_to_string(&log_path)
-            .map(|text| {
-                text.lines()
-                    .rev()
-                    .take(160)
-                    .collect::<Vec<_>>()
-                    .into_iter()
-                    .rev()
-                    .map(str::to_string)
-                    .collect()
-            })
-            .unwrap_or_default()
-    };
+    // 壳日志尾部（崩溃现场最值钱的部分）：先按行取尾，再按字符预算收敛
+    let log_tail = std::fs::read_to_string(crate::runtime::log_file())
+        .map(|text| {
+            let lines: Vec<&str> = text.lines().collect();
+            let start = lines.len().saturating_sub(160);
+            runtime::tail_chars(&lines[start..].join("\n"), LOG_TAIL_CHARS).to_string()
+        })
+        .unwrap_or_default();
     let restarts = app.state::<crate::AppState>().restarts.lock().map(|r| *r).unwrap_or(0);
-    let mut report = String::new();
-    report.push_str(&format!("time={now}\ncategory={category}\nrestarts={restarts}\n"));
-    report.push_str(&format!("diagnosis={diagnosis}\n"));
-    report.push_str(&format!("error={error_text}\n"));
-    report.push_str(&format!("baseline={}\n", crate::install::DSH_VERSION));
-    report.push_str("--- dsh-desktop.log tail ---\n");
-    for line in log_tail {
-        report.push_str(&line);
-        report.push('\n');
-    }
-    // 有界截断（64KiB 上限，尾部为准——崩溃现场在后段）
-    if report.len() > 64 * 1024 {
-        let cut = report.len() - 64 * 1024;
-        report = report[cut..].to_string();
-    }
-    if let Err(e) = std::fs::write(&path, report) {
+    let header = format!(
+        "time={now}\ncategory={category}\nrestarts={restarts}\ndiagnosis={}\nbaseline={}\nlevel=runtime\n",
+        runtime::tail_chars(diagnosis, 2 * 1024),
+        crate::install::DSH_VERSION,
+    );
+    let report = format!(
+        "{header}--- error (tail {ERROR_CHARS} chars) ---\n{}\n--- dsh-desktop.log tail ({LOG_TAIL_CHARS} chars) ---\n{log_tail}\n",
+        runtime::tail_chars(error_text, ERROR_CHARS),
+    );
+    if let Err(e) = runtime::write_atomic(&path, report.as_bytes()) {
         log_line(&format!("崩溃报告写入失败: {e}"));
     }
-    // 保留最新 10 份
-    let mut reports: Vec<std::path::PathBuf> = std::fs::read_dir(&reports_dir)
-        .map(|entries| entries.flatten().map(|e| e.path()).collect())
-        .unwrap_or_default();
-    if reports.len() > 10 {
-        reports.sort_by_key(|p| p.metadata().and_then(|m| m.modified()).ok());
-        let excess = reports.len() - 10;
-        for stale in reports.into_iter().take(excess) {
-            let _ = std::fs::remove_file(stale);
-        }
+    prune_crash_reports(&reports_dir, 10);
+}
+
+/// 清理旧崩溃报告：只认 `crash-<数字>-service.log` 这个形状，保留最新 `keep` 份。
+/// 目录里可能有用户手动放的文件，一律不碰（官方同款纪律）。
+fn prune_crash_reports(dir: &std::path::Path, keep: usize) {
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    let mut reports: Vec<std::path::PathBuf> = entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| {
+            let Some(name) = p.file_name().and_then(|n| n.to_str()) else { return false };
+            let Some(rest) = name.strip_prefix("crash-") else { return false };
+            let Some(stamp) = rest.strip_suffix("-service.log") else { return false };
+            !stamp.is_empty() && stamp.bytes().all(|b| b.is_ascii_digit())
+        })
+        .collect();
+    if reports.len() <= keep {
+        return;
+    }
+    // 文件名里的 unix 秒天然可排序，无需 stat（stat 失败也不会误删）
+    reports.sort();
+    let excess = reports.len() - keep;
+    for stale in reports.into_iter().take(excess) {
+        let _ = std::fs::remove_file(stale);
     }
 }
 

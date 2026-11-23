@@ -1,26 +1,43 @@
-; DSH Desktop NSIS 安装钩子（tauri.conf.json bundle.windows.nsis.installerHooks 引用）。
+; DSH Desktop NSIS installer hooks (referenced by tauri.conf.json bundle.windows.nsis.installerHooks).
 ;
-; PREINSTALL：结束所有运行中的 dsh-desktop 实例后再覆盖文件。
-; 背景（2026-09-26 实机事故）：本应用常驻托盘，升级覆盖安装时旧实例锁住
-; dsh-desktop.exe，NSIS 覆盖失败但注册表/清单版本号照常更新——
-; 造成「装了最新版，跑的还是旧程序」的假象（任务栏旧图标、新功能缺失）。
+; PREINSTALL: make sure no running dsh-desktop instance keeps the old exe locked
+; while the installer overwrites files.
 ;
-; 强杀后由两道既有机制兜底，不留坏状态：
-; 1) 下次启动 cleanup_stale_orphan 按 runtime.pid 识别并整树击杀孤儿 dsh 子进程；
-; 2) 窗口状态不落盘坏值（隐藏/最小化态的采样有守卫）。
+; Background (real incident 2026-09-26): this app lives in the tray, so an upgrade
+; over a running instance failed to overwrite dsh-desktop.exe while the registry
+; still recorded the new version -- "installed the latest, still runs the old
+; program".
 ;
-; POSTUNINSTALL：升级卸载的注册表/PATH 残留清理（对照官方 desktop 的
-; windows-uninstall-registry 系列，2026-11-23 跟进分析）。卸载把安装目录整个
-; 删除后，用户 PATH 里指向该目录的条目成为孤儿；用 PowerShell 过滤重写
-; HKCU Environment（.NET 写用户环境变量自带 WM_SETTINGCHANGE 广播），
-; NSIS 侧无需引入字符串替换函数库。
+; 2026-11-24 correction, matching the official desktop client: do NOT silently
+; force-kill. This shell has no kill-on-close job object for its dsh child, so a
+; force-killed shell can leave the dsh process tree orphaned, and killing it
+; discards whatever task the user was running without asking. Ask instead:
+; the user quits from the tray (where the quit path runs the task-aware
+; confirmation), then re-runs the installer.
+;
+; A silent install (/S, used by the release pipeline and the portable packaging
+; step) cannot show a prompt, so it keeps the old force-kill behaviour; the
+; portable step only packages files and has no user task to lose.
 !macro NSIS_HOOK_PREINSTALL
-  DetailPrint "正在关闭运行中的 DSH Desktop…"
-  nsExec::Exec 'taskkill /IM dsh-desktop.exe /F'
-  Sleep 600
+  ${If} ${Silent}
+    DetailPrint "Stopping running DSH Desktop (silent install)..."
+    nsExec::Exec 'taskkill /IM dsh-desktop.exe /F'
+    Sleep 600
+  ${Else}
+    nsExec::Exec 'tasklist /FI "IMAGENAME eq dsh-desktop.exe" /NH'
+    Pop $0
+    ${If} $0 != ""
+      ${If} $0 != "INFO: No tasks are running which match the specified criteria."
+        MessageBox MB_OK|MB_ICONINFORMATION "DSH Desktop 正在运行。$\r$\n$\r$\n请先在系统托盘右键 DSH Desktop 图标并选择「退出」（若有任务在跑，它会先向你确认），然后再继续安装。" IDOK
+        Abort
+      ${EndIf}
+    ${EndIf}
+  ${EndIf}
 !macroend
 
-!macro NSIS_HOOK_POSTUNINSTALL
-  DetailPrint "正在清理用户 PATH 中的安装目录残留…"
-  nsExec::Exec 'powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "$k = ''HKCU:\Environment''; $d = ''$INSTDIR''; $p = [Environment]::GetEnvironmentVariable(''Path'', ''User''); if ($p) { $n = (($p -split '';'' | Where-Object { $_ -and -not $_.Trim().StartsWith($d, [System.StringComparison]::OrdinalIgnoreCase) }) -join '';''); if ($n -ne $p) { [Environment]::SetEnvironmentVariable(''Path'', $n, ''User'') } }"'
-!macroend
+; POSTUNINSTALL intentionally absent: this app never writes to the user PATH
+; (there is no CLI registration feature), so there is nothing to clean up. The
+; v0.1.87 hook that tried to rewrite HKCU Environment\Path was verified dead by
+; compiling it with makensis: NSIS treats $k/$d/$p/$n/$_ as undefined variables
+; (warning 6000, then removes them) and the '' quoting truncated the command.
+; A no-op that only looks like cleanup is worse than none.

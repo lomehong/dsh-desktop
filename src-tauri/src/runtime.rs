@@ -300,9 +300,102 @@ pub fn unix_now() -> u64 {
         .unwrap_or(0)
 }
 
+/* ── 持久化原语：原子写 + 边界安全的尾部截断 ──
+   对照官方 desktop 的 dsh-atomic-write 与 crash-report 的 `boundedErrorSection`：
+   壳里多处状态/凭证/清单是整文件覆盖写，进程在写一半时被杀（强杀、断电、
+   安装器 taskkill）会留下半截 JSON/YAML，下次启动直接解析失败。统一走
+   「同目录临时文件 → 落盘 fsync → rename 覆盖」：rename 在同一卷上是原子的，
+   读方要么看到旧内容、要么看到完整新内容。    */
+
+/// 原子覆盖写：临时文件与目标同目录（跨卷 rename 会失败），写完 fsync 再 rename。
+/// 目标目录缺失时返回错误（调用方本来就要保证目录存在，不静默创造半成品）。
+pub fn write_atomic(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let dir = path.parent().ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "目标路径没有父目录")
+    })?;
+    let file_name = path.file_name().unwrap_or_default().to_string_lossy();
+    let tmp = dir.join(format!("{file_name}.tmp-{}", std::process::id()));
+    let outcome = (|| -> std::io::Result<()> {
+        let mut f = std::fs::File::create(&tmp)?;
+        f.write_all(bytes)?;
+        f.sync_all()?;
+        drop(f);
+        std::fs::rename(&tmp, path)
+    })();
+    if outcome.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    outcome
+}
+
+/// 取文本尾部不超过 `max_chars` 个字符（悄悄按 char 边界对齐）。
+/// 崩溃报告等诊断文本必须留尾部（现场在最后），但按**字符**而非字节截断：
+/// 中文日志按字节切会落在 UTF-8 多字节序列中间，`&s[i..]` 直接 panic——
+/// 而这类代码恰恰只会在崩溃路径上跑，绝不能再自己炸。
+pub fn tail_chars(text: &str, max_chars: usize) -> &str {
+    if max_chars == 0 {
+        return "";
+    }
+    let count = text.chars().count();
+    if count <= max_chars {
+        return text;
+    }
+    let skip = count - max_chars;
+    let idx = text.char_indices().nth(skip).map(|(i, _)| i).unwrap_or(0);
+    &text[idx..]
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    /* ── 持久化原语 ── */
+
+    /// 尾部截断必须按字符边界：中文（3 字节/字）与 emoji（4 字节）混排时，
+    /// 按字节切会 panic。这条正是 v0.1.87 崩溃报告里的真实缺陷。
+    #[test]
+    fn tail_chars_never_splits_multibyte_characters() {
+        let text = "启动失败：中文日志与表情🚀混排，末尾还有一段英文 tail";
+        let total_chars = text.chars().count();
+        // 逐一尝试所有预算：任何预算下都必须仍能按 char 边界切且不 panic
+        for max in 0..=total_chars + 2 {
+            let tail = tail_chars(text, max);
+            // 结果必须是原串的后缀（按字符计）
+            let expect_skip = total_chars.saturating_sub(max);
+            let expected: String = text.chars().skip(expect_skip).collect();
+            assert_eq!(tail, expected, "max={max} 的尾部与预期字符后缀不一致");
+        }
+        // 预算比整串长：原样返回
+        assert_eq!(tail_chars(text, 10_000), text);
+        // 空串/零预算不 panic
+        assert_eq!(tail_chars("", 5), "");
+        assert_eq!(tail_chars("abc", 0), "");
+    }
+
+    /// 原子写：成功后目标内容完整；写到不存在目录时返回错误且不留下临时文件。
+    #[test]
+    fn write_atomic_replaces_target_and_leaves_no_temp_file() {
+        let dir = std::env::temp_dir().join(format!("dsh-atomic-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("state.json");
+        std::fs::write(&target, "旧内容").unwrap();
+        write_atomic(&target, "新内容".as_bytes()).unwrap();
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "新内容");
+        // 目录里只剩目标文件本身（临时文件已改名为目标）
+        let names: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .collect();
+        assert_eq!(names, vec!["state.json".to_string()], "目录里残留了临时文件: {names:?}");
+        // 目标目录不存在：报错，且不制造半成品
+        let missing = dir.join("nope").join("state.json");
+        assert!(write_atomic(&missing, b"x").is_err());
+        assert!(!missing.exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     // 子进程隔离环境变量与 OnceLock，测试不能迁移或改写开发机的真实数据。
     pub(crate) fn isolated_case(name: &str, setup: impl FnOnce(&std::path::Path)) -> Option<PathBuf> {

@@ -186,7 +186,8 @@ pub fn tofu_approve(address: &str) -> Result<(), String> {
     if let Some(obj) = v.get_mut("approved").and_then(|a| a.as_object_mut()) {
         obj.insert(address.to_string(), serde_json::json!(now_ms()));
     }
-    std::fs::write(&path, serde_json::to_string_pretty(&v).map_err(|e| e.to_string())?)
+    let text = serde_json::to_string_pretty(&v).map_err(|e| e.to_string())?;
+    crate::runtime::write_atomic(&path, text.as_bytes())
         .map_err(|e| format!("写入 TOFU 记录失败: {e}"))
 }
 

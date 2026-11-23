@@ -237,6 +237,10 @@ fn rescue_disable_plugins(window: tauri::WebviewWindow, app: tauri::AppHandle) {
         return;
     }
     std::thread::spawn(move || {
+        // 官方纪律：改 profile 之前必须先停服务（Host 持有 profile、patch 由它在读）。
+        // 旧实现在服务运行时就地改文件，且改的是不起作用的那部分。
+        status::set(&app, "正在停止服务并禁用第三方插件…");
+        supervisor::stop_child(&app);
         match install::disable_third_party_plugins(&app) {
             Ok(msg) => {
                 status::set(&app, &format!("{msg}，正在重启服务…"));

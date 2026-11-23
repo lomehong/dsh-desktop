@@ -56,7 +56,9 @@ fn save_to(path: &PathBuf, cfg: &LauncherCfg) -> Result<(), String> {
         std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     }
     let text = serde_json::to_string_pretty(cfg).map_err(|e| e.to_string())?;
-    std::fs::write(path, text).map_err(|e| e.to_string())
+    // 原子写：写一半被杀（安装器 taskkill / 断电）会留下半截 JSON，下次启动
+    // 解析失败就等于丢配置。rename 保证读方看到旧内容或完整新内容。
+    crate::runtime::write_atomic(path, text.as_bytes()).map_err(|e| e.to_string())
 }
 
 /// 已配置的固定端口（spawn_dsh 决策用）。

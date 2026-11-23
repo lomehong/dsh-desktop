@@ -1088,65 +1088,133 @@ fn check_cua_native_binary(app: &tauri::AppHandle) {
     crate::notifications::present(app, "Computer Use", guidance);
 }
 
-/// 每个 profile 的 manifest（package.json）先备份为 `package.json.rescue-<unix>`，
-/// 再清空 dependencies——dsh 启动时 profile 无依赖可解析即以纯核心形态启动。
-/// 第三方插件恢复 = 把备份文件改名回 package.json（后缀约定见守护文案）。
-/// 首次救援前已存在的备份不覆盖（保留最早原件，反复救援不丢原始清单）。
-pub fn disable_third_party_plugins(app: &tauri::AppHandle) -> Result<String, String> {
+/// 救援：禁用第三方插件（零依赖自愈，对照官方 desktop 的 fatal-recovery「禁用全部插件」）。
+///
+/// ⚠ 2026-11-24 修正（v0.1.87 的实现无效）：dsh 决定**加载哪些插件**靠 profile
+/// 清单里的 `dsh.profile.bundles` 有序列表，`dependencies` 只表示「装了哪些包」。
+/// 旧实现清空 `dependencies` 而 bundles 原样不动，重启后第三方插件照样全部加载。
+///
+/// 现在与官方一致，复用上游现成实现：
+/// 1. 调用方必须先停服务（本函数只做文件操作，不碰进程）；
+/// 2. 每个 profile 调 `dsh-app-boot` 的 `sanitizeProfile()`——把 `cordis.patch.yml`
+///    改名备份为 `.bak-<时间戳>`，再把 bundles 重写为**官方纯净 web 列表**；已安装
+///    的包与清单其它字段一律保留（上游注释原文："Installed packages and other
+///    manifest fields are preserved"）；
+/// 3. 恢复 = 把 `.bak-*` 改名回 `cordis.patch.yml`，并从备份清单还原 bundles；
+///    返回值里带上备份路径供提示用户。
+pub fn disable_third_party_plugins(_app: &tauri::AppHandle) -> Result<String, String> {
     let profiles = runtime::app_home().join("profiles");
     let entries = std::fs::read_dir(&profiles).map_err(|e| format!("读 profiles 目录失败: {e}"))?;
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    let mut touched: Vec<String> = Vec::new();
-    let mut skipped: Vec<String> = Vec::new();
+    let mut touched: Vec<(String, Option<String>)> = Vec::new();
     for entry in entries.flatten() {
-        let manifest = entry.path().join("package.json");
-        if !manifest.is_file() {
+        let dir = entry.path();
+        if !dir.join("package.json").is_file() {
             continue;
         }
         let name = entry.file_name().to_string_lossy().to_string();
-        let text = std::fs::read_to_string(&manifest)
-            .map_err(|e| format!("读 {} 失败: {e}", manifest.display()))?;
-        let mut value: serde_json::Value = serde_json::from_str(&text)
-            .map_err(|e| format!("解析 {} 失败: {e}", manifest.display()))?;
-        let deps_empty = value
-            .get("dependencies")
-            .and_then(|d| d.as_object())
-            .map(|m| m.is_empty())
-            .unwrap_or(false);
-        if deps_empty {
-            skipped.push(name.clone());
-            continue;
-        }
-        let backup = manifest.with_file_name(format!("package.json.rescue-{now}"));
-        if !backup.exists() {
-            std::fs::copy(&manifest, &backup)
-                .map_err(|e| format!("备份 {} 失败: {e}", manifest.display()))?;
-        }
-        if let Some(obj) = value.as_object_mut() {
-            obj.insert("dependencies".into(), serde_json::json!({}));
-        }
-        let cleared = serde_json::to_string_pretty(&value)
-            .map_err(|e| format!("序列化 {} 失败: {e}", manifest.display()))?;
-        std::fs::write(&manifest, cleared)
-            .map_err(|e| format!("写 {} 失败: {e}", manifest.display()))?;
-        touched.push(name);
+        let backup = sanitize_profile(&dir)?;
+        touched.push((name, backup));
     }
     if let Some(mut log) = runtime::open_log_append() {
         use std::io::Write;
-        let _ = writeln!(log, "[救援] 禁用第三方插件: 清空 {} 个 profile 清单依赖（备份 *.rescue-{now}，未动: {}）",
-            touched.len(), skipped.join(","));
+        let _ = writeln!(
+            log,
+            "[救援] 禁用第三方插件（bundles 重置为官方纯净集，patch 改名备份）: {}",
+            touched
+                .iter()
+                .map(|(n, b)| format!("{n}{}", b.as_deref().map(|p| format!("→{p}")).unwrap_or_default()))
+                .collect::<Vec<_>>()
+                .join(",")
+        );
     }
     if touched.is_empty() {
-        Ok("未发现第三方插件依赖，直接重启".into())
-    } else {
-        Ok(format!(
-            "已禁用 {} 个 profile 的第三方插件（原清单备份为 package.json.rescue-{now}，恢复 = 改名回 package.json）",
-            touched.len()
-        ))
+        return Ok("未发现 profile，直接重启".into());
     }
+    let restorable: Vec<&str> = touched.iter().filter_map(|(_, b)| b.as_deref()).collect();
+    Ok(if restorable.is_empty() {
+        format!("已把 {} 个 profile 的插件集重置为官方纯净列表（原本无 patch 文件）", touched.len())
+    } else {
+        format!(
+            "已把 {} 个 profile 的插件集重置为官方纯净列表（原 patch 备份为 {}，恢复 = 改名回 cordis.patch.yml）",
+            touched.len(),
+            restorable.join("、")
+        )
+    })
+}
+
+/// 对单个 profile 执行上游 `sanitizeProfile`（调用方须已停服务）。
+/// 用便携 node 跑一段内联 ESM：dsh-app-boot 在运行时安装树里，ESM 导入不走
+/// NODE_PATH，所以按绝对路径转 file URL 再动态 import。
+/// 官方纯净 web profile 的 bundle 集（dsh-official-bundles 的 PROFILE_TEMPLATES.web）。
+/// 提为常量便于单测断言「救援后只剩这两个」。
+pub(crate) const PURE_WEB_BUNDLES: [&str; 2] = ["@deepseek-ai/dsh-base", "@deepseek-ai/dsh-web-app"];
+
+/// 构造救援脚本（纯函数便于单测）：动态 import 上游 dsh-app-boot，调 sanitizeProfile，
+/// 结果（含异常）统一以末行 JSON 吐到 stdout。
+fn sanitize_script(boot_index: &str, profile_dir: &str) -> String {
+    let bundles = PURE_WEB_BUNDLES
+        .iter()
+        .map(|b| format!("{b:?}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "const {{ pathToFileURL }} = await import('node:url');\n\
+         try {{\n\
+           const boot = await import(pathToFileURL({boot_index:?}).href);\n\
+           const backup = boot.sanitizeProfile('dsh', {profile_dir:?}, [{bundles}]);\n\
+           console.log(JSON.stringify({{ ok: true, backup: backup ?? null }}));\n\
+         }} catch (e) {{\n\
+           console.log(JSON.stringify({{ ok: false, error: String((e && e.message) || e) }}));\n\
+         }}"
+    )
+}
+
+/// 解析救援脚本的末行 JSON（纯函数便于单测）：Ok(Some(backup)) / Ok(None) / Err。
+fn parse_sanitize_result(stdout: &str, stderr: &str) -> Result<Option<String>, String> {
+    let last = stdout.lines().filter(|l| !l.trim().is_empty()).last().unwrap_or("");
+    let parsed: serde_json::Value = serde_json::from_str(last.trim()).map_err(|e| {
+        let stderr_head: Vec<&str> = stderr.lines().take(3).collect();
+        format!("救援脚本输出无法解析（{e}）：{}", stderr_head.join(" | "))
+    })?;
+    if parsed.get("ok").and_then(|v| v.as_bool()) != Some(true) {
+        return Err(format!(
+            "上游 sanitizeProfile 失败: {}",
+            parsed.get("error").and_then(|v| v.as_str()).unwrap_or("未知错误")
+        ));
+    }
+    Ok(parsed.get("backup").and_then(|v| v.as_str()).map(str::to_string))
+}
+
+fn sanitize_profile(profile_dir: &std::path::Path) -> Result<Option<String>, String> {
+    let node = runtime::node_exe();
+    if !node.is_file() {
+        return Err("应用自带 Node 未就绪，无法执行插件救援".into());
+    }
+    let boot_index = runtime::runtime_root()
+        .join("node")
+        .join(if cfg!(windows) { "node_modules" } else { "lib/node_modules" })
+        .join("@deepseek-ai")
+        .join("dsh")
+        .join("node_modules")
+        .join("@deepseek-ai")
+        .join("dsh-app-boot")
+        .join("lib")
+        .join("index.js");
+    if !boot_index.is_file() {
+        return Err(format!("找不到 dsh-app-boot（{}），无法执行插件救援", boot_index.display()));
+    }
+    let profile = profile_dir.display().to_string();
+    let boot = boot_index.display().to_string();
+    let script = sanitize_script(&boot, &profile);
+    let mut cmd = std::process::Command::new(&node);
+    cmd.arg("--input-type=module").arg("-e").arg(script);
+    runtime::configure_command(&mut cmd)?;
+    runtime::no_window(&mut cmd);
+    let out = cmd.output().map_err(|e| format!("启动救援脚本失败: {e}"))?;
+    parse_sanitize_result(
+        &String::from_utf8_lossy(&out.stdout),
+        &String::from_utf8_lossy(&out.stderr),
+    )
 }
 
 /// 升级检查与安装（不含服务重启）：只升级应用自有运行时；缺失时先装基线。
@@ -1599,7 +1667,7 @@ pub fn install_digital_twin_suite(app: &tauri::AppHandle, channel: SuiteChannel)
             .map(|d| d.as_secs())
             .unwrap_or(0)
     );
-    if let Err(e) = std::fs::write(&marker, payload) {
+    if let Err(e) = runtime::write_atomic(&marker, payload.as_bytes()) {
         if let Some(mut log) = crate::runtime::open_log_append() {
             use std::io::Write;
             let _ = writeln!(log, "[数字分身] 写 installed-suite.json 失败: {e}");
@@ -2238,6 +2306,47 @@ fn ensure_pnpm_available() -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /* ── 插件救援：脚本编排与结果解析（纯函数；进程内不碰真 profile） ── */
+
+    /// 救援脚本必须把**纯净 bundle 集**传进去、profile 路径按 JSON 转义（Windows 反斜杠
+    /// 若直接内联会破坏 JS 字符串），并把结果打成末行 JSON。
+    #[test]
+    fn sanitize_script_embeds_pure_bundles_and_escapes_paths() {
+        let script = sanitize_script(
+            r"C:\rt\node_modules\@deepseek-ai\dsh-app-boot\lib\index.js",
+            r"C:\rt\home\profiles\web",
+        );
+        // 纯净集：只有 dsh-base + dsh-web-app（第三方一个都不许留在列表里）
+        for b in PURE_WEB_BUNDLES {
+            assert!(script.contains(b), "脚本缺少纯净 bundle {b}: {script}");
+        }
+        assert_eq!(PURE_WEB_BUNDLES.len(), 2);
+        // Windows 路径以 JSON 字符串字面量内联：反斜杠必须是转义后的双反斜杠
+        assert!(script.contains(r"C:\\rt\\home\\profiles\\web"), "profile 路径未按 JSON 转义");
+        // 调的是上游函数名与签名
+        assert!(script.contains("sanitizeProfile('dsh'"), "未调用上游 sanitizeProfile");
+        assert!(script.contains("pathToFileURL"), "未按 file URL 动态导入（ESM 不走 NODE_PATH）");
+    }
+
+    /// 结果解析：成功带/不带备份、上游报错、非 JSON 输出三种形态。
+    #[test]
+    fn parse_sanitize_result_handles_all_outcomes() {
+        assert_eq!(
+            parse_sanitize_result("{\"ok\":true,\"backup\":\"/p/cordis.patch.yml.bak-1\"}", "").unwrap(),
+            Some("/p/cordis.patch.yml.bak-1".to_string())
+        );
+        assert_eq!(parse_sanitize_result("{\"ok\":true,\"backup\":null}", "").unwrap(), None);
+        // 上游异常被转成 ok:false，壳侧必须报错且带上原文
+        let err = parse_sanitize_result("{\"ok\":false,\"error\":\"boom\"}", "").unwrap_err();
+        assert!(err.contains("boom"), "错误信息丢了上游原因: {err}");
+        // stdout 里可能有杂行：只认最后一行（脚本总能吐一行结果）
+        let noisy = "warn: something\n{\"ok\":true,\"backup\":null}";
+        assert_eq!(parse_sanitize_result(noisy, "").unwrap(), None);
+        // 完全不是 JSON（node 启动失败等）：错误里带上 stderr 前几行
+        let err = parse_sanitize_result("", "SyntaxError: bad\nsecond line").unwrap_err();
+        assert!(err.contains("SyntaxError"), "错误信息丢了 stderr: {err}");
+    }
 
     /// 需显式提供只读 Node 发行版目录；全部安装与缓存写入 target/test-data。
     #[cfg(windows)]

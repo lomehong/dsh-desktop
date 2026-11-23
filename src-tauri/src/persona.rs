@@ -168,7 +168,8 @@ fn write_utf8(path: &PathBuf, content: &str) -> Result<(), String> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).map_err(|e| format!("创建目录失败 {}: {e}", dir.display()))?;
     }
-    std::fs::write(path, content).map_err(|e| format!("写入 {} 失败: {e}", path.display()))
+    runtime::write_atomic(path, content.as_bytes())
+        .map_err(|e| format!("写入 {} 失败: {e}", path.display()))
 }
 
 /// 保存向导结果并落完成标记。

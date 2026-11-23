@@ -149,11 +149,12 @@ pub fn load() -> Option<WindowState> {
     serde_json::from_str(&text).ok()
 }
 
-/// 把窗口状态落盘。覆盖式写入；目录创建由 runtime_root 负责（首次落盘前已存在）。
+/// 把窗口状态落盘。覆盖式写入（原子：tmp+rename，退出路径被强杀也不留半截文件）；
+/// 目录创建由 runtime_root 负责（首次落盘前已存在）。
 /// 失败静默：托盘隐藏与退出路径都不能因状态文件 IO 失败而崩溃。
 pub fn save(state: &WindowState) {
     if let Ok(text) = serde_json::to_string_pretty(state) {
-        let _ = std::fs::write(state_path(), text);
+        let _ = crate::runtime::write_atomic(&state_path(), text.as_bytes());
     }
 }
 
