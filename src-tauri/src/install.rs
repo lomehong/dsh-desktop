@@ -19,24 +19,27 @@ use tauri::Manager;
 /// 解析成 alpha.2，缺 watchUserPatches 导出 → SyntaxError 启动即崩）。基线跟进
 /// 最新版 = 主子版本一致。根治需上游 exact 钉版或全局锁文件。
 ///
-/// 当前基线 0.2.3-alpha.2（2026-11-22 npm 逐包实测核查，跨次版本线 0.2.2→0.2.3）：
-/// 发布完整性 85/85 精确钉版子依赖全部在 registry（93 总依赖/85 钉版，vs rc.5 的
-/// 91/83：+dsh-cua-mcp、+dsh-timeline、+dsh-session-persistence-sqlite、
-/// -dsh-personalized-recommendations；alpha.1 与 alpha.2 结构一致，上游当日两连发，
-/// alpha tag 指向 alpha.2——基线铁律跟最新）。集成面八项双重复核全存活：产物级
-/// npm pack grep（--no-open/remote.mux/titlebar/renderSlot/plugin --profile/
-/// cookie 结构等价）+ 源码级 GitHub clone（tag 只到 alpha.1，依赖结构与 alpha.2
-/// 一致）专查**URL 打印跨线重构**：0.2.3 起 web-app 改为 `webserver/entry-url`
-/// 事件收集多入口按 `label: url` 逐行打印，经 authentication-token 监听源码实证
-/// 输出格式不变——`entries.push({ label: 'dsh web', url:
-/// auth.authenticatedUrl(baseUrl) })`，authenticatedUrl = origin + `?token=`，
-/// 壳 parse_web_url 兼容；新增的 `dsh web: listening on ...` 警告行首词非
-/// 127.0.0.1 会被解析器安全跳过。keep-alive 补丁锚点 `this.server.listen(
-/// this.config.port` 在 dsh-host-webserver lib/index.js line 620 唯一命中
-/// （rc.5 的 546 → 620，行号移动但计数判定不受影响）——65s 补丁直接套用。
+/// 当前基线 0.2.3-alpha.3（2026-11-28 npm 逐包实测核查）：
+/// 发布完整性 88/88 精确钉版子依赖全部在 registry（96 总依赖/88 钉版，vs alpha.2 的
+/// 93/85：+dsh-read-aloud-bundle、+dsh-client-ui-connectors、+dsh-office-frame-
+/// forwarding-bundle，零移除；90 个钉版子包精确 bump 到 alpha.3，vendor caret 同线
+/// 跟进 cordis ~4.2.0-alpha.2 / schemastery ~3.20.0-alpha.2 / cordis-plugin-* alpha.2）。
+/// 集成面八项全存活（产物级全树安装 640 包逐项 grep）：--no-open（web-app lib）/
+/// remote.mux（api-gateway）/windows-titlebar 与 renderSlot（client-ui 包）/
+/// plugin --profile（dsh bin chunk:47）/Set-Cookie（host-webserver）/URL 打印
+/// `${entry.label}: ${entry.url}`（web-app lib/index.js:181，0.2.3 的 entry-url
+/// 事件跨线重构后输出格式不变，壳 parse_web_url 兼容）/keep-alive 锚点
+/// `this.server.listen(` + `this.config.port` 在 dsh-host-webserver lib/index.js
+/// line 620 唯一命中（与 alpha.2 同位）——65s 补丁直接套用。
+/// dsh-app-boot `sanitizeProfile(binName, profileDir, bundles)` 签名未变且在导出表
+/// （lib/index.js:9841/12417）——禁插件救援直接套用。
+/// cua-windows：npm 包仍缺原生 exe（38 文件无 native/bin，alpha.1→alpha.3 三连实证），
+/// 但 JS 客户端已补 hello 握手 + runtimeKey 回验（cua-windows lib/index.js:564/584，
+/// 2026-11-22 记录的客户端协议缺陷已修复）——壳现跨 npm 重装保留自建 exe（stash/
+/// restore），Computer Use 有望首次端到端可用。
 /// 已知遗留持续：subagent-control `./list-agents` 导出未核（随 rc.2 遗留延续）。
 /// 真机冒烟待补，跑通前不宣称已验证。
-pub const DSH_VERSION: &str = "0.2.3-alpha.2";
+pub const DSH_VERSION: &str = "0.2.3-alpha.3";
 /// 便携 Node 版本（dsh rc.x 的 zstd 要求需要 Node 24）。
 const NODE_VERSION: &str = "24.19.0";
 /// 固定自带包管理器版本，禁止因系统 pnpm 或 latest 跨大版本而改变安装行为。
@@ -95,7 +98,12 @@ const PNPM_VERSION: &str = "10.34.5";
 /// （93/85 结构，+dsh-cua-mcp/+dsh-timeline/+dsh-session-persistence-sqlite/
 /// -dsh-personalized-recommendations）；集成面八项全存活（八项明细见
 /// DSH_VERSION 注释）；keep-alive 锚点唯一命中（line 546→620，计数判定）。
-/// 升到 (0,2,3) 放行 0.2.3 系列。npm 超出此版本时仍拒绝升级并引导先升级应用
+/// 0.2.3-alpha.3 复查（2026-11-28，npm 全树安装 640 包逐项 grep）：88/88 钉版
+/// 子依赖发布完整（96/88，+read-aloud/+client-ui-connectors/+office-frame-
+/// forwarding，零移除）；集成面八项全存活且锚点 line 620 与 alpha.2 同位；
+/// sanitizeProfile 签名未变；cua npm 包仍缺原生 exe 但客户端已补 hello 握手
+/// （壳侧 stash/restore 跨升级保留自建 exe 同步落地）。DSH_MAX_ADAPTED 维持
+/// (0,2,3)。npm 超出此版本时仍拒绝升级并引导先升级应用
 /// 本体；DSH_DESKTOP_DSH_VERSION 显式指定视为知情强制。
 const DSH_MAX_ADAPTED: (u64, u64, u64) = (0, 2, 3);
 
@@ -456,6 +464,7 @@ fn npm_install_dsh_once(version: &str, registry: &str) -> Result<(), String> {
         use std::io::Write;
         let _ = writeln!(f, "[npm] registry={registry} target={version}");
     }
+    stash_cua_native();
     let mut c = npm_command()?;
     c.args(["install", "-g", &format!("@deepseek-ai/dsh@{version}"), "--prefix"])
         .arg(&node_dir)
@@ -486,6 +495,7 @@ fn npm_install_dsh_once(version: &str, registry: &str) -> Result<(), String> {
                     }
                 }
             }
+            restore_cua_native();
             Ok(())
         }
         Ok(o) => {
@@ -1023,6 +1033,7 @@ fn install_runtime_inner(app: &tauri::AppHandle) -> Result<(), String> {
         // 真因）。失败不再静默：带出原始错误与可操作指引。
         // ⚠ 目录本来就不存在（全新首装，CI 冒烟 scratch LOCALAPPDATA 实证
         // v0.1.82 连红）是正常路径，必须放行——只拦「存在但删不掉」。
+        stash_cua_native(); // node 目录即将整树重建，先缓存自建 cua 原生 exe
         if node_dir.exists() {
             if let Err(e) = std::fs::remove_dir_all(&node_dir) {
                 return Err(format!(
@@ -1073,6 +1084,105 @@ fn install_runtime_inner(app: &tauri::AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+/// Windows Computer Use 原生后端（自建 exe）跨 npm 重装保留：
+/// 上游 npm 包声明 native/bin 但发布流水线从未跑 dotnet 构建（alpha.1→alpha.3 逐包
+/// 实证，38 文件无 exe），本机 dotnet publish 自建的 dsh-cua-windows.exe 手工放回
+/// 包目录后 Computer Use 才能起后端。npm install 每次整树换血都会把它抹掉（真实
+/// 痛点：2026-11-22 手工归位过一次，重装运行时又得重拷）——npm 装前 stash 进
+/// runtime cache、装后原位回填。alpha.3 上游 JS 客户端已补 hello 握手 + runtimeKey
+/// 回验（cua-windows lib/index.js:564/584，2026-11-22 记录的客户端协议缺陷已修复），
+/// exe 回填后 Computer Use 有望首次端到端可用。cache 放 runtime_root()/cache/cua-native/
+/// （node 目录整树删除也动不到）。
+fn cua_native_pkg_dirs() -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    if let Some(dsh_dir) = runtime::dsh_package_dir() {
+        // npm 嵌套布局：dsh 包自带 node_modules（用户 alpha.2 树实证形态）
+        out.push(dsh_dir.join("node_modules").join("@deepseek-ai").join("dsh-cua-windows"));
+        // npm 平铺布局：@deepseek-ai scope 直下（alpha.3 全树安装实证形态）
+        if let Some(scope) = dsh_dir.parent() {
+            out.push(scope.join("dsh-cua-windows"));
+        }
+    }
+    out
+}
+
+fn stash_cua_native() {
+    if !cfg!(windows) {
+        return;
+    }
+    use std::io::Write;
+    let cache = runtime::runtime_root()
+        .join("cache")
+        .join("cua-native")
+        .join("dsh-cua-windows.exe");
+    for pkg in cua_native_pkg_dirs() {
+        let exe = pkg.join("native").join("bin").join("win-x64").join("dsh-cua-windows.exe");
+        if !exe.is_file() {
+            continue;
+        }
+        if let Some(dir) = cache.parent() {
+            if let Err(e) = std::fs::create_dir_all(dir) {
+                if let Some(mut log) = runtime::open_log_append() {
+                    let _ = writeln!(log, "[warn] cua 原生 exe 缓存目录创建失败（升级后需手工重拷）: {e}");
+                }
+                return;
+            }
+        }
+        match std::fs::copy(&exe, &cache) {
+            Ok(_) => {
+                if let Some(mut log) = runtime::open_log_append() {
+                    let _ = writeln!(log, "[cua] 自建原生 exe 已缓存，npm 重装后自动回填: {}", exe.display());
+                }
+            }
+            Err(e) => {
+                if let Some(mut log) = runtime::open_log_append() {
+                    let _ = writeln!(log, "[warn] cua 原生 exe 缓存失败（升级后需手工重拷）: {e}");
+                }
+            }
+        }
+        return;
+    }
+}
+
+fn restore_cua_native() {
+    if !cfg!(windows) {
+        return;
+    }
+    use std::io::Write;
+    let cache = runtime::runtime_root()
+        .join("cache")
+        .join("cua-native")
+        .join("dsh-cua-windows.exe");
+    if !cache.is_file() {
+        return;
+    }
+    for pkg in cua_native_pkg_dirs() {
+        // 只回填真实包目录（npm 装好的 JS 客户端在哪儿，exe 就跟到哪儿）；
+        // 包不在树里说明上游改了依赖结构，不凭空造目录
+        if !pkg.join("package.json").is_file() {
+            continue;
+        }
+        let exe = pkg.join("native").join("bin").join("win-x64").join("dsh-cua-windows.exe");
+        if exe.is_file() {
+            return; // 上游已带（等 rc 修复）或已在位，不动
+        }
+        let Some(dir) = exe.parent() else { return };
+        match std::fs::create_dir_all(dir).and_then(|_| std::fs::copy(&cache, &exe)) {
+            Ok(_) => {
+                if let Some(mut log) = runtime::open_log_append() {
+                    let _ = writeln!(log, "[cua] 自建原生 exe 已回填 {}（跨升级保留）", exe.display());
+                }
+            }
+            Err(e) => {
+                if let Some(mut log) = runtime::open_log_append() {
+                    let _ = writeln!(log, "[warn] cua 原生 exe 回填失败（Computer Use 将不可用，可手工重拷）: {e}");
+                }
+            }
+        }
+        return;
+    }
+}
+
 /// Windows Computer Use 原生后端自检（非阻断）：上游 0.2.3-alpha 的
 /// @deepseek-ai/dsh-cua-windows npm 包缺 `native/bin/win-x64/dsh-cua-windows.exe`
 /// （files 清单声明了 native/bin 但发布流水线未跑 dotnet 构建——2026-11-22 实机
@@ -1095,7 +1205,7 @@ fn check_cua_native_binary(app: &tauri::AppHandle) {
     if nested.is_file() || hoisted.is_file() {
         return;
     }
-    let guidance = "Windows Computer Use 暂不可用：上游 0.2.3-alpha npm 包缺原生后端（已确认非本机问题）。等上游 rc 修复后升级运行时即恢复；手工解法见运行时日志";
+    let guidance = "Windows Computer Use 暂不可用：上游 npm 包缺原生后端（已确认非本机问题）。应用已在升级运行时前自动缓存、装后自动回填自建的原生后端；若本机从未自建过，手工解法见运行时日志";
     if let Some(mut log) = runtime::open_log_append() {
         use std::io::Write;
         let _ = writeln!(log, "[warn] dsh-cua-windows 原生后端缺失（上游 0.2.3-alpha npm 发布未携带 native/bin）：\n  已查路径：{}\n  已查路径：{}\n  影响：Windows Computer Use 后端 spawn 即 ENOENT（UI 报 Service cuaAccess is unavailable）。\n  手工解法：装 .NET 10 SDK 后克隆上游 monorepo，在 packages/experimental/cua-windows 执行 dotnet publish native/entry/CuaWindows.csproj -c Release -r win-x64 --self-contained true，产物拷入上述 native/bin/win-x64/（2026-11-22 已按此法补齐过一次）。",
@@ -2891,6 +3001,7 @@ npm error notarget No matching version found for @d/four@4.0.0.\n\
         assert!(version_triple("0.2.2-rc.5").unwrap() <= DSH_MAX_ADAPTED);
         assert!(version_triple("0.2.3-alpha.1").unwrap() <= DSH_MAX_ADAPTED);
         assert!(version_triple("0.2.3-alpha.2").unwrap() <= DSH_MAX_ADAPTED);
+        assert!(version_triple("0.2.3-alpha.3").unwrap() <= DSH_MAX_ADAPTED);
         assert!(version_triple("0.2.3").unwrap() <= DSH_MAX_ADAPTED);
         // 0.1.x 全系列 ≤ (0,2,3)：放行（历史基线都在适配线内）
         assert!(version_triple("0.1.7-rc.2").unwrap() <= DSH_MAX_ADAPTED);
